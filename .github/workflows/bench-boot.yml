@@ -1,0 +1,44 @@
+name: Boot benchmark
+
+# Manual only: it downloads ~150 MB of Firecracker artifacts and measures
+# timing on a nested VM, so it is a benchmark, not a per-PR test.
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Boots to measure
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint the benchmark script
+        run: shellcheck scripts/bench-boot.sh
+      - name: Grant the runner KVM group access
+        run: |
+          sudo groupadd -f kvm
+          sudo usermod -aG kvm "$(id -un)"
+          sudo chgrp kvm /dev/kvm
+          sudo chmod 0660 /dev/kvm
+      - name: Install rootfs tools
+        run: command -v unsquashfs || { sudo apt-get update && sudo apt-get install -y squashfs-tools; }
+      - name: Run the boot benchmark
+        env:
+          RUNS: ${{ inputs.runs || '10' }}
+        shell: bash
+        run: |
+          [[ $RUNS =~ ^[1-9][0-9]*$ ]] || { echo "runs must be a positive integer" >&2; exit 1; }
+          mkdir -p bench
+          sg kvm -c "LOG_DIR=bench/logs scripts/bench-boot.sh $RUNS" | tee bench/results.txt
+          { echo '```text'; cat bench/results.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-boot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: bench/
