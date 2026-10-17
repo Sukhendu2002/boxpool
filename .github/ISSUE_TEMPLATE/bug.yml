@@ -1,0 +1,48 @@
+name: Bug
+description: Something does not work as documented
+title: "fix(<scope>): <summary>"
+labels: ["type: bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What is wrong, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual
+      value: |
+        Expected:
+
+        Actual:
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Output of `boxpool version` and `boxpool doctor`, OS, CPU arch, and whether this is a VM.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing
+      description: The regression test that should cover this (unit or integration), and how to verify the fix manually.
+  - type: textarea
+    id: deps
+    attributes:
+      label: Dependencies
+      value: None
