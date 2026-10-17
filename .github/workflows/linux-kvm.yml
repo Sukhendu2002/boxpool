@@ -1,0 +1,40 @@
+name: Linux KVM
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  doctor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Inspect Linux host and KVM device
+        run: |
+          uname -srmo
+          id
+          ls -l /dev/kvm
+          test -c /dev/kvm
+      - name: Grant the runner KVM group access
+        run: |
+          sudo groupadd -f kvm
+          sudo usermod -aG kvm "$(id -un)"
+          sudo chgrp kvm /dev/kvm
+          sudo chmod 0660 /dev/kvm
+      - name: Build Boxpool
+        run: go build -o bin/boxpool ./cmd/boxpool
+      - name: Require Firecracker preflight as the runner user
+        shell: bash
+        run: |
+          sg kvm -c 'id && ./bin/boxpool doctor' | tee "$RUNNER_TEMP/boxpool-doctor.log"
+          grep -Eq '✓ /dev/kvm[[:space:]]+present and accessible' "$RUNNER_TEMP/boxpool-doctor.log"
+          grep -Fxq 'Backend: firecracker' "$RUNNER_TEMP/boxpool-doctor.log"
