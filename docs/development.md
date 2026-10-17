@@ -179,6 +179,33 @@ Replace the Mac path above. The result must include `✓ /dev/kvm` and
 `Backend: firecracker`. A successful exit code alone is insufficient: doctor
 also exits successfully when it selects `docker (weaker isolation)`.
 
+## Linux testing for each PR
+
+The existing `ci` workflow runs vet, unit tests, and builds on Linux and
+macOS. The [Linux KVM workflow](../.github/workflows/linux-kvm.yml) also runs
+on every PR and push to `main`, using an Ubuntu 24.04 x86_64 hosted runner.
+It checks the real `/dev/kvm` device, grants the runner KVM group access,
+and uses `sg kvm` to apply that group in a new shell without running doctor
+as root. It requires both accessible KVM and `Backend: firecracker`; missing
+KVM or a Docker fallback fails the job instead of silently skipping the test.
+
+Standard hosted runners are [free for public repositories](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+GitHub documents [Linux KVM acceleration](https://github.blog/changelog/2024-04-02-github-actions-hardware-accelerated-android-virtualization-now-available/),
+but general nested VMs are [experimental](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners).
+If KVM disappears from a runner, inspect the failed job and use option A, B,
+or C for KVM verification. A green unit-test job alone does not replace it.
+
+For upcoming Linux backend PRs, add repeatable integration tests to CI as
+the features land: actual VM boot/stop, guest commands, networking, and
+cleanup. Today's doctor job only verifies preflight; it does not cover those
+future behaviors, arm64 KVM, or native-hardware boot timings. Use a persistent
+SSH-accessible Linux machine for interactive debugging, multi-node tests,
+and performance measurements. A repaired laptop can serve that role without
+needing its screen once SSH is configured.
+
+Once this workflow is on `main`, it can also be [run manually](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+from **Actions → Linux KVM → Run workflow**, selecting the branch to test.
+
 ## Troubleshooting doctor
 
 - `/dev/kvm` — `missing: enable virtualization in BIOS or load the kvm module`:
