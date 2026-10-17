@@ -42,7 +42,16 @@ jobs:
           [[ $RUNS =~ ^[1-9][0-9]*$ ]] || { echo "runs must be a positive integer" >&2; exit 1; }
           mkdir -p bench
           sg kvm -c "LOG_DIR=bench/logs scripts/bench-boot.sh $RUNS" | tee bench/results.txt
-          { echo '```text'; cat bench/results.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '### Guide boot args'; echo '```text'; cat bench/results.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      # Firecracker's own boot-time test skips the i8042 keyboard probe;
+      # measure what that is worth with the same artifacts.
+      - name: Run the boot benchmark without the i8042 probe
+        env:
+          RUNS: ${{ inputs.runs || '10' }}
+        shell: bash
+        run: |
+          sg kvm -c "EXTRA_BOOT_ARGS='i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd' LOG_DIR=bench/logs-i8042 scripts/bench-boot.sh $RUNS" | tee bench/results-i8042.txt
+          { echo '### Guide boot args + i8042 off'; echo '```text'; cat bench/results-i8042.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

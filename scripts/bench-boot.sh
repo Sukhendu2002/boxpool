@@ -14,7 +14,8 @@
 # unsquashfs (squashfs-tools), mkfs.ext4 (e2fsprogs), and sudo once to turn
 # the rootfs squashfs into ext4 as the getting-started guide does. Downloads
 # are cached in $CACHE_DIR. Set LOG_DIR to keep each run's serial console and
-# Firecracker log. See docs/benchmarks/m1-boot.md.
+# Firecracker log, and EXTRA_BOOT_ARGS to append guest kernel arguments.
+# See docs/benchmarks/m1-boot.md.
 set -euo pipefail
 export LC_ALL=C # EPOCHREALTIME uses the locale's decimal point
 
@@ -34,7 +35,7 @@ VCPUS=2
 MEM_MIB=1024
 # The guide's boot args, plus the rootfs's boot-timer init, which signals
 # Firecracker and then execs /sbin/init (systemd).
-BOOT_ARGS="console=ttyS0 reboot=k panic=1 init=/usr/local/bin/init"
+BOOT_ARGS="console=ttyS0 reboot=k panic=1 init=/usr/local/bin/init${EXTRA_BOOT_ARGS:+ $EXTRA_BOOT_ARGS}"
 PROMPT='root@ubuntu-fc-uvm:'
 RUN_TIMEOUT_S=60
 
