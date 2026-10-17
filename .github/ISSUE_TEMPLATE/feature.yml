@@ -1,0 +1,59 @@
+name: Feature or task
+description: New functionality, a chore or a spike
+title: "feat(<scope>): <summary>"
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What to build, in one or two sentences.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The user need or risk this addresses. Link the PRD requirement (e.g. F4) if there is one.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      value: |
+        In scope:
+        -
+
+        Out of scope:
+        -
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      value: |
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing
+      value: |
+        Unit:
+        -
+
+        Integration:
+        -
+
+        Manual:
+        1.
+    validations:
+      required: true
+  - type: textarea
+    id: deps
+    attributes:
+      label: Dependencies
+      description: "One `Blocked by #n` per line, or None. Also set them as GitHub issue dependencies."
+      value: None
