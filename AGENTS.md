@@ -61,7 +61,7 @@ Labels:
 | Group | Labels | Meaning |
 | --- | --- | --- |
 | Priority | `P0`, `P1`, `P2` | Must ship in v1 / should ship in v1 / later |
-| Type | `type: feature`, `type: bug`, `type: chore`, `type: spike`, `type: docs` | What kind of work |
+| Type | `type: feature`, `type: bug`, `type: chore`, `type: spike`, `type: docs`, `type: gate`, `type: epic` | What kind of work. A gate is a milestone's exit check; an epic groups a milestone's issues as sub-issues |
 | Area | `area: *` | Which part of the system |
 
-Milestones `M1`–`M7` follow the PRD; each ends with a gate issue that must pass before the next milestone starts. Work order: milestone, then priority, then unblocked issues first.
+Milestones `M1`–`M7` follow the PRD; each ends with a gate issue that must pass before the next milestone starts. Work order: open the current milestone's epic, then take the first sub-issue whose blockers are closed, P0 before P1. New issues go under their milestone's epic as a sub-issue.
