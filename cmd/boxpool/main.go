@@ -2,9 +2,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
+	"boxpool.run/boxpool/internal/client"
+	"boxpool.run/boxpool/internal/daemon"
 	"boxpool.run/boxpool/internal/preflight"
 )
 
@@ -16,6 +23,7 @@ Usage:
   boxpool <command> [arguments]
 
 Commands:
+  daemon    run the node daemon in the foreground
   doctor    check whether this machine can host sandboxes
   version   print the version
   up        start a pool on this machine (not implemented yet)
@@ -30,10 +38,15 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "daemon":
+		os.Exit(runDaemon())
 	case "doctor":
 		os.Exit(doctor())
 	case "version", "--version", "-v":
 		fmt.Println("boxpool", version)
+		if v := daemonVersion(); v != "" {
+			fmt.Println("daemon ", v)
+		}
 	case "up", "join", "sh", "ls":
 		fmt.Fprintf(os.Stderr, "boxpool %s: not implemented yet\n", os.Args[1])
 		os.Exit(1)
@@ -62,4 +75,37 @@ func doctor() int {
 		return 1
 	}
 	return 0
+}
+
+func runDaemon() int {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	dir, err := preflight.StateDir()
+	if err != nil {
+		slog.Error("could not find state directory", "err", err)
+		return 1
+	}
+	r := preflight.Run()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	info := daemon.Info{Version: version, OS: r.OS, Arch: r.Arch, StateDir: dir, Backend: r.Backend}
+	if err := daemon.Run(ctx, dir, info); err != nil {
+		slog.Error("daemon failed", "err", err)
+		return 1
+	}
+	return 0
+}
+
+// daemonVersion returns the running daemon's version, or "" when none answers.
+func daemonVersion() string {
+	dir, err := preflight.StateDir()
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	info, err := client.New(dir).Info(ctx)
+	if err != nil {
+		return ""
+	}
+	return info.Version
 }

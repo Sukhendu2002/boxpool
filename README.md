@@ -19,7 +19,21 @@ boxpool ls            # list nodes and sandboxes
 boxpool doctor        # check whether this machine can host sandboxes
 ```
 
-Only `boxpool doctor` and `boxpool version` work today.
+Only `boxpool doctor`, `boxpool daemon` and `boxpool version` work today.
+
+`boxpool daemon` runs the node daemon in the foreground. It creates the state
+directory (below), takes `daemon.lock` there so only one daemon runs per state
+directory, and serves a local HTTP API on `boxpool.sock` (mode 0660) until
+SIGINT or SIGTERM. It refuses a state directory that group or others can
+write to:
+
+```sh
+BOXPOOL_HOME=$(mktemp -d) ./bin/boxpool daemon &
+curl --unix-socket "$BOXPOOL_HOME/boxpool.sock" http://x/v1/health   # {"ok":true}
+curl --unix-socket "$BOXPOOL_HOME/boxpool.sock" http://x/v1/info
+```
+
+`boxpool version` also prints the daemon's version when one is running.
 
 ## Supported hosts (v1)
 

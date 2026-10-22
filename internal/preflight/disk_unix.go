@@ -6,23 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"syscall"
 )
 
 const minDiskBytes uint64 = 20_000_000_000
 
 func diskCheck() Check {
-	path := os.Getenv("BOXPOOL_HOME")
-	if path == "" {
-		path = "/var/lib/boxpool"
-		if runtime.GOOS == "darwin" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return Check{Name: "free disk", Required: true, Detail: "could not find home directory: " + err.Error()}
-			}
-			path = filepath.Join(home, "Library", "Application Support", "boxpool")
-		}
+	path, err := StateDir()
+	if err != nil {
+		return Check{Name: "free disk", Required: true, Detail: "could not find home directory: " + err.Error()}
 	}
 	return diskCheckAt(path)
 }
