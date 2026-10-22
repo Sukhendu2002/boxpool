@@ -26,10 +26,11 @@ requires Docker binfmt/QEMU support when the target differs from the engine.
 CI uses native runners for both architectures.
 
 Allow about 10 GiB free in the Docker engine's storage and 1 GiB in the
-output directory. The default is four compiler jobs, with `JOBS=1` through
-`JOBS=8` supported to bound memory use. Builds can take several minutes.
-Docker retains reusable layers; the script cleans only its own temporary
-output directory on success or failure. It never prunes Docker caches.
+output directory per retained build generation. The default is four compiler
+jobs, with `JOBS=1` through `JOBS=8` supported to bound memory use. Builds can take several minutes.
+Docker retains reusable layers; failed builds clean only their own incomplete
+output directory. Complete generations are retained as described below. The
+script never prunes Docker caches.
 
 ```sh
 IMAGE_VERSION=v0.1.0 JOBS=4 image/build.sh amd64
@@ -58,7 +59,32 @@ git rev-parse HEAD
 IMAGE_REVISION=<full-source-commit-sha> image/build.sh amd64
 ```
 
-Outputs in `dist/image/<arch>/` (override with `OUTPUT_DIR`):
+Outputs are selected by `dist/image/<arch>/current/` (override the parent
+with `OUTPUT_DIR`). Each build writes a unique hidden `.generation.*`
+directory on that filesystem and saves the exact OCI image there. Once all
+writes finish, a single atomic symlink rename selects the complete generation
+as `current`. A failed build or failed switch leaves the prior selection
+usable. Previous complete generations remain available, including candidates
+retained when a switch fails or is interrupted. Nothing is broadly pruned.
+A hard kill can leave an incomplete unselected directory; only `current`
+identifies a published set. This protects against build errors and process
+interruption, not filesystem corruption or power-loss durability.
+
+The script prints `artifacts=<absolute-generation-path>`. For several reads,
+pin that path or resolve `current` once with `cd .../current && pwd -P` to
+avoid mixing generations if another build switches `current`. Retained
+complete generations must not be modified while in use; decompress a copy
+of the rootfs outside the generation. To reclaim space, explicitly remove
+only a known unused generation after checking it is neither selected nor
+being built or read.
+
+Migration from the original flat output layout is non-destructive: existing
+files under `OUTPUT_DIR` are left untouched, and all new consumers must use
+`current` or the printed generation path. A real file/directory already named
+`current` is rejected with an actionable error; move that entry aside
+explicitly before building. New builds do not silently overwrite it.
+
+Each selected generation contains:
 
 - `vmlinux-amd64`: stripped uncompressed ELF, preferred for Firecracker.
 - `bzImage-amd64`: x86 Linux boot-protocol image for Intel `VZLinuxBootLoader`;
@@ -79,11 +105,11 @@ Outputs in `dist/image/<arch>/` (override with `OUTPUT_DIR`):
 The local OCI tag is `boxpool-image:<version>-<arch>`. Verify assets:
 
 ```sh
-cd dist/image/amd64
+cd dist/image/amd64/current
 sha256sum -c SHA256SUMS-amd64
 sha256sum -c oci-amd64.tar.sha256
-zstd -d rootfs-amd64.ext4.zst
-file vmlinux-amd64 bzImage-amd64 rootfs-amd64.ext4
+zstd -dc rootfs-amd64.ext4.zst > /tmp/boxpool-rootfs-amd64.ext4
+file vmlinux-amd64 bzImage-amd64 /tmp/boxpool-rootfs-amd64.ext4
 ```
 
 ## Pins and kernel compatibility
@@ -130,7 +156,9 @@ so no initial RAM disk is needed. The driver itself is outside this issue.
 
 The VM kernel runs `/sbin/init`: it mounts devtmpfs, proc, sysfs, writable
 tmpfs `/run` and `/tmp`, shared memory and a new devpts instance with
-`/dev/ptmx` linked to `/dev/pts/ptmx`. `/var/tmp` is writable on ext4. It
+`/dev/ptmx` linked to `/dev/pts/ptmx`. After mounting proc, it creates
+`/dev/fd -> /proc/self/fd` and `/dev/stdin`, `/dev/stdout`, `/dev/stderr`
+links to descriptors 0, 1, 2 there. `/var/tmp` is writable on ext4. It
 then **execs Debian tini as PID 1**, with the agent in its child process
 group listening on vsock port **1024**. Tini reaps adopted orphans and
 forwards signals to the process group. If the agent dies, tini exits;
@@ -156,7 +184,7 @@ On Linux with readable/writable `/dev/kvm`, Go 1.24+, Python 3, bash,
 curl, tar, coreutils, zstd and the built artifacts:
 
 ```sh
-image/smoke.sh dist/image/amd64 v0.1.0
+image/smoke.sh dist/image/amd64/current v0.1.0
 ```
 
 It checks asset hashes, fetches the **same pinned/checksummed Firecracker
@@ -164,8 +192,10 @@ v1.17.0** as [`bench-boot.sh`](../scripts/bench-boot.sh), decompresses a
 temporary disk, boots a 2-vCPU/256-MiB VM with PCI virtio and a vsock device
 (CID 3), then calls `/v1/version` through the host-side vsock UDS. It checks
 the exact protocol/agent/image version, PTY exec, proc TCP discovery,
-mounts, writable directories, metadata and PID 1 orphan reaping. Success
-prints `GET /v1/version: protocol=1 agent=v0.1.0` and the smoke result.
+mounts, writable directories, metadata and PID 1 orphan reaping. It also
+pipes input through `/dev/stdin` and `/dev/fd/0` and checks writes through
+`/dev/stdout` and `/dev/stderr` reach their respective redirected streams.
+Success prints `GET /v1/version: protocol=1 agent=v0.1.0` and the smoke result.
 Failure prints console/Firecracker tails. Boot/probe/shutdown are bounded;
 the VM and temporary disk are removed on exit, keeping downloaded caches.
 An arm64 host uses the same command with its arm64 artifact directory.

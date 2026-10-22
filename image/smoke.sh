@@ -9,7 +9,8 @@ die() { echo "image/smoke: $*" >&2; exit 1; }
 for tool in curl tar sha256sum zstd go timeout; do
     command -v "$tool" >/dev/null || die "missing $tool"
 done
-dir=$(cd "$1" && pwd)
+# Resolve current once so a concurrent build cannot mix generations mid-check.
+dir=$(cd "$1" && pwd -P)
 version=$2
 case $(uname -m) in
 x86_64)

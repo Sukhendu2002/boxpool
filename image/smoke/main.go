@@ -87,6 +87,12 @@ test -r /proc/net/tcp
 test -r /proc/net/tcp6
 test -c /dev/ptmx
 test -d /dev/pts
+test "$(printf stdin-ok | cat /dev/stdin)" = stdin-ok
+test "$(printf fd-ok | cat /dev/fd/0)" = fd-ok
+sh -ec 'printf stdout-ok > /dev/stdout; printf stderr-ok > /dev/stderr' > /tmp/image-smoke.stdout 2> /tmp/image-smoke.stderr
+test "$(cat /tmp/image-smoke.stdout)" = stdout-ok
+test "$(cat /tmp/image-smoke.stderr)" = stderr-ok
+rm /tmp/image-smoke.stdout /tmp/image-smoke.stderr
 test "$(cat /proc/1/comm)" = tini
 test "$(stat -c %a /tmp)" = 1777
 test "$(stat -c %a /var/tmp)" = 1777
@@ -111,6 +117,6 @@ echo image-smoke-ok
 	if _, err := c.Ports(ctx); err != nil {
 		return fmt.Errorf("guest /proc TCP discovery: %w", err)
 	}
-	fmt.Println("guest exec, PTY, mounts, metadata, writable directories, orphan reaping and port discovery: OK")
+	fmt.Println("guest exec, PTY, device links, mounts, metadata, writable directories, orphan reaping and port discovery: OK")
 	return nil
 }

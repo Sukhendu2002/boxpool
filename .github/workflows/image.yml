@@ -97,7 +97,7 @@ jobs:
         run: |
           # Expand exported variables in the child shell started by sg.
           # shellcheck disable=SC2016
-          sg kvm -c 'image/smoke.sh "$OUTPUT_DIR" "$IMAGE_VERSION"'
+          sg kvm -c 'image/smoke.sh "$OUTPUT_DIR/current" "$IMAGE_VERSION"'
       - name: Record artifact sizes and checksums
         env:
           ARCH: ${{ matrix.arch }}
@@ -105,7 +105,7 @@ jobs:
           OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
         shell: bash
         run: |
-          cd "$OUTPUT_DIR"
+          cd "$OUTPUT_DIR/current"
           sha256sum -c "SHA256SUMS-$ARCH"
           sha256sum -c "oci-$ARCH.tar.sha256"
           {
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: guest-image-${{ matrix.arch }}
-          path: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}/*
+          path: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}/current/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 7

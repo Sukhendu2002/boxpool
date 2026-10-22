@@ -25,11 +25,25 @@ docker buildx version >/dev/null || die 'Docker buildx is required'
 docker info >/dev/null 2>&1 || die 'cannot reach the Docker engine; select an accessible engine with DOCKER_HOST or DOCKER_CONTEXT'
 out=${OUTPUT_DIR:-$repo/dist/image/$arch}
 mkdir -p "$out"
-out=$(cd "$out" && pwd)
-# Stage outputs in a unique directory: failed builds never leave partial assets
-# under the final names, and cleanup touches only this invocation's temp path.
-work=$(mktemp -d "$out/.build.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+out=$(cd "$out" && pwd -P)
+[[ ! -e $out/current || -L $out/current ]] || die "$out/current must be absent or a symlink; move this existing entry aside explicitly"
+# Rename must replace the symlink itself, even when it points to a directory.
+# GNU and BSD mv spell this differently; both perform a same-filesystem rename.
+case $(uname -s) in
+    Linux) switch=(-Tf) ;;
+    Darwin) switch=(-fh) ;;
+    *) die 'artifact promotion requires Linux or macOS mv' ;;
+esac
+work=$(mktemp -d "$out/.generation.XXXXXX")
+pointer=$work.current
+keep=false
+cleanup() {
+    rm -f "$pointer"
+    if [[ $keep == false ]]; then rm -rf "$work"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 image=boxpool-image:$version-$arch
 args=(--platform "linux/$arch" --file "$repo/image/Dockerfile"
     --build-arg "IMAGE_VERSION=$version" --build-arg "IMAGE_REVISION=$revision"
@@ -43,6 +57,11 @@ if command -v sha256sum >/dev/null; then
 else
     (cd "$work" && shasum -a 256 "oci-$arch.tar" > "oci-$arch.tar.sha256")
 fi
-cp "$work/"* "$out/"
-printf 'image=%s\nversion=%s\nartifacts=%s\n' "$image" "$version" "$out"
-wc -c "$out/rootfs-$arch.ext4.zst"
+wc -c "$work/rootfs-$arch.ext4.zst"
+ln -s "${work##*/}" "$pointer"
+# Keep this complete generation before the switch: a signal immediately after
+# rename must never let EXIT remove the newly selected set. Old generations
+# and legacy flat outputs are retained too; only current selects final assets.
+keep=true
+mv "${switch[@]}" "$pointer" "$out/current" || die "cannot promote artifacts; prior output retained, complete candidate: $work"
+printf 'image=%s\nversion=%s\nartifacts=%s\n' "$image" "$version" "$work"

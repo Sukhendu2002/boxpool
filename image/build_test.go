@@ -1,11 +1,13 @@
 package image_test
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Copy just the script: the Linux development sync deliberately excludes .git.
@@ -25,8 +27,12 @@ func buildSource(t *testing.T) string {
 	return dir
 }
 
-func buildCommand(dir, version, jobs, revision string, args ...string) *exec.Cmd {
-	cmd := exec.Command("bash", append([]string{"image/build.sh"}, args...)...)
+func buildCommand(t *testing.T, dir, version, jobs, revision string, args ...string) *exec.Cmd {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, "bash", append([]string{"image/build.sh"}, args...)...)
+	cmd.WaitDelay = time.Second
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"),
 		"GIT_CEILING_DIRECTORIES="+dir, "IMAGE_VERSION="+version, "JOBS="+jobs,
@@ -69,7 +75,7 @@ func TestBuildRejectsInvalidInputs(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\ntouch \"$MARKER\"\nexit 1\n"), 0755); err != nil {
 				t.Fatal(err)
 			}
-			out, err := buildCommand(dir, tc.version, tc.jobs, tc.revision, tc.args...).CombinedOutput()
+			out, err := buildCommand(t, dir, tc.version, tc.jobs, tc.revision, tc.args...).CombinedOutput()
 			if err == nil || !strings.Contains(string(out), tc.want) {
 				t.Fatalf("got %q (%v), want failure containing %q", out, err, tc.want)
 			}
@@ -116,7 +122,7 @@ func TestBuildRevisionMetadata(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(stub), 0755); err != nil {
 				t.Fatal(err)
 			}
-			out, err := buildCommand(dir, tc.version, "2", tc.revision, "amd64").CombinedOutput()
+			out, err := buildCommand(t, dir, tc.version, "2", tc.revision, "amd64").CombinedOutput()
 			if err == nil || !strings.Contains(string(out), "stopped-before-build") {
 				t.Fatalf("got %q (%v), want stub build failure", out, err)
 			}
