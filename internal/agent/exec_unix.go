@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // drainIdle is how long output may stay quiet after the process exits
@@ -51,10 +52,7 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 		tty   *os.File
 	)
 	if req.TTY {
-		if req.Rows == 0 || req.Cols == 0 {
-			req.Rows, req.Cols = 24, 80
-		}
-		tty, err = pty.StartWithSize(cmd, &pty.Winsize{Rows: req.Rows, Cols: req.Cols})
+		tty, err = startPTY(cmd, req.Rows, req.Cols)
 		stdin, outs = tty, map[byte]*os.File{Stdout: tty}
 	} else {
 		stdin, outs, err = startPipes(cmd)
@@ -127,6 +125,59 @@ func startPipes(cmd *exec.Cmd) (io.WriteCloser, map[byte]*os.File, error) {
 	return stdin, map[byte]*os.File{Stdout: outR, Stderr: errR}, nil
 }
 
+// startPTY starts cmd in a new session on a new PTY and returns the PTY
+// master.
+func startPTY(cmd *exec.Cmd, rows, cols uint16) (*os.File, error) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer tty.Close()
+	// pty.Open leaves the master in blocking mode, where a read cannot be
+	// cut short by a deadline; a background child can keep the PTY open
+	// after the session leader exits. Use a non-blocking duplicate, which
+	// Go polls.
+	fd, err := unix.FcntlInt(ptmx.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	ptmx.Close()
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.SetNonblock(fd, true); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	master := os.NewFile(uintptr(fd), "ptmx")
+	if rows == 0 || cols == 0 {
+		rows, cols = 24, 80
+	}
+	if err := setSize(master, rows, cols); err != nil {
+		master.Close()
+		return nil, err
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		master.Close()
+		return nil, err
+	}
+	return master, nil
+}
+
+// setSize sets the window size of the PTY whose master is f. pty.Setsize
+// would put f back in blocking mode.
+func setSize(f *os.File, rows, cols uint16) error {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	if err := rc.Control(func(fd uintptr) {
+		err = unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Row: rows, Col: cols})
+	}); err != nil {
+		return err
+	}
+	return err
+}
+
 // readInput applies the client's messages until the connection fails.
 // shortcut: a process that stops reading stdin blocks this loop, so resize
 // and disconnects are noticed only when it reads, writes output or exits;
@@ -149,7 +200,7 @@ func readInput(ctx context.Context, c *websocket.Conn, stdin io.WriteCloser, tty
 		}
 		switch {
 		case m.Type == "resize" && tty != nil && m.Rows > 0 && m.Cols > 0:
-			pty.Setsize(tty, &pty.Winsize{Rows: m.Rows, Cols: m.Cols})
+			setSize(tty, m.Rows, m.Cols)
 		case m.Type == "stdin_eof" && tty == nil:
 			stdin.Close()
 		}
@@ -157,8 +208,7 @@ func readInput(ctx context.Context, c *websocket.Conn, stdin io.WriteCloser, tty
 }
 
 // pump copies f to the client as stream id until f ends. Once the process
-// has exited, it stops after drainIdle without output. A PTY needs no
-// deadline: its reads fail as soon as the session leader exits.
+// has exited, it stops after drainIdle without output.
 func pump(ctx context.Context, c *websocket.Conn, id byte, f *os.File, exited <-chan struct{}) error {
 	buf := make([]byte, maxMessage)
 	buf[0] = id
@@ -176,7 +226,7 @@ func pump(ctx context.Context, c *websocket.Conn, id byte, f *os.File, exited <-
 			}
 		}
 		if err != nil {
-			return nil // EOF, EIO from a PTY that was hung up, or the drain deadline
+			return nil // EOF, EIO from a PTY whose other side closed, or the drain deadline
 		}
 	}
 }
