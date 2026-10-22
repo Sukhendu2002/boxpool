@@ -206,6 +206,26 @@ needing its screen once SSH is configured.
 Once this workflow is on `main`, it can also be [run manually](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
 from **Actions → Linux KVM → Run workflow**, selecting the branch to test.
 
+### Your own Linux machine, before you push
+
+`scripts/test-on-linux.sh` copies the working tree (uncommitted changes
+included) to your Linux machine over SSH and runs vet, tests, a build and
+`boxpool doctor` there, requiring `Backend: firecracker`. Set
+`BOXPOOL_LINUX_HOST` to its SSH host, e.g. in your shell profile. The remote
+needs `rsync`, Go on `PATH` or in `~/.local/go`, and read/write access to
+`/dev/kvm` for your user.
+
+To run it on every `git push`, enable the repo's hooks once:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The hook skips with a warning when `BOXPOOL_LINUX_HOST` is unset or the machine is unreachable; use
+`git push --no-verify` to skip it on purpose. There is deliberately no
+self-hosted GitHub runner: on a public repo, a PR could run its own code on
+that machine. Only you, over SSH, can.
+
 ## Troubleshooting doctor
 
 - `/dev/kvm` — `missing: enable virtualization in BIOS or load the kvm module`:
