@@ -50,7 +50,9 @@ func doctor() int {
 	fmt.Printf("boxpool doctor: %s/%s\n\n", r.OS, r.Arch)
 	for _, c := range r.Checks {
 		mark := "✗"
-		if c.OK {
+		if c.Warn {
+			mark = "!"
+		} else if c.OK {
 			mark = "✓"
 		}
 		fmt.Printf("  %s %-30s %s\n", mark, c.Name, c.Detail)

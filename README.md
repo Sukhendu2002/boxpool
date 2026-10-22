@@ -23,8 +23,16 @@ Only `boxpool doctor` and `boxpool version` work today.
 
 ## Supported hosts (v1)
 
-- Linux, x86_64 or aarch64, with `/dev/kvm` for microVMs (Docker fallback without it)
+- Linux 5.10 or newer, x86_64 or aarch64, with `/dev/kvm` for microVMs (Docker fallback without it)
 - macOS 14 or later on Apple silicon
+
+`boxpool doctor` requires at least 20 GB of free disk space in the state
+directory: `BOXPOOL_HOME` when set, otherwise `/var/lib/boxpool` on Linux or
+`~/Library/Application Support/boxpool` on macOS. If it does not exist yet,
+doctor measures the nearest existing parent and reports that path. A disk or
+kernel failure exits non-zero even if a backend is available. On Linux, `!`
+marks a VM warning: nested virtualization may be unavailable or slow, but
+the warning does not affect the backend or exit status.
 
 ## Development
 
