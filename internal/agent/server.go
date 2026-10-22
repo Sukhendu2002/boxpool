@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/coder/websocket"
 )
@@ -24,9 +25,8 @@ func Listen(addr string) (net.Listener, error) {
 		if err := os.MkdirAll(filepath.Dir(rest), 0755); err != nil {
 			return nil, err
 		}
-		// A socket left by an agent that was killed would make Listen fail.
-		if fi, err := os.Lstat(rest); err == nil && fi.Mode()&os.ModeSocket != 0 {
-			os.Remove(rest)
+		if err := removeStaleSocket(rest); err != nil {
+			return nil, err
 		}
 		return net.Listen("unix", rest)
 	case scheme == "vsock":
@@ -37,6 +37,31 @@ func Listen(addr string) (net.Listener, error) {
 		return listenVsock(uint32(port))
 	}
 	return nil, fmt.Errorf("bad listen address %q: want unix:<path> or vsock:<port>", addr)
+}
+
+// removeStaleSocket removes the socket at path when nothing listens on it,
+// such as one left by an agent that was killed, which would make Listen
+// fail. It refuses to touch a live socket or a file that is not a socket.
+func removeStaleSocket(path string) error {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("%s exists and is not a socket", path)
+	}
+	c, err := net.Dial("unix", path)
+	if err == nil {
+		c.Close()
+		return fmt.Errorf("another agent is listening on %s", path)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("check %s for a running agent: %w", path, err)
+	}
+	return os.Remove(path)
 }
 
 // Serve serves the agent API on l until ctx is cancelled. Cancelling ctx
@@ -72,12 +97,15 @@ func Serve(ctx context.Context, l net.Listener, version string) error {
 	return err
 }
 
-// finish sends the final control message of a session and closes it.
-func finish(ctx context.Context, c *websocket.Conn, m message) {
+// finish sends the final control message of a session and closes it. It
+// reports whether the message was sent.
+func finish(ctx context.Context, c *websocket.Conn, m message) bool {
 	b, _ := json.Marshal(m)
-	if c.Write(ctx, websocket.MessageText, b) == nil {
-		c.Close(websocket.StatusNormalClosure, "")
+	if c.Write(ctx, websocket.MessageText, b) != nil {
+		return false
 	}
+	c.Close(websocket.StatusNormalClosure, "")
+	return true
 }
 
 func execError(ctx context.Context, c *websocket.Conn, err error) {

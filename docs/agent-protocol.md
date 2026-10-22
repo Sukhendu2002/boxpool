@@ -16,6 +16,9 @@ HTTP/1.1, served by the agent on:
 | Docker | unix socket `/run/boxpool/agent.sock` | `--listen unix:/run/boxpool/agent.sock` |
 
 There is no authentication: the transport is reachable only from the host.
+On a unix socket, the agent refuses to start when another agent answers on
+the path or the path is not a socket; it replaces a socket nobody listens
+on.
 The `Host` header is ignored.
 
 ## `GET /v1/version`
@@ -164,10 +167,20 @@ command has exited, the agent stops reading output after 250 ms without
 any: a background child that keeps stdout open does not hold the session
 open. Background children are not killed when the command exits normally.
 
-If the WebSocket closes or fails before `exit`, the agent kills the
-command's whole process group with `SIGKILL`. Nothing that stayed in that
-group outlives the session. The same happens to every session when the
-agent is stopped with `SIGTERM` or `SIGINT`.
+If the WebSocket closes or fails before `exit` has been sent, the agent
+kills the command's whole process group with `SIGKILL`, also when the
+command itself has already exited and only its output is still being
+sent. Nothing that stayed in that group outlives the session. The same
+happens to every session when the agent is stopped with `SIGTERM` or
+`SIGINT`.
+
+The agent holds up to 1 MiB of stdin that the command has not read yet,
+and keeps reading messages meanwhile, so `resize`, `stdin_eof` and a
+closed connection are seen even while the command ignores its stdin.
+Beyond that it stops reading messages until the command reads (or exits),
+which pushes back on a client that sends faster than the command reads.
+While it waits, a client that goes away is noticed only when the command
+reads stdin, writes output or exits.
 
 ### Example
 

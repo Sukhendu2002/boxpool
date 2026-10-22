@@ -23,6 +23,10 @@ import (
 // open long after the command itself is gone.
 const drainIdle = 250 * time.Millisecond
 
+// stdinQueue is how many stdin messages, of up to 32 KiB each, the agent
+// holds for a command that has not read them yet: 1 MiB.
+const stdinQueue = 32
+
 func runExec(ctx context.Context, c *websocket.Conn) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -64,14 +68,29 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 	for _, f := range outs {
 		defer f.Close()
 	}
+	// Cancel kills the group only until Wait returns. A session that ends
+	// without sending exit kills it again before runExec returns, which
+	// takes background children left in it after the command exited.
+	// shortcut: Wait has reaped the leader by then, so if every process in
+	// the group has also gone and the kernel gives the id to a new group
+	// leader before this kill, the kill hits that group; wait with WNOWAIT
+	// and reap after the kill if that ever matters.
+	pgid, exitSent := cmd.Process.Pid, false
+	defer func() {
+		if !exitSent {
+			syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	}()
 
 	// A lost client shows up as a failed read or write; either one cancels
 	// ctx, which kills the process group.
+	exited := make(chan struct{})
+	in := make(chan []byte, stdinQueue)
+	go writeStdin(in, stdin)
 	go func() {
 		defer cancel()
-		readInput(ctx, c, stdin, tty)
+		readInput(ctx, c, in, tty, exited)
 	}()
-	exited := make(chan struct{})
 	var pumps sync.WaitGroup
 	for id, f := range outs {
 		pumps.Add(1)
@@ -92,7 +111,7 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 		return // the client is gone, nobody to tell
 	}
 	code := exitCode(cmd.ProcessState)
-	finish(ctx, c, message{Type: "exit", Code: &code})
+	exitSent = finish(ctx, c, message{Type: "exit", Code: &code})
 }
 
 func startPipes(cmd *exec.Cmd) (io.WriteCloser, map[byte]*os.File, error) {
@@ -179,18 +198,32 @@ func setSize(f *os.File, rows, cols uint16) error {
 }
 
 // readInput applies the client's messages until the connection fails.
-// shortcut: a process that stops reading stdin blocks this loop, so resize
-// and disconnects are noticed only when it reads, writes output or exits;
-// move stdin writes to their own goroutine if that bites.
-func readInput(ctx context.Context, c *websocket.Conn, stdin io.WriteCloser, tty *os.File) {
+// Stdin data goes to writeStdin through in, so a command that does not read
+// its stdin does not stop this loop from seeing resizes and a lost client.
+// shortcut: once in is full (1 MiB on top of the pipe or PTY buffer) this
+// loop waits for room, so a client that disconnects then is noticed only
+// when the command reads stdin, writes output or exits, or the agent stops;
+// read the connection in its own goroutine if a client hits that.
+func readInput(ctx context.Context, c *websocket.Conn, in chan<- []byte, tty *os.File, exited <-chan struct{}) {
+	defer close(in)
+	// send queues b, or drops it once the command has exited.
+	send := func(b []byte) bool {
+		select {
+		case in <- b:
+		case <-exited:
+		case <-ctx.Done():
+			return false
+		}
+		return true
+	}
 	for {
 		typ, b, err := c.Read(ctx)
 		if err != nil {
 			return
 		}
 		if typ == websocket.MessageBinary {
-			if len(b) > 0 && b[0] == Stdin {
-				stdin.Write(b[1:]) // fails only once the process stopped reading; drop
+			if len(b) > 1 && b[0] == Stdin && !send(b[1:]) {
+				return
 			}
 			continue
 		}
@@ -202,7 +235,22 @@ func readInput(ctx context.Context, c *websocket.Conn, stdin io.WriteCloser, tty
 		case m.Type == "resize" && tty != nil && m.Rows > 0 && m.Cols > 0:
 			setSize(tty, m.Rows, m.Cols)
 		case m.Type == "stdin_eof" && tty == nil:
+			if !send(nil) {
+				return
+			}
+		}
+	}
+}
+
+// writeStdin writes each chunk from in to stdin; nil closes stdin. A write
+// blocked on a command that does not read ends when Wait closes the stdin
+// pipe or runExec closes the PTY.
+func writeStdin(in <-chan []byte, stdin io.WriteCloser) {
+	for b := range in {
+		if b == nil {
 			stdin.Close()
+		} else {
+			stdin.Write(b) // fails only once the process stopped reading; drop
 		}
 	}
 }

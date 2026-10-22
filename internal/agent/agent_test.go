@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -305,5 +306,162 @@ func TestServeStopKillsSessions(t *testing.T) {
 	}
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
 		t.Errorf("socket still present after Serve returned: %v", err)
+	}
+}
+
+func TestExecLargeStdin(t *testing.T) {
+	in := strings.Repeat("0123456789abcdef", 1<<18) // 4 MiB: more than the agent buffers
+	stdout, _, code, err := run(t, serve(t), ExecRequest{Argv: []string{"cat"}}, in)
+	if err != nil || stdout != in || code != 0 {
+		t.Errorf("got %d bytes (intact: %v), code %d, err %v; want %d bytes", len(stdout), stdout == in, code, err, len(in))
+	}
+}
+
+var pidRE = regexp.MustCompile(`pid=(\d+)\r?\n`)
+
+// waitPid waits for a pid=<n> line in out and returns n.
+func waitPid(t *testing.T, out *output) int {
+	t.Helper()
+	out.waitFor(t, "pid=")
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if m := pidRE.FindStringSubmatch(out.String()); m != nil {
+			pid, _ := strconv.Atoi(m[1])
+			t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no pid line in output %q", out.String())
+		}
+	}
+}
+
+// waitGone waits for process pid to be gone.
+func waitGone(t *testing.T, pid int, what string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s %d still running 5s after the session was aborted", what, pid)
+		}
+	}
+}
+
+func TestDisconnectWithUnreadStdin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var out output
+	s, err := serve(t).Exec(ctx, ExecRequest{Argv: []string{"sh", "-c", "echo pid=$$; exec sleep 30"}}, &out, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := waitPid(t, &out)
+	if _, err := s.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatalf("Write() = %v: the agent stopped reading", err)
+	}
+	cancel()
+	waitGone(t, pid, "command")
+}
+
+// Pipes only: a PTY is hung up when its session leader exits, so a child
+// cannot keep the drain going there. The kill on abort is the same code.
+func TestAbortKillsBackgroundChildAfterExit(t *testing.T) {
+	// sh exits at once; the child's output keeps the session in its drain
+	// until the client disconnects. It ignores SIGPIPE, so only a kill ends
+	// it once the agent closes its stdout.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out output
+	s, err := serve(t).Exec(ctx, ExecRequest{Argv: []string{"sh", "-c", "trap '' PIPE; (while :; do echo; sleep 0.1; done) & echo pid=$!"}}, &out, &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := waitPid(t, &out)
+	time.Sleep(300 * time.Millisecond) // sh has exited and been reaped
+	cancel()
+	if _, err := s.Wait(); err == nil {
+		t.Error("Wait() = nil after the session was cancelled")
+	}
+	waitGone(t, pid, "background child")
+}
+
+func TestExitLeavesBackgroundChild(t *testing.T) {
+	c := serve(t)
+	for _, tty := range []bool{false, true} {
+		t.Run("tty="+strconv.FormatBool(tty), func(t *testing.T) {
+			var out output
+			s, err := c.Exec(testContext(t), ExecRequest{Argv: []string{"sh", "-c", "trap '' HUP; sleep 30 & echo pid=$!"}, TTY: tty}, &out, &out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid := waitPid(t, &out)
+			wait(t, s, &out, 0)
+			if err := syscall.Kill(pid, 0); err != nil {
+				t.Errorf("background child %d gone after a normal exit: %v", pid, err)
+			}
+		})
+	}
+}
+
+// tempSock returns a unix socket path in a new temp dir; see serve.
+func tempSock(t *testing.T) string {
+	dir, err := os.MkdirTemp("", "bpa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "agent.sock")
+}
+
+func TestListenRefusesLiveSocket(t *testing.T) {
+	sock := tempSock(t)
+	l, err := Listen("unix:" + sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	if l2, err := Listen("unix:" + sock); err == nil || !strings.Contains(err.Error(), "another agent is listening") {
+		t.Errorf("second Listen() = %v, want another agent is listening", err)
+		if l2 != nil {
+			l2.Close()
+		}
+	}
+	// The first listener still owns the path.
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	a, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+}
+
+func TestListenReplacesStaleSocket(t *testing.T) {
+	sock := tempSock(t)
+	old, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.(*net.UnixListener).SetUnlinkOnClose(false) // like an agent that was killed
+	old.Close()
+	l, err := Listen("unix:" + sock)
+	if err != nil {
+		t.Fatalf("Listen() over a stale socket = %v", err)
+	}
+	l.Close()
+}
+
+func TestListenRefusesNonSocket(t *testing.T) {
+	sock := tempSock(t)
+	if err := os.WriteFile(sock, []byte("keep"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := Listen("unix:" + sock); err == nil {
+		l.Close()
+		t.Fatal("Listen() over a regular file succeeded")
+	}
+	if b, err := os.ReadFile(sock); err != nil || string(b) != "keep" {
+		t.Errorf("file changed: %q, %v", b, err)
 	}
 }
