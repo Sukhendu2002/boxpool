@@ -4,6 +4,8 @@ package daemon_test
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,4 +102,70 @@ func TestSecondDaemonRefused(t *testing.T) {
 	}
 	// The lock is released on shutdown, so a new daemon can start.
 	start(t, dir, daemon.Info{})
+}
+
+func TestRunCancelledBeforeServe(t *testing.T) {
+	dir := stateDir(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := daemon.Run(ctx, dir, daemon.Info{}); err != nil {
+		t.Fatal(err)
+	}
+	// Run has released the lock, so the socket must already be gone: a late
+	// close would remove the socket of the next daemon.
+	if _, err := os.Stat(filepath.Join(dir, daemon.SocketName)); !os.IsNotExist(err) {
+		t.Errorf("socket still present after Run returned: %v", err)
+	}
+}
+
+func TestShutdownDropsSlowClient(t *testing.T) {
+	defer func(d time.Duration) { *daemon.ShutdownTimeout = d }(*daemon.ShutdownTimeout)
+	*daemon.ShutdownTimeout = 50 * time.Millisecond
+	dir := stateDir(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx, dir, daemon.Info{}) }()
+	var conn net.Conn
+	for deadline := time.Now().Add(5 * time.Second); conn == nil; time.Sleep(10 * time.Millisecond) {
+		c, err := net.Dial("unix", filepath.Join(dir, daemon.SocketName))
+		if err == nil {
+			conn = c
+		} else if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("GET /v1/health HTTP/1.1\r\n")); err != nil { // headers never end
+		t.Fatal(err)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("Run() = %v, want a shutdown timeout", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("connection still open after Run returned: %v", err)
+	}
+}
+
+func TestRunRefusesWritableStateDir(t *testing.T) {
+	dir := stateDir(t)
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0770); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // without the check, Run would start and return nil at once
+	err := daemon.Run(ctx, dir, daemon.Info{})
+	if err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+		t.Errorf("Run() = %v, want a refusal", err)
+	}
 }

@@ -24,7 +24,8 @@ Only `boxpool doctor`, `boxpool daemon` and `boxpool version` work today.
 `boxpool daemon` runs the node daemon in the foreground. It creates the state
 directory (below), takes `daemon.lock` there so only one daemon runs per state
 directory, and serves a local HTTP API on `boxpool.sock` (mode 0660) until
-SIGINT or SIGTERM:
+SIGINT or SIGTERM. It refuses a state directory that group or others can
+write to:
 
 ```sh
 BOXPOOL_HOME=$(mktemp -d) ./bin/boxpool daemon &
