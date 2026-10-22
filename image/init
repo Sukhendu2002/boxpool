@@ -1,0 +1,17 @@
+#!/bin/sh
+# VM-only init. Docker starts tini directly and never runs this setup.
+set -eu
+mount -t devtmpfs -o nosuid devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t proc -o nosuid,nodev,noexec proc /proc
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts /dev/pts
+ln -sf pts/ptmx /dev/ptmx
+mkdir -p /run/boxpool
+cd /root
+# tini becomes PID 1, reaps adopted orphans and forwards signals to the agent
+# process group. The agent remains the only service; failure is fail-fast.
+exec /usr/bin/tini -g -- /usr/local/bin/boxpool-agent --listen vsock:1024

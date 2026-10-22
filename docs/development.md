@@ -1,5 +1,9 @@
 # Linux and KVM development setup
 
+For building the shared guest kernel/rootfs/OCI image, required tools,
+Firecracker/vsock smoke checks and release publication, see the
+[base image guide](../image/README.md).
+
 Use a Linux x86_64 or aarch64 machine for the Linux backends. Start with a
 spare machine on your LAN; use a nested VM for convenience, or cloud hardware
 as a last resort. Windows hosts and automated provisioning are out of scope.
