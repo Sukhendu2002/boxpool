@@ -25,10 +25,25 @@ func Listen(addr string) (net.Listener, error) {
 		if err := os.MkdirAll(filepath.Dir(rest), 0755); err != nil {
 			return nil, err
 		}
-		if err := removeStaleSocket(rest); err != nil {
+		// The lock serialises agents starting on the same path, so two of
+		// them cannot both remove a stale socket and bind.
+		lock, err := lockPath(rest + ".lock")
+		if err != nil {
 			return nil, err
 		}
-		return net.Listen("unix", rest)
+		if lock == nil {
+			return nil, fmt.Errorf("another agent is listening on %s", rest)
+		}
+		if err := removeStaleSocket(rest); err != nil {
+			lock.Close()
+			return nil, err
+		}
+		l, err := net.Listen("unix", rest)
+		if err != nil {
+			lock.Close()
+			return nil, err
+		}
+		return &lockedListener{l, lock}, nil
 	case scheme == "vsock":
 		port, err := strconv.ParseUint(rest, 10, 32)
 		if err != nil {
@@ -37,6 +52,18 @@ func Listen(addr string) (net.Listener, error) {
 		return listenVsock(uint32(port))
 	}
 	return nil, fmt.Errorf("bad listen address %q: want unix:<path> or vsock:<port>", addr)
+}
+
+// lockedListener holds the lock on its path until it is closed.
+type lockedListener struct {
+	net.Listener
+	lock *os.File
+}
+
+func (l *lockedListener) Close() error {
+	err := l.Listener.Close()
+	l.lock.Close() // releases the flock
+	return err
 }
 
 // removeStaleSocket removes the socket at path when nothing listens on it,

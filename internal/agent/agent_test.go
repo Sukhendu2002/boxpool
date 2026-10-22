@@ -346,19 +346,54 @@ func waitGone(t *testing.T, pid int, what string) {
 }
 
 func TestDisconnectWithUnreadStdin(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var out output
-	s, err := serve(t).Exec(ctx, ExecRequest{Argv: []string{"sh", "-c", "echo pid=$$; exec sleep 30"}}, &out, &out)
-	if err != nil {
-		t.Fatal(err)
+	c := serve(t)
+	for _, tc := range []struct {
+		name        string
+		size, count int
+	}{
+		{"1MiB", 1 << 20, 1},
+		// Many small messages: the queue is bounded by bytes, not messages.
+		{"128x1KiB", 1 << 10, 128},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			var out output
+			s, err := c.Exec(ctx, ExecRequest{Argv: []string{"sh", "-c", "echo pid=$$; exec sleep 30"}}, &out, &out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid := waitPid(t, &out)
+			for range tc.count {
+				if _, err := s.Write(make([]byte, tc.size)); err != nil {
+					t.Fatalf("Write() = %v: the agent stopped reading", err)
+				}
+			}
+			cancel()
+			waitGone(t, pid, "command")
+		})
 	}
-	pid := waitPid(t, &out)
-	if _, err := s.Write(make([]byte, 1<<20)); err != nil {
-		t.Fatalf("Write() = %v: the agent stopped reading", err)
+}
+
+// On macOS a process exiting on a PTY waits for its unread output (here
+// the echoed stdin) to drain, so an aborted session must close the master
+// before it waits.
+func TestPTYAbortWithStdin(t *testing.T) {
+	c := serve(t)
+	for i := range 20 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var out output
+		s, err := c.Exec(ctx, ExecRequest{Argv: []string{"sh", "-c", "echo pid=$$; exec sleep 30"}, TTY: true}, &out, &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid := waitPid(t, &out)
+		if _, err := s.Write(make([]byte, 1<<20)); err != nil {
+			t.Fatalf("run %d: Write() = %v: the agent stopped reading", i, err)
+		}
+		cancel()
+		waitGone(t, pid, "command")
 	}
-	cancel()
-	waitGone(t, pid, "command")
 }
 
 // Pipes only: a PTY is hung up when its session leader exits, so a child
@@ -463,5 +498,60 @@ func TestListenRefusesNonSocket(t *testing.T) {
 	}
 	if b, err := os.ReadFile(sock); err != nil || string(b) != "keep" {
 		t.Errorf("file changed: %q, %v", b, err)
+	}
+}
+
+func TestListenConcurrentStaleSocket(t *testing.T) {
+	for range 20 {
+		sock := tempSock(t)
+		old, err := net.Listen("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old.(*net.UnixListener).SetUnlinkOnClose(false)
+		old.Close()
+		const n = 8
+		ls := make(chan net.Listener, n)
+		errs := make(chan error, n)
+		start := make(chan struct{})
+		for range n {
+			go func() {
+				<-start
+				l, err := Listen("unix:" + sock)
+				if err != nil {
+					errs <- err
+					return
+				}
+				ls <- l
+			}()
+		}
+		close(start)
+		var won []net.Listener
+		for range n {
+			select {
+			case l := <-ls:
+				won = append(won, l)
+			case err := <-errs:
+				if !strings.Contains(err.Error(), "another agent is listening") {
+					t.Errorf("Listen() = %v, want another agent is listening", err)
+				}
+			}
+		}
+		for _, l := range won {
+			defer l.Close()
+		}
+		if len(won) != 1 {
+			t.Fatalf("%d of %d concurrent Listen calls succeeded, want 1", len(won), n)
+		}
+		c, err := net.Dial("unix", sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+		a, err := won[0].Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.Close()
 	}
 }

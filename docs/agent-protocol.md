@@ -16,9 +16,10 @@ HTTP/1.1, served by the agent on:
 | Docker | unix socket `/run/boxpool/agent.sock` | `--listen unix:/run/boxpool/agent.sock` |
 
 There is no authentication: the transport is reachable only from the host.
-On a unix socket, the agent refuses to start when another agent answers on
-the path or the path is not a socket; it replaces a socket nobody listens
-on.
+On a unix socket, the agent holds an exclusive lock on `<path>.lock` while
+it listens, and refuses to start when another agent holds it, another
+process answers on the path, or the path is not a socket; it replaces a
+socket nobody listens on.
 The `Host` header is ignored.
 
 ## `GET /v1/version`
@@ -175,12 +176,13 @@ happens to every session when the agent is stopped with `SIGTERM` or
 `SIGINT`.
 
 The agent holds up to 1 MiB of stdin that the command has not read yet,
-and keeps reading messages meanwhile, so `resize`, `stdin_eof` and a
-closed connection are seen even while the command ignores its stdin.
-Beyond that it stops reading messages until the command reads (or exits),
-which pushes back on a client that sends faster than the command reads.
-While it waits, a client that goes away is noticed only when the command
-reads stdin, writes output or exits.
+however many messages it arrived in, and keeps reading messages meanwhile,
+so `resize`, `stdin_eof` and a closed connection are seen even while the
+command ignores its stdin. Beyond that it stops reading messages until the
+command reads (or exits), which pushes back on a client that sends faster
+than the command reads. So a client that queues more than 1 MiB of stdin
+to a command that never reads it, then disconnects, is noticed only when
+the command reads, writes or exits, or the agent stops.
 
 ### Example
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -23,9 +24,9 @@ import (
 // open long after the command itself is gone.
 const drainIdle = 250 * time.Millisecond
 
-// stdinQueue is how many stdin messages, of up to 32 KiB each, the agent
-// holds for a command that has not read them yet: 1 MiB.
-const stdinQueue = 32
+// maxStdin is how many bytes of stdin the agent holds for a command that
+// has not read them yet.
+const maxStdin = 1 << 20
 
 func runExec(ctx context.Context, c *websocket.Conn) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -71,10 +72,10 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 	// Cancel kills the group only until Wait returns. A session that ends
 	// without sending exit kills it again before runExec returns, which
 	// takes background children left in it after the command exited.
-	// shortcut: Wait has reaped the leader by then, so if every process in
-	// the group has also gone and the kernel gives the id to a new group
-	// leader before this kill, the kill hits that group; wait with WNOWAIT
-	// and reap after the kill if that ever matters.
+	// shortcut: the abort kill can hit a reused process group id after the
+	// leader is reaped; acceptable inside a single-tenant sandbox, upgrade
+	// to waitid(WNOWAIT) on Linux before the agent manages long-lived
+	// services.
 	pgid, exitSent := cmd.Process.Pid, false
 	defer func() {
 		if !exitSent {
@@ -85,7 +86,7 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 	// A lost client shows up as a failed read or write; either one cancels
 	// ctx, which kills the process group.
 	exited := make(chan struct{})
-	in := make(chan []byte, stdinQueue)
+	in := &stdinQueue{ready: make(chan struct{}, 1), room: make(chan struct{}, 1)}
 	go writeStdin(in, stdin)
 	go func() {
 		defer cancel()
@@ -101,7 +102,18 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 			}
 		}()
 	}
+	// On macOS a process exiting on a PTY waits until its output has been
+	// read. Once the client is gone nothing reads the master, so an abort
+	// kills the group, then closes the master, before Wait can return.
+	stopClose := func() bool { return true }
+	if tty != nil {
+		stopClose = context.AfterFunc(ctx, func() {
+			syscall.Kill(-pgid, syscall.SIGKILL)
+			tty.Close()
+		})
+	}
 	cmd.Wait()
+	stopClose()
 	close(exited)
 	for _, f := range outs {
 		f.SetReadDeadline(time.Now().Add(drainIdle))
@@ -200,19 +212,22 @@ func setSize(f *os.File, rows, cols uint16) error {
 // readInput applies the client's messages until the connection fails.
 // Stdin data goes to writeStdin through in, so a command that does not read
 // its stdin does not stop this loop from seeing resizes and a lost client.
-// shortcut: once in is full (1 MiB on top of the pipe or PTY buffer) this
-// loop waits for room, so a client that disconnects then is noticed only
-// when the command reads stdin, writes output or exits, or the agent stops;
-// read the connection in its own goroutine if a client hits that.
-func readInput(ctx context.Context, c *websocket.Conn, in chan<- []byte, tty *os.File, exited <-chan struct{}) {
-	defer close(in)
+// shortcut: a client that queues more than 1 MiB of stdin to a command
+// that never reads it, then disconnects, is noticed only when the command
+// reads, writes or exits, or the agent stops; protocol-level flow control
+// is planned with the daemon client in #15.
+func readInput(ctx context.Context, c *websocket.Conn, in *stdinQueue, tty *os.File, exited <-chan struct{}) {
+	defer in.add(nil, false, true)
 	// send queues b, or drops it once the command has exited.
-	send := func(b []byte) bool {
-		select {
-		case in <- b:
-		case <-exited:
-		case <-ctx.Done():
-			return false
+	send := func(b []byte, eof bool) bool {
+		for !in.add(b, eof, false) {
+			select {
+			case <-in.room:
+			case <-exited:
+				return true
+			case <-ctx.Done():
+				return false
+			}
 		}
 		return true
 	}
@@ -222,7 +237,7 @@ func readInput(ctx context.Context, c *websocket.Conn, in chan<- []byte, tty *os
 			return
 		}
 		if typ == websocket.MessageBinary {
-			if len(b) > 1 && b[0] == Stdin && !send(b[1:]) {
+			if len(b) > 1 && b[0] == Stdin && !send(b[1:], false) {
 				return
 			}
 			continue
@@ -235,22 +250,71 @@ func readInput(ctx context.Context, c *websocket.Conn, in chan<- []byte, tty *os
 		case m.Type == "resize" && tty != nil && m.Rows > 0 && m.Cols > 0:
 			setSize(tty, m.Rows, m.Cols)
 		case m.Type == "stdin_eof" && tty == nil:
-			if !send(nil) {
+			if !send(nil, true) {
 				return
 			}
 		}
 	}
 }
 
-// writeStdin writes each chunk from in to stdin; nil closes stdin. A write
-// blocked on a command that does not read ends when Wait closes the stdin
-// pipe or runExec closes the PTY.
-func writeStdin(in <-chan []byte, stdin io.WriteCloser) {
-	for b := range in {
-		if b == nil {
-			stdin.Close()
-		} else {
+// stdinQueue holds stdin the command has not read yet, up to maxStdin
+// bytes. readInput adds to it and writeStdin writes it out.
+type stdinQueue struct {
+	mu        sync.Mutex
+	data      []byte
+	held      int           // len(data) plus the bytes writeStdin is writing
+	eof, done bool          // close stdin after data; readInput has returned
+	ready     chan struct{} // 1 slot: data, eof or done was added
+	room      chan struct{} // 1 slot: held went down
+}
+
+// add queues b, then eof and done if set. It reports false, queueing
+// nothing, when b does not fit. Data after eof is dropped.
+func (q *stdinQueue) add(b []byte, eof, done bool) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !q.eof {
+		if q.held+len(b) > maxStdin {
+			return false
+		}
+		q.data = append(q.data, b...)
+		q.held += len(b)
+	}
+	q.eof, q.done = q.eof || eof, q.done || done
+	notify(q.ready)
+	return true
+}
+
+func notify(c chan struct{}) {
+	select {
+	case c <- struct{}{}:
+	default:
+	}
+}
+
+// writeStdin writes q to stdin and closes stdin at eof. A write blocked on
+// a command that does not read ends when Wait closes the stdin pipe or
+// runExec closes the PTY.
+func writeStdin(q *stdinQueue, stdin io.WriteCloser) {
+	for {
+		q.mu.Lock()
+		b, eof, done := q.data, q.eof, q.done
+		q.data = nil
+		q.mu.Unlock()
+		switch {
+		case len(b) > 0:
 			stdin.Write(b) // fails only once the process stopped reading; drop
+			q.mu.Lock()
+			q.held -= len(b)
+			q.mu.Unlock()
+			notify(q.room)
+		case eof:
+			stdin.Close()
+			return
+		case done:
+			return
+		default:
+			<-q.ready
 		}
 	}
 }
@@ -277,6 +341,24 @@ func pump(ctx context.Context, c *websocket.Conn, id byte, f *os.File, exited <-
 			return nil // EOF, EIO from a PTY whose other side closed, or the drain deadline
 		}
 	}
+}
+
+// lockPath takes an exclusive flock on the file at path, creating it, and
+// returns it; closing it releases the lock. It returns nil, nil when another
+// process holds the lock.
+func lockPath(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
+	return f, nil
 }
 
 // exitCode follows the shell convention: 128 plus the signal number for a
