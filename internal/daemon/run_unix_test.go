@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"boxpool.run/boxpool/internal/backend"
 	"boxpool.run/boxpool/internal/client"
 	"boxpool.run/boxpool/internal/daemon"
 	"boxpool.run/boxpool/internal/preflight"
+	"boxpool.run/boxpool/internal/store"
 )
 
 // stateDir returns a state directory that does not exist yet. It avoids
@@ -102,6 +104,37 @@ func TestSecondDaemonRefused(t *testing.T) {
 	}
 	// The lock is released on shutdown, so a new daemon can start.
 	start(t, dir, daemon.Info{})
+}
+
+func TestRecordsSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	dir := stateDir(t)
+	if err := start(t, dir, daemon.Info{})(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, daemon.StoreName)
+	// The daemon has stopped, so nothing else has the database open.
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := st.Create(ctx, store.Sandbox{Backend: "firecracker", Spec: backend.Spec{Name: "web"}, State: backend.StateRunning})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+
+	if err := start(t, dir, daemon.Info{})(); err != nil {
+		t.Fatal(err)
+	}
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if got, err := st.GetByName(ctx, "web"); err != nil || got.ID != created.ID {
+		t.Errorf("GetByName() after restart = %+v, %v; want ID %s", got, err, created.ID)
+	}
 }
 
 func TestRunCancelledBeforeServe(t *testing.T) {

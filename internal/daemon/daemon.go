@@ -10,6 +10,9 @@ import (
 // SocketName is the API socket's file name inside the state directory.
 const SocketName = "boxpool.sock"
 
+// StoreName is the sandbox database's file name inside the state directory.
+const StoreName = "state.db"
+
 // Info describes the daemon and the node it runs on.
 type Info struct {
 	Version  string `json:"version"`

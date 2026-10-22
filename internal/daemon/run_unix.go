@@ -13,14 +13,16 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"boxpool.run/boxpool/internal/store"
 )
 
 // shutdownTimeout is how long Run waits for in-flight requests on shutdown.
 var shutdownTimeout = 5 * time.Second
 
-// Run creates the state directory, takes the daemon lock and serves the API
-// on the socket in dir until ctx is cancelled. Only one daemon may run per
-// state directory.
+// Run creates the state directory, takes the daemon lock, opens the sandbox
+// store and serves the API on the socket in dir until ctx is cancelled. Only
+// one daemon may run per state directory.
 func Run(ctx context.Context, dir string, info Info) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
@@ -44,6 +46,11 @@ func Run(ctx context.Context, dir string, info Info) error {
 		}
 		return fmt.Errorf("lock %s: %w", lock.Name(), err)
 	}
+	st, err := store.Open(filepath.Join(dir, StoreName))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
 
 	sock := filepath.Join(dir, SocketName)
 	// Holding the lock means any socket file here was left by a crashed daemon.
