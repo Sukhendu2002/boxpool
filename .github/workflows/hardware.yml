@@ -1,0 +1,36 @@
+name: hardware
+
+# Runs on the owner's bare-metal Linux box through a self-hosted runner
+# (scripts/setup-hardware-runner.sh). Fork PRs are skipped here, and the repo
+# requires approval before any outside contributor's workflow runs, because a
+# PR can edit this file.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hardware-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-kvm:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, kvm, bare-metal]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build -o bin/boxpool ./cmd/boxpool
+      - name: Require Firecracker preflight on bare metal
+        run: |
+          ./bin/boxpool doctor | tee "$RUNNER_TEMP/doctor.log"
+          grep -Fxq 'Backend: firecracker' "$RUNNER_TEMP/doctor.log"

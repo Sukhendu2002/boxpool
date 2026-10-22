@@ -203,7 +203,19 @@ SSH-accessible Linux machine for interactive debugging, multi-node tests,
 and performance measurements. A repaired laptop can serve that role without
 needing its screen once SSH is configured.
 
-Once this workflow is on `main`, it can also be [run manually](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+### Bare-metal runner
+
+The [hardware workflow](../.github/workflows/hardware.yml) runs the same
+checks on the owner's bare-metal Linux box through a self-hosted runner, so
+every PR from this repo is also tested on real hardware. Jobs run as a
+`boxpool-ci` user that is only in the `kvm` group. Set the machine up once
+with [`scripts/setup-hardware-runner.sh`](../scripts/setup-hardware-runner.sh)
+(the usage is at the top of the script). PRs from forks never run there, and
+outside contributors' workflows wait for the owner's approval, because a PR
+can edit the workflow file. Read a fork PR's diff before approving its runs.
+If the box is offline, the hardware job waits in the queue until it is back.
+
+Once the Linux KVM workflow is on `main`, it can also be [run manually](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
 from **Actions → Linux KVM → Run workflow**, selecting the branch to test.
 
 ## Troubleshooting doctor
