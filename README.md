@@ -35,6 +35,12 @@ curl --unix-socket "$BOXPOOL_HOME/boxpool.sock" http://x/v1/info
 
 `boxpool version` also prints the daemon's version when one is running.
 
+`boxpool-agent` is the process inside every sandbox that runs commands for
+the host, on vsock port 1024 by default or on a unix socket with
+`--listen unix:<path>`. Its API is in the
+[guest agent protocol](docs/agent-protocol.md). Build it as a static Linux
+binary with `CGO_ENABLED=0 GOOS=linux go build -o bin/boxpool-agent ./cmd/boxpool-agent`.
+
 ## Supported hosts (v1)
 
 - Linux 5.10 or newer, x86_64 or aarch64, with `/dev/kvm` for microVMs (Docker fallback without it)
