@@ -3,10 +3,10 @@
 Issue #2. How long does a Firecracker microVM take to cold boot to a shell
 with the upstream quickstart kernel and rootfs, and is under 2 s realistic?
 
-**Status: incomplete.** The only KVM machine available so far is a
-GitHub-hosted runner, which is itself a VM (nested virtualization). Its
-numbers are below and are **not reference numbers**. The reference Linux box
-and the old laptop rows are pending.
+**Status:** measured on the reference Linux box (bare metal) and on
+GitHub-hosted runners (nested VMs, **not reference numbers**). The old-laptop
+row is deferred: no old hardware is available yet. The M1 gate (#19) still
+requires it.
 
 ## Method
 
@@ -106,18 +106,39 @@ landed on a different physical CPU model.
 | Nested, Intel Xeon Platinum 8573C (run 2) | guide + i8042 off | 29 / 31 | 44 / 47 | **1150 / 1168** | 491 / 514 | 397 / 417 |
 | Nested, AMD EPYC 7763 ([run 3](https://github.com/Sukhendu2002/boxpool/actions/runs/39069037608/attempts/2)) | guide | 31 / 34 | 44 / 47 | **1918 / 1965** | 1084 / 1104 | 973 / 984 |
 | Nested, AMD EPYC 7763 (run 3) | guide + i8042 off | 31 / 34 | 45 / 49 | **1470 / 1516** | 592 / 634 | 486 / 520 |
-| Reference Linux box | guide | pending | pending | pending | pending | pending |
-| Reference Linux box | guide + i8042 off | pending | pending | pending | pending | pending |
-| Oldest supported laptop (KVM: pending) | guide | pending | pending | pending | pending | pending |
-| Oldest supported laptop | guide + i8042 off | pending | pending | pending | pending | pending |
+| **Reference: Intel Core i5-1235U laptop, bare metal** | guide | 34 / 37 | 53 / 56 | **1073 / 1097** | 709 / 714 | 662 / 663 |
+| **Reference: Intel Core i5-1235U laptop, bare metal** | guide + i8042 off | 33 / 35 | 52 / 54 | **571 / 602** | 201 / 206 | 155 / 157 |
+| Oldest supported laptop (KVM: unknown) | both | deferred to #19 | | | | |
 
 Medians of 10 values are the mean of the middle two, rounded here to the
 nearest ms. Run 1 predates the i8042 configuration. Runs 2 and 3 are two
 attempts of the same commit.
 
-Hardware to record when the pending rows are filled in: CPU model, cores,
-memory, disk, distribution and host kernel (all printed by the script). For
-the old laptop, also record whether `/dev/kvm` exists at all.
+The reference box ran on 2026-10-22: Intel Core i5-1235U (12 threads),
+19.2 GiB, NVMe, Ubuntu 24.04.3, host kernel `7.0.0-28-generic`,
+`systemd-detect-virt`: `none`, on AC power.
+
+Hardware to record when the old-laptop row is filled in (#19): CPU model, cores,
+memory, disk, distribution and host kernel (all printed by the script), and
+whether `/dev/kvm` exists at all.
+
+### Raw runs (reference, bare metal)
+
+Columns: run, api, first, prompt, boot-timer, kernel-init (ms).
+
+```text
+i5-1235U, guide                 i5-1235U, i8042 off
+ 1  50 68 1097 706 659           1  35 53 572 199 150
+ 2  35 54 1062 709 662           2  34 53 564 196 147
+ 3  37 56 1071 707 657           3  33 52 562 206 157
+ 4  34 53 1091 714 661           4  32 51 561 200 151
+ 5  34 53 1051 704 657           5  32 51 594 200 155
+ 6  34 52 1068 709 663           6  36 54 569 198 149
+ 7  32 51 1075 710 663           7  31 49 602 201 155
+ 8  33 46 1071 712 662           8  35 54 586 206 156
+ 9  34 52 1075 686 635           9  33 52 556 204 158
+10  36 54 1097 714 662          10  33 51 611 201 154
+```
 
 ### Raw runs (nested)
 
@@ -149,26 +170,30 @@ run 3, EPYC 7763, guide       run 3, EPYC 7763, i8042 off
 10  30 43 1931 1061 947       10  32 45 1538 617 504
 ```
 
-## Conclusion (provisional, nested runner only)
+## Conclusion
 
-On a nested VM, the quickstart guest reaches a root shell in 1.6–1.9 s
-(median; worst p90 1.97 s) with the guide's boot args. With the i8042 probe
-off, it takes 1.15–1.47 s. So under 2 s already holds on the runner, which
-probably handicaps the guest. What drives the time is the guest, not
-Firecracker. `InstanceStart` returns about 30 ms after process start, and the
-first console byte follows 10–15 ms later. The kernel then takes about
-0.85–0.97 s to reach init. About 0.5 s of that is the legacy i8042 keyboard
-probe, which a boot argument removes. Systemd and the getty then take another
-0.6–0.85 s to reach the shell. The 428 MB rootfs is read lazily from a warm
-page cache, so these runs show no rootfs-size effect, and a cold-disk boot
-was not measured.
+**Under 2 s cold boot is realistic, and about a second is already reached.**
+On the bare-metal reference box, the quickstart guest reaches a root shell in
+1.07 s (median; p90 1.10 s) with the guide's boot args, and in 0.57 s (p90
+0.60 s) with the i8042 probe off, still with full Ubuntu systemd.
 
-What the nested numbers **cannot** tell us: absolute bare-metal times (every
-VM exit, including each serial console byte, costs more under nested
-virtualization), the spread between machines (three runner CPUs varied by
-about 300 ms), and anything about the old laptop, including whether it has
-KVM at all. What they **can** tell us: the breakdown, that Firecracker
-overhead is negligible, that the guide's boot args leave about 0.5 s of
-kernel time on the table, and that "about a second" needs both that fix and a
-lighter init than full Ubuntu systemd. Building that image is the image
-issue's job. Fill in the pending rows before treating any of this as decided.
+What drives the time is the guest, not Firecracker. On bare metal:
+
+- Firecracker: `InstanceStart` returns about 34 ms after process start, and
+  the first console byte follows about 20 ms later.
+- The legacy i8042 keyboard probe: about 0.5 s of kernel time (boot-timer
+  709 → 201 ms). One boot argument removes it, so the base image (#8) must set
+  `i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd`.
+- The kernel without that probe: about 155 ms to init.
+- Systemd and the autologin getty: about 0.33 s to the shell. A lighter init
+  is optional for the 1 s goal, but it is the next-largest cost.
+- Rootfs size: not visible here. The 428 MB rootfs is read lazily from a warm
+  page cache, and a cold-disk boot was not measured.
+
+The nested GitHub runners were 1.5–2.6x slower to the prompt (1.15–1.47 s
+with the probe off), mostly in the kernel and systemd. Use them to check that
+boot works, not for timing.
+
+Deferred to the M1 gate (#19): whether an old laptop has usable KVM at all,
+and how fast it boots. That is the risk the old-laptop row was meant to
+retire.
