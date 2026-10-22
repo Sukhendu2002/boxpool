@@ -20,6 +20,7 @@ func getFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("path is required"))
 		return
 	}
+	src = filepath.Clean(src)
 	if _, err := os.Lstat(src); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, os.ErrNotExist) {
@@ -29,7 +30,7 @@ func getFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reject unsupported entries before the response status is committed.
-	if err := filepath.Walk(filepath.Clean(src), func(name string, info fs.FileInfo, err error) error {
+	if err := filepath.Walk(src, func(name string, info fs.FileInfo, err error) error {
 		if err != nil {
 			return fmt.Errorf("entry %q: %w", name, err)
 		}
@@ -68,6 +69,18 @@ func checkFileType(name string, info fs.FileInfo) error {
 
 func writeTar(w io.Writer, src string) error {
 	src = filepath.Clean(src)
+	base := filepath.Base(src)
+	if base == ".." {
+		// Parent paths need a local archive root; Abs cleans without following symlinks.
+		abs, err := filepath.Abs(src)
+		if err != nil {
+			return err
+		}
+		base = filepath.Base(abs)
+	}
+	if base == string(filepath.Separator) {
+		base = "."
+	}
 	tw := tar.NewWriter(w)
 	err := filepath.Walk(src, func(name string, info fs.FileInfo, err error) error {
 		if err != nil {
@@ -90,10 +103,6 @@ func writeTar(w io.Writer, src string) error {
 		rel, err := filepath.Rel(src, name)
 		if err != nil {
 			return err
-		}
-		base := filepath.Base(src)
-		if base == string(filepath.Separator) {
-			base = "."
 		}
 		h.Name = path.Join(filepath.ToSlash(base), filepath.ToSlash(rel))
 		h.Format = tar.FormatPAX // keep subsecond mtimes
