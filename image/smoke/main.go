@@ -85,6 +85,15 @@ func check(ctx context.Context, socket, version string) error {
 test -t 0
 test -r /proc/net/tcp
 test -r /proc/net/tcp6
+dev_mounts=0
+while read -r _ target fstype options _; do
+    test "$target" = /dev || continue
+    test "$fstype" = devtmpfs
+    case ,$options, in *,nosuid,*) ;; *) exit 1 ;; esac
+    dev_mounts=$((dev_mounts + 1))
+done < /proc/mounts
+test "$dev_mounts" = 1
+test -c /dev/null
 test -c /dev/ptmx
 test -d /dev/pts
 test "$(printf stdin-ok | cat /dev/stdin)" = stdin-ok

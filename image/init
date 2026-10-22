@@ -1,9 +1,18 @@
 #!/bin/sh
 # VM-only init. Docker starts tini directly and never runs this setup.
 set -eu
-mount -t devtmpfs -o nosuid devtmpfs /dev
-mkdir -p /dev/pts /dev/shm
 mount -t proc -o nosuid,nodev,noexec proc /proc
+# The pinned kernel mounts devtmpfs before starting init. Verify that contract
+# before remounting: remount alone does not check the existing filesystem type.
+dev_mounted=false
+while read -r _ target fstype _; do
+    [ "$target" = /dev ] || continue
+    [ "$fstype" = devtmpfs ] || { echo 'init: /dev must be devtmpfs' >&2; exit 1; }
+    dev_mounted=true
+done < /proc/mounts
+[ "$dev_mounted" = true ] || { echo 'init: kernel did not mount /dev' >&2; exit 1; }
+mount -t devtmpfs -o remount,nosuid devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
 ln -s /proc/self/fd /dev/fd
 ln -s /proc/self/fd/0 /dev/stdin
 ln -s /proc/self/fd/1 /dev/stdout

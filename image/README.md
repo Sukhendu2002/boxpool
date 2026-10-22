@@ -135,7 +135,8 @@ file vmlinux-amd64 bzImage-amd64 /tmp/boxpool-rootfs-amd64.ext4
 
 `build-kernel.sh` adapts those configs to the pinned upstream kernel with
 `olddefconfig`, disables loadable modules and i8042 probing, removes debug
-information, and requires built-in ext4, devtmpfs, tmpfs, PTYs, proc/sysfs,
+information, and requires built-in ext4, devtmpfs (including
+`CONFIG_DEVTMPFS_MOUNT=y`), tmpfs, PTYs, proc/sysfs,
 virtio block/network/console, MMIO, PCI and vsock support. Both use 4 KiB
 pages. Config changes must be checked against both native builds and boots.
 The [Firecracker kernel policy](https://github.com/firecracker-microvm/firecracker/blob/main/docs/kernel-policy.md)
@@ -154,8 +155,12 @@ so no initial RAM disk is needed. The driver itself is outside this issue.
 
 ## Init and container behavior
 
-The VM kernel runs `/sbin/init`: it mounts devtmpfs, proc, sysfs, writable
-tmpfs `/run` and `/tmp`, shared memory and a new devpts instance with
+The VM kernel automatically mounts devtmpfs at `/dev` before running
+`/sbin/init` (no initramfs; do not disable it with `devtmpfs.mount=0`). Init
+mounts proc, verifies `/dev` is devtmpfs, and remounts it with `nosuid`.
+A missing/wrong `/dev` mount or any mount failure stops init. It then mounts
+sysfs, writable tmpfs `/run` and `/tmp`, shared memory and a new devpts
+instance with
 `/dev/ptmx` linked to `/dev/pts/ptmx`. After mounting proc, it creates
 `/dev/fd -> /proc/self/fd` and `/dev/stdin`, `/dev/stdout`, `/dev/stderr`
 links to descriptors 0, 1, 2 there. `/var/tmp` is writable on ext4. It
@@ -192,7 +197,8 @@ v1.17.0** as [`bench-boot.sh`](../scripts/bench-boot.sh), decompresses a
 temporary disk, boots a 2-vCPU/256-MiB VM with PCI virtio and a vsock device
 (CID 3), then calls `/v1/version` through the host-side vsock UDS. It checks
 the exact protocol/agent/image version, PTY exec, proc TCP discovery,
-mounts, writable directories, metadata and PID 1 orphan reaping. It also
+mounts (including exactly one devtmpfs at `/dev` with `nosuid`), writable
+directories, metadata and PID 1 orphan reaping. It also
 pipes input through `/dev/stdin` and `/dev/fd/0` and checks writes through
 `/dev/stdout` and `/dev/stderr` reach their respective redirected streams.
 Success prints `GET /v1/version: protocol=1 agent=v0.1.0` and the smoke result.
