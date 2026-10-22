@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Enable once with: git config core.hooksPath .githooks   (skip a push's check with --no-verify)
+host=${BOXPOOL_LINUX_HOST:-}
+if [ -z "$host" ]; then
+	echo "pre-push: BOXPOOL_LINUX_HOST not set, skipping Linux checks" >&2
+	exit 0
+fi
+# shortcut: an unreachable machine only warns, so pushes work away from home; make it fail if that bites.
+if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$host" true 2>/dev/null; then
+	echo "pre-push: $host unreachable, skipping Linux checks" >&2
+	exit 0
+fi
+exec "$(git rev-parse --show-toplevel)/scripts/test-on-linux.sh"

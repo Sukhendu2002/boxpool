@@ -36,8 +36,12 @@ the warning does not affect the backend or exit status.
 
 ## Development
 
+See the [Linux and KVM development setup](docs/development.md) for a Linux
+machine or VM, including how to build on a Mac and run there.
+
 ```sh
 go build -o bin/boxpool ./cmd/boxpool
+go vet ./...
 go test ./...
 ./bin/boxpool doctor
 ```
