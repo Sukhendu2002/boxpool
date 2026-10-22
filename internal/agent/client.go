@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 
 	"github.com/coder/websocket"
 )
@@ -150,4 +151,60 @@ func (s *Session) Wait() (int, error) {
 func (s *Session) send(m message) error {
 	b, _ := json.Marshal(m)
 	return s.conn.Write(s.ctx, websocket.MessageText, b)
+}
+
+// Upload extracts a tar stream into the existing directory dest.
+func (c *Client) Upload(ctx context.Context, dest string, tar io.Reader) error {
+	resp, err := c.request(ctx, http.MethodPut, "/v1/files?path="+url.QueryEscape(dest), tar)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+// Download returns a tar rooted at the base name of src. The caller must
+// read to EOF to detect interrupted transfers, then close the body.
+func (c *Client) Download(ctx context.Context, src string) (io.ReadCloser, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/v1/files?path="+url.QueryEscape(src), nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+// Ports returns a snapshot of the guest's listening TCP sockets.
+func (c *Client) Ports(ctx context.Context) ([]Port, error) {
+	resp, err := c.request(ctx, http.MethodGet, "/v1/ports", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var ports []Port
+	err = json.NewDecoder(resp.Body).Decode(&ports)
+	return ports, err
+}
+
+func (c *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, "http://agent"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if method == http.MethodPut {
+		req.Header.Set("Content-Type", "application/x-tar")
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	want := http.StatusOK
+	if method == http.MethodPut {
+		want = http.StatusNoContent
+	}
+	if resp.StatusCode != want {
+		defer resp.Body.Close()
+		var e errorResponse
+		json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e)
+		return nil, fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, e.Message)
+	}
+	return resp, nil
 }

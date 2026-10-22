@@ -1,8 +1,9 @@
 # Guest agent protocol
 
 `boxpool-agent` runs inside every sandbox. The host (the node daemon) talks
-to it to run commands. This page describes every request and message, so a
-client can be written without reading the agent's code.
+to it to run commands, transfer files and list listening TCP ports. This
+page describes every request and message, so a client can be written
+without reading the agent's code.
 
 Protocol version: **1**.
 
@@ -195,3 +196,124 @@ the command reads, writes or exits, or the agent stops.
 | agent → client | binary | `01 68 69 0a` (stdout `hi\n`) |
 | agent → client | text | `{"type":"exit","code":3}` |
 | agent → client | close | 1000 |
+
+## File transfer
+
+Both endpoints stream **uncompressed tar** (`application/x-tar`), without
+buffering whole files. Paths are URL query values: percent-encode spaces,
+`&`, `+`, `#` and other special characters. Relative paths are relative to
+the agent's working directory.
+
+Regular files, directories and symbolic links are supported. File and
+directory mode bits (including executable, set-id and sticky bits) and
+mtimes are preserved; PAX headers retain subsecond mtimes. Directory
+metadata is applied after all contents have been written. Symlink targets
+and mtimes are preserved without following the link; symlink permissions
+are preserved where the OS supports them (Linux always uses `0777`).
+Ownership is not preserved: extracted entries belong to the agent's user,
+with group assignment following the destination filesystem's rules. There
+is no ACL, extended-attribute or hard-link identity preservation. Hard-link,
+device, FIFO and other unsupported tar entry types are rejected, not skipped.
+
+### `GET /v1/files?path=SRC`
+
+Returns `200 OK` with a tar rooted at `base(SRC)`, after cleaning the path.
+A regular file or symlink gives one entry. A directory gives its own entry
+and every descendant, without following symlinks, including a symlink
+passed as `SRC`. A filesystem root or `.` is represented by `.`.
+
+For example, `/work/project` gives `project`, `project/run.sh`,
+`project/subdir`, etc.; `/work/project/run.sh` gives just `run.sh`.
+
+```sh
+curl --fail --unix-socket /run/boxpool/agent.sock \
+  'http://agent/v1/files?path=/work/project' -o project.tar
+# Extract into an existing host directory (only for a trusted guest archive):
+tar -xf project.tar -C ./download
+```
+
+The tree is checked for unsupported entry types before streaming; rejected
+entries use the JSON shape below. If reading a source fails after streaming
+has begun (for example because it changes during the transfer),
+the agent aborts the HTTP response: no valid completed tar is returned.
+Clients must read the HTTP body to EOF and check for transport errors,
+even after the tar reader reaches its end. Host-side safe extraction of
+untrusted guest archives belongs to `boxpool cp` (#16).
+
+### `PUT /v1/files?path=DEST`
+
+Extracts the request-body tar **into the existing directory** `DEST`;
+returns `204 No Content`. It does not rename the archive root to `DEST`.
+For example, a tar with `project/run.sh` sent to `/work` creates
+`/work/project/run.sh`. A tar containing only `run.sh` creates `/work/run.sh`.
+Missing parent directories within the archive are created. Existing regular
+files and symlinks at file-entry destinations are replaced; existing
+directories are merged. Conflicts between directories and other entry types
+are rejected. A failed PUT may leave entries written before the failure,
+including temporary directory permissions; it is not transactional.
+
+```sh
+# ./project contains the directory to copy. /work must already exist.
+# Avoid platform-specific metadata entries when preparing the tar.
+tar -cf project.tar -C . project
+curl --fail --unix-socket /run/boxpool/agent.sock -X PUT \
+  -H 'Content-Type: application/x-tar' --data-binary @project.tar \
+  'http://agent/v1/files?path=/work'
+```
+
+Absolute entry names and cleaned names that escape `DEST` via `..` are
+rejected. `DEST` itself may be a symlink to a directory; it is resolved
+before extraction. Below it, symlink parents are rejected, even when their
+targets are inside `DEST`. A symlink can point anywhere (including outside
+`DEST`, or to a missing target), but later entries cannot write through it.
+These checks protect against archive-directed traversal; the guest is not
+a security boundary against concurrent changes by its own processes.
+
+### HTTP errors
+
+The file and ports endpoints return `application/json` errors:
+
+```json
+{"message":"entry \"../escape\": path escapes destination"}
+```
+
+- `400 Bad Request`: absent/empty `path`, non-directory upload destination,
+  invalid tar, rejected entry or extraction failure. Archive errors name the
+  entry; an unreadable header names the preceding entry or `<header>`.
+- `404 Not Found`: source path or destination directory does not exist.
+- `500 Internal Server Error`: other failures looking up a path or reading
+  listening ports (including an unsupported operating system).
+
+## `GET /v1/ports`
+
+Returns `200 OK`, `application/json`, with a snapshot of listening TCP
+sockets in the guest's network namespace:
+
+```json
+[{"proto":"tcp","address":"0.0.0.0","port":8000},{"proto":"tcp","address":"::1","port":8080}]
+```
+
+Only state `0A` (`LISTEN`) from `/proc/net/tcp` and `/proc/net/tcp6` is
+included; established connections and UDP are excluded. IPv6 addresses
+use normal text notation (for example `::ffff:192.0.2.1` for an IPv4-mapped
+address). An empty snapshot is `[]`. Each listening socket has an entry;
+there is no promised ordering, deduplication or port watching. Missing
+`/proc/net/tcp6` is allowed when IPv6 is disabled. This endpoint requires
+Linux; other operating systems return an explicit unsupported error.
+
+```sh
+python3 -m http.server 8000
+# In another terminal:
+curl --fail --unix-socket /run/boxpool/agent.sock http://agent/v1/ports
+# Includes {"proto":"tcp","address":"0.0.0.0","port":8000}.
+```
+
+## Go client
+
+`internal/agent.Client` exposes `Upload(ctx, dest, tar io.Reader) error`,
+`Download(ctx, src) (io.ReadCloser, error)` and `Ports(ctx) ([]Port, error)`
+for the daemon. `Upload` consumes an already-prepared tar stream;
+`Download` returns the HTTP response body, which the caller must drain to
+EOF (checking read errors) and close. Cancelling the context interrupts the
+request/transfer. Non-success responses include the HTTP status and the
+agent's JSON error message in the returned error. No CLI is added here.
