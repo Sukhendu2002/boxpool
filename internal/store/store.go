@@ -10,6 +10,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,10 +53,35 @@ type Store struct {
 // Open opens or creates the database at path and migrates it to the latest
 // schema.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
 	}
+	// SQLite gives the -wal and -shm files the database file's mode, so
+	// creating and tightening it first keeps all three private.
+	f, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	for _, p := range []string{abs, abs + "-wal", abs + "-shm"} {
+		if err := os.Chmod(p, 0600); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
+	// An escaped file: URL keeps '?', '#' and '%' in the path from being
+	// read as the query string.
+	dsn := url.URL{Scheme: "file", Path: abs, RawQuery: url.Values{
+		"_pragma": {"busy_timeout(5000)", "journal_mode(WAL)", "foreign_keys(1)"},
+	}.Encode()}
+	db, err := sql.Open("sqlite", dsn.String())
+	if err != nil {
+		return nil, err
+	}
+	// SQLite 3.51.2 (modernc.org/sqlite v1.46.1) can corrupt a WAL database
+	// when writes and checkpoints run on separate connections
+	// (https://www.sqlite.org/wal.html#walreset), so use one connection.
+	db.SetMaxOpenConns(1)
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
