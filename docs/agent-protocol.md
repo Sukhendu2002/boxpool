@@ -217,13 +217,18 @@ device, FIFO and other unsupported tar entry types are rejected, not skipped.
 
 ### `GET /v1/files?path=SRC`
 
-Returns `200 OK` with a tar rooted at `base(SRC)`, after cleaning the path.
+Returns `200 OK` with a tar rooted at `base(SRC)`, after lexically cleaning
+the path before inspecting it (including removing trailing slashes).
 A regular file or symlink gives one entry. A directory gives its own entry
 and every descendant, without following symlinks, including a symlink
-passed as `SRC`. A filesystem root or `.` is represented by `.`.
+passed as `SRC`. If the cleaned basename is `..`, the archive root is the
+basename of the absolute source path, without resolving symlinks. A
+filesystem root or a path cleaned to `.` is represented by `.`.
 
 For example, `/work/project` gives `project`, `project/run.sh`,
 `project/subdir`, etc.; `/work/project/run.sh` gives just `run.sh`.
+From working directory `/work/project/child`, `..` gives `project`,
+`project/child`, etc.; `.` gives `.`, `data` (for a child named `data`), etc.
 
 ```sh
 curl --fail --unix-socket /run/boxpool/agent.sock \

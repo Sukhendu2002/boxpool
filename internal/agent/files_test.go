@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -165,6 +167,180 @@ func TestDownloadSingleEntry(t *testing.T) {
 				t.Errorf("next entry = %v, want EOF", err)
 			}
 		})
+	}
+}
+
+func makeDownloadSource(t *testing.T, src string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(src, "child"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"file", "child/data"} {
+		if err := os.WriteFile(filepath.Join(src, name), []byte(name+" contents"), 0751); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, target := range map[string]string{"link": "file", "dir-link": "child", "dangling": "missing"} {
+		if err := os.Symlink(target, filepath.Join(src, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mtime := time.Unix(1700000000, 123456789)
+	if err := filepath.Walk(src, func(name string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return setSymlinkMetadata(name, 0777, mtime)
+		}
+		if info.IsDir() {
+			if err := os.Chmod(name, 0750); err != nil {
+				return err
+			}
+		}
+		return os.Chtimes(name, mtime, mtime)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDownloadCopy(t *testing.T, src, dest string) {
+	t.Helper()
+	if err := filepath.Walk(src, func(name string, want os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, name)
+		if err != nil {
+			return err
+		}
+		p := filepath.Join(dest, rel)
+		got, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if got.Mode() != want.Mode() || !got.ModTime().Equal(want.ModTime()) {
+			t.Errorf("%s: mode %v, mtime %v; want %v, %v", p, got.Mode(), got.ModTime(), want.Mode(), want.ModTime())
+		}
+		if want.Mode()&os.ModeSymlink != 0 {
+			wantLink, err := os.Readlink(name)
+			if err != nil {
+				return err
+			}
+			gotLink, err := os.Readlink(p)
+			if err != nil || gotLink != wantLink {
+				t.Errorf("%s: link = %q, %v; want %q", p, gotLink, err, wantLink)
+			}
+		} else if want.Mode().IsRegular() {
+			wantData, err := os.ReadFile(name)
+			if err != nil {
+				return err
+			}
+			gotData, err := os.ReadFile(p)
+			if err != nil || !bytes.Equal(gotData, wantData) {
+				t.Errorf("%s: contents differ: %v", p, err)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDownloadTrailingSlash(t *testing.T) {
+	c := serve(t)
+	src := filepath.Join(t.TempDir(), "source")
+	makeDownloadSource(t, src)
+	for _, name := range []string{"file", "child", "link", "dir-link", "dangling"} {
+		for _, suffix := range []string{"", "/", "//"} {
+			t.Run(name+suffix, func(t *testing.T) {
+				body, err := c.Download(testContext(t), filepath.Join(src, name)+suffix)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer body.Close()
+				dest := t.TempDir()
+				if err := c.Upload(testContext(t), dest, body); err != nil {
+					t.Fatal(err)
+				}
+				assertDownloadCopy(t, filepath.Join(src, name), filepath.Join(dest, name))
+			})
+		}
+	}
+}
+
+func TestDownloadRelativePaths(t *testing.T) {
+	// Set the subprocess cwd instead of changing the test runner's global cwd.
+	const childEnv = "BOXPOOL_TEST_DOWNLOAD_CWD"
+	if os.Getenv(childEnv) != "1" {
+		src := filepath.Join(t.TempDir(), "source")
+		makeDownloadSource(t, src)
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(exe, "-test.run=^TestDownloadRelativePaths$", "-test.v", "-test.timeout=30s")
+		cmd.Dir = filepath.Join(src, "child")
+		cmd.Env = append(os.Environ(), childEnv+"=1")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("relative-path subprocess: %v\n%s", err, out)
+		}
+		return
+	}
+	c := serve(t)
+	for _, tc := range []struct{ src, root string }{
+		{"..", "source"},
+		{"../child/..", "source"},
+		{"../..", ""}, // The temp-directory basename depends on the test runner.
+		{".", "."},
+		{"../child/.", "child"},
+	} {
+		t.Run(tc.src, func(t *testing.T) {
+			if tc.root == "" {
+				abs, err := filepath.Abs(tc.src)
+				if err != nil {
+					t.Fatal(err)
+				}
+				tc.root = filepath.Base(abs)
+			}
+			body, err := c.Download(testContext(t), tc.src)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer body.Close()
+			dest := t.TempDir()
+			if err := c.Upload(testContext(t), dest, body); err != nil {
+				t.Fatal(err)
+			}
+			assertDownloadCopy(t, filepath.Clean(tc.src), filepath.Join(dest, tc.root))
+		})
+	}
+}
+
+// Stop as soon as the first complete header is available, so the filesystem
+// root naming test never traverses the machine's directory tree.
+type firstTarHeader struct {
+	bytes.Buffer
+	header *tar.Header
+}
+
+func (w *firstTarHeader) Write(p []byte) (int, error) {
+	n, _ := w.Buffer.Write(p)
+	h, err := tar.NewReader(bytes.NewReader(w.Bytes())).Next()
+	if err == nil {
+		w.header = h
+		return n, io.ErrClosedPipe
+	}
+	return n, nil
+}
+
+func TestDownloadFilesystemRoot(t *testing.T) {
+	var w firstTarHeader
+	if err := writeTar(&w, string(filepath.Separator)); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("writeTar = %v, want stopped after root header", err)
+	}
+	if w.header == nil || w.header.Name != "." || w.header.Typeflag != tar.TypeDir {
+		t.Fatalf("root header = %+v, want directory named .", w.header)
 	}
 }
 
