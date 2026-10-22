@@ -94,7 +94,10 @@ jobs:
         env:
           IMAGE_VERSION: ${{ steps.version.outputs.value }}
           OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
-        run: sg kvm -c 'image/smoke.sh "$OUTPUT_DIR" "$IMAGE_VERSION"'
+        run: |
+          # Expand exported variables in the child shell started by sg.
+          # shellcheck disable=SC2016
+          sg kvm -c 'image/smoke.sh "$OUTPUT_DIR" "$IMAGE_VERSION"'
       - name: Record artifact sizes and checksums
         env:
           ARCH: ${{ matrix.arch }}
