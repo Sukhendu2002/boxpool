@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -25,6 +26,23 @@ type Report struct {
 	Arch    string
 	Backend string
 	Checks  []Check
+}
+
+// StateDir returns the directory Boxpool keeps its state in: BOXPOOL_HOME
+// when set, otherwise /var/lib/boxpool on Linux and
+// ~/Library/Application Support/boxpool on macOS.
+func StateDir() (string, error) {
+	if dir := os.Getenv("BOXPOOL_HOME"); dir != "" {
+		return dir, nil
+	}
+	if runtime.GOOS == "darwin" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, "Library", "Application Support", "boxpool"), nil
+	}
+	return "/var/lib/boxpool", nil
 }
 
 // Run performs the checks for the current OS.
