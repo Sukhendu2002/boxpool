@@ -42,3 +42,14 @@ type message struct {
 	Code    *int   `json:"code,omitempty"`
 	Message string `json:"message,omitempty"`
 }
+
+// Port is a listening TCP socket reported by GET /v1/ports.
+type Port struct {
+	Proto   string `json:"proto"`
+	Address string `json:"address"`
+	Port    int    `json:"port"`
+}
+
+type errorResponse struct {
+	Message string `json:"message"`
+}

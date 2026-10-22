@@ -97,6 +97,9 @@ func removeStaleSocket(path string) error {
 func Serve(ctx context.Context, l net.Listener, version string) error {
 	var sessions sync.WaitGroup
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/files", getFiles)
+	mux.HandleFunc("PUT /v1/files", putFiles)
+	mux.HandleFunc("GET /v1/ports", getPorts)
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(Version{Protocol: ProtocolVersion, Agent: version})
@@ -137,4 +140,10 @@ func finish(ctx context.Context, c *websocket.Conn, m message) bool {
 
 func execError(ctx context.Context, c *websocket.Conn, err error) {
 	finish(ctx, c, message{Type: "error", Message: err.Error()})
+}
+
+func writeError(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(errorResponse{Message: err.Error()})
 }
