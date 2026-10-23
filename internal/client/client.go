@@ -70,6 +70,33 @@ func (c *Client) GetSandbox(ctx context.Context, name string) (daemon.Sandbox, e
 	return sb, err
 }
 
+// ListSandboxes returns every sandbox on this node, oldest first.
+func (c *Client) ListSandboxes(ctx context.Context) ([]daemon.Sandbox, error) {
+	var list []daemon.Sandbox
+	err := c.get(ctx, "/v1/sandboxes", &list)
+	return list, err
+}
+
+// StopSandbox stops the named sandbox. The result's Warning is set if it
+// did not shut down cleanly.
+func (c *Client) StopSandbox(ctx context.Context, name string) (daemon.Sandbox, error) {
+	var sb daemon.Sandbox
+	err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(name)+"/stop", nil, &sb)
+	return sb, err
+}
+
+// RemoveSandbox deletes the named sandbox and frees its resources. Without
+// force the daemon refuses a running sandbox; with it, it stops it first.
+func (c *Client) RemoveSandbox(ctx context.Context, name string, force bool) (daemon.Sandbox, error) {
+	var sb daemon.Sandbox
+	path := "/v1/sandboxes/" + url.PathEscape(name)
+	if force {
+		path += "?force=1"
+	}
+	err := c.do(ctx, http.MethodDelete, path, nil, &sb)
+	return sb, err
+}
+
 // Exec starts a command in the named sandbox through the daemon, which
 // relays the agent's exec protocol unchanged.
 func (c *Client) Exec(ctx context.Context, name string, req agent.ExecRequest, stdout, stderr io.Writer) (*agent.Session, error) {
@@ -89,23 +116,59 @@ func (c *Client) get(ctx context.Context, path string, v any) error {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, v any) error {
-	// The host is ignored: every request goes to the socket.
-	req, err := http.NewRequestWithContext(ctx, method, "http://boxpool"+path, body)
-	if err != nil {
-		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := c.hc.Do(req)
+	resp, err := c.send(ctx, method, path, "application/json", body)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return apiError(method, path, resp)
-	}
 	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// Upload extracts a tar stream into the existing directory dest in the
+// named sandbox.
+func (c *Client) Upload(ctx context.Context, name, dest string, tar io.Reader) error {
+	resp, err := c.send(ctx, http.MethodPut, filesPath(name, dest), "application/x-tar", tar)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+// Download returns src in the named sandbox as a tar rooted at its base
+// name. The tar comes from the guest, so it is untrusted. The caller must
+// read to EOF to detect interrupted transfers, then close it.
+func (c *Client) Download(ctx context.Context, name, src string) (io.ReadCloser, error) {
+	resp, err := c.send(ctx, http.MethodGet, filesPath(name, src), "", nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+func filesPath(name, path string) string {
+	return "/v1/sandboxes/" + url.PathEscape(name) + "/files?path=" + url.QueryEscape(path)
+}
+
+// send sends a request and returns the response if it succeeded, or the
+// daemon's error.
+func (c *Client) send(ctx context.Context, method, path, contentType string, body io.Reader) (*http.Response, error) {
+	// The host is ignored: every request goes to the socket.
+	req, err := http.NewRequestWithContext(ctx, method, "http://boxpool"+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", contentType)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		defer resp.Body.Close()
+		return nil, apiError(method, path, resp)
+	}
+	return resp, nil
 }
 
 // apiError returns the daemon's error message, or the status without one.

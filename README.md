@@ -9,18 +9,39 @@ from anywhere, with no per-minute bills.
 
 > Status: early development. Nothing here is usable yet.
 
-## Planned commands
+## Commands
 
 ```sh
-boxpool up            # start a pool on this machine (head node)
-boxpool join <token>  # add another machine to the pool
+boxpool up            # install and start the daemon on this machine
+boxpool down          # stop the daemon, keeping its state
+boxpool join <token>  # add another machine to the pool (planned)
 boxpool sh            # open a shell in a new sandbox
-boxpool ls            # list nodes and sandboxes
+boxpool exec box -- make test        # run a command in a sandbox
+boxpool cp ./src box:/root/          # copy files in or out
+boxpool ls            # list sandboxes (nodes too, once pools exist)
+boxpool stop box      # stop a sandbox
+boxpool rm box        # delete a sandbox
 boxpool doctor        # check whether this machine can host sandboxes
 ```
 
-Only `boxpool doctor`, `boxpool daemon`, `boxpool sh` and `boxpool version`
-work today, on one Linux machine.
+Working today, on one Linux machine: `boxpool doctor`, `boxpool daemon`,
+`boxpool up`, `boxpool down`, `boxpool sh`, `boxpool exec`, `boxpool cp`,
+`boxpool ls`, `boxpool stop`, `boxpool rm` and `boxpool version`. `join` is
+not implemented yet.
+
+`sudo boxpool up` installs the node on a Linux machine with systemd: it
+runs doctor's checks and refuses if they fail, copies the running binary
+to `/usr/local/bin/boxpool`, writes `/etc/systemd/system/boxpool.service`
+(`boxpool daemon` as root, restarted on failure), enables and starts it
+and waits until the daemon answers on `/var/lib/boxpool/boxpool.sock`. The
+first start downloads Firecracker and the guest image, about 60 MB.
+Running it again changes nothing unless the binary or the unit changed, in
+which case it restarts the service. `sudo boxpool down` stops and disables
+the service and keeps `/var/lib/boxpool`. Stopping or restarting the
+service stops only the daemon (`KillMode=process`): running Firecracker
+VMs keep running until the daemon starts again, which today kills them
+(#27 will re-adopt them); Docker sandboxes keep running. On macOS, `up`
+and `down` are not supported yet (#22).
 
 `boxpool daemon` runs the node daemon in the foreground. It creates the state
 directory (below), takes `daemon.lock` there so only one daemon runs per state
@@ -51,6 +72,36 @@ the first prompt. The daemon's API for this is `POST /v1/sandboxes`
 unchanged.
 
 `boxpool version` also prints the daemon's version when one is running.
+
+`boxpool exec [-i] [-t] <sandbox> [--] <command...>` runs a command in a
+running sandbox and exits with its exit code. Without `-t` its stdout and
+stderr stay separate and its stdin is empty, unless `-i` forwards yours;
+`-t` runs it on your terminal in raw mode, as `sh` does. As with
+`docker exec`, it exits 125 when `boxpool exec` itself fails (bad
+arguments, no daemon, sandbox missing or stopped, connection lost before
+the command exited), else with the command's code, or 128+n if signal n
+killed it; a command that exits 125 itself looks the same.
+
+`boxpool cp SRC DST` copies a file or directory between this machine and a
+sandbox; exactly one side is `<sandbox>:<absolute path>`. Like `docker cp`,
+the copy keeps modes, modification times and symlinks (not owners): into
+the sandbox it lands inside the existing directory DST; out of it, inside
+DST if that is a directory, else as DST. Copies out of a sandbox are
+treated as hostile: every entry must be inside the copy you asked for (no
+absolute paths, `..`, or writes through symlinks), hard links and devices
+are refused, and set-user-ID and set-group-ID bits are dropped. The API is
+`GET` and `PUT /v1/sandboxes/{name}/files?path=`, which relay the agent's
+tar endpoints unchanged.
+
+`boxpool ls [--json]` lists this machine's sandboxes, oldest first, with
+their name, backend, state, CPUs, memory and age; the state is the
+backend's live one (`missing` if the backend no longer has the sandbox).
+`boxpool stop <name>` shuts a sandbox down and keeps its disk and its
+resource reservation. `boxpool rm [--force] <name>` deletes a stopped
+sandbox with its process, disk, network and reservation; `--force` stops a
+running one first. If a guest does not shut down cleanly, both print a
+warning and still succeed. The API is `GET /v1/sandboxes`,
+`POST /v1/sandboxes/{name}/stop` and `DELETE /v1/sandboxes/{name}?force=1`.
 
 `boxpool-agent` is the process inside every sandbox that runs commands for
 the host, on vsock port 1024 by default or on a unix socket with

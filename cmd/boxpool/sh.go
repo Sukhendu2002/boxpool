@@ -94,25 +94,25 @@ func sh(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "sandbox %s (%s)\n", sb.Name, sb.Backend)
-	code := attach(ctx, c, sb.Name, os.Stdin, os.Stdout, os.Stderr, start, *timing)
-	if code >= 0 {
-		fmt.Fprintf(os.Stderr, "sandbox %s is still running; reattach with: boxpool sh %s\n", sb.Name, sb.Name)
-		return code
+	code, err := attach(ctx, c, sb.Name, shell, os.Stdin, os.Stdout, os.Stderr, start, *timing)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "boxpool sh: %v\n", err)
+		return 1
 	}
-	return 1
+	fmt.Fprintf(os.Stderr, "sandbox %s is still running; reattach with: boxpool sh %s\n", sb.Name, sb.Name)
+	return code
 }
 
-// attach runs the guest shell on in's terminal, in raw mode, until it exits,
-// and returns its exit code, or -1 after printing why the session failed.
-// The terminal is restored on every return and on panic.
-func attach(ctx context.Context, c *client.Client, name string, in *os.File, out, errOut io.Writer, start time.Time, timing bool) int {
+// attach runs argv in the sandbox on in's terminal, in raw mode, until it
+// exits, and returns its exit code. The terminal is restored on every
+// return and on panic.
+func attach(ctx context.Context, c *client.Client, name string, argv []string, in *os.File, out, errOut io.Writer, start time.Time, timing bool) (int, error) {
 	fd := int(in.Fd())
 	cols, rows, err := term.GetSize(fd)
 	if err != nil {
-		fmt.Fprintf(errOut, "boxpool sh: %v\n", err)
-		return -1
+		return 0, err
 	}
-	req := agent.ExecRequest{Argv: shell, TTY: true, Rows: uint16(rows), Cols: uint16(cols),
+	req := agent.ExecRequest{Argv: argv, TTY: true, Rows: uint16(rows), Cols: uint16(cols),
 		Env: []string{"TERM=" + cmp.Or(os.Getenv("TERM"), "xterm-256color")}}
 	if timing {
 		out = &firstWrite{w: out, f: func() {
@@ -121,8 +121,7 @@ func attach(ctx context.Context, c *client.Client, name string, in *os.File, out
 	}
 	old, err := term.MakeRaw(fd)
 	if err != nil {
-		fmt.Fprintf(errOut, "boxpool sh: %v\n", err)
-		return -1
+		return 0, err
 	}
 	defer term.Restore(fd, old)
 
@@ -132,9 +131,7 @@ func attach(ctx context.Context, c *client.Client, name string, in *os.File, out
 	defer signal.Stop(winch)
 	s, err := c.Exec(ctx, name, req, out, out)
 	if err != nil {
-		term.Restore(fd, old)
-		fmt.Fprintf(errOut, "boxpool sh: %v\n", err)
-		return -1
+		return 0, err
 	}
 	resize := func() {
 		if cols, rows, err := term.GetSize(fd); err == nil {
@@ -152,12 +149,10 @@ func attach(ctx context.Context, c *client.Client, name string, in *os.File, out
 	go io.Copy(s, in)
 
 	code, err := s.Wait()
-	term.Restore(fd, old)
 	if err != nil {
-		fmt.Fprintf(errOut, "boxpool sh: connection to sandbox %s lost: %v\n", name, err)
-		return -1
+		return 0, fmt.Errorf("connection to sandbox %s lost: %w", name, err)
 	}
-	return code
+	return code, nil
 }
 
 // firstWrite calls f before the first write to w.

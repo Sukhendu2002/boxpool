@@ -79,7 +79,7 @@ func TestFilesRoundTrip(t *testing.T) {
 	r, w := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		err := writeTar(w, src)
+		err := WriteTar(w, src)
 		w.CloseWithError(err)
 		done <- err
 	}()
@@ -95,7 +95,7 @@ func TestFilesRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer body.Close()
-	if err := extractTar(body, out); err != nil {
+	if err := ExtractTar(body, out, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := io.Copy(io.Discard, body); err != nil {
@@ -336,8 +336,8 @@ func (w *firstTarHeader) Write(p []byte) (int, error) {
 
 func TestDownloadFilesystemRoot(t *testing.T) {
 	var w firstTarHeader
-	if err := writeTar(&w, string(filepath.Separator)); !errors.Is(err, io.ErrClosedPipe) {
-		t.Fatalf("writeTar = %v, want stopped after root header", err)
+	if err := WriteTar(&w, string(filepath.Separator)); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("WriteTar = %v, want stopped after root header", err)
 	}
 	if w.header == nil || w.header.Name != "." || w.header.Typeflag != tar.TypeDir {
 		t.Fatalf("root header = %+v, want directory named .", w.header)
@@ -477,7 +477,7 @@ func TestTarDotDirectoryMetadata(t *testing.T) {
 		&tar.Header{Name: "a", Typeflag: tar.TypeDir, Mode: 0500, ModTime: mtime},
 		&tar.Header{Name: "a/file", Typeflag: tar.TypeReg, Mode: 0400, Size: 1, ModTime: mtime},
 	)
-	if err := extractTar(body, dest); err != nil {
+	if err := ExtractTar(body, dest, nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{".", "a", "a/file"} {

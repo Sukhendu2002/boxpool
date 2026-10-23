@@ -242,8 +242,9 @@ entries use the JSON shape below. If reading a source fails after streaming
 has begun (for example because it changes during the transfer),
 the agent aborts the HTTP response: no valid completed tar is returned.
 Clients must read the HTTP body to EOF and check for transport errors,
-even after the tar reader reaches its end. Host-side safe extraction of
-untrusted guest archives belongs to `boxpool cp` (#16).
+even after the tar reader reaches its end. `boxpool cp` extracts guest
+archives on the host with extra checks, because a guest is untrusted: see
+the README.
 
 ### `PUT /v1/files?path=DEST`
 

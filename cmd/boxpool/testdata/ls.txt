@@ -1,0 +1,4 @@
+NAME             BACKEND       STATE     CPU   MEMORY   AGE
+web              firecracker   running   2     2g       4d
+sb-0c9a7e        firecracker   stopped   1     512m     19h
+old-docker-box   docker        missing   4     1536m    1m

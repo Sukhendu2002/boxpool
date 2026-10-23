@@ -1,0 +1,15 @@
+[Unit]
+Description=Boxpool node daemon
+Documentation=https://github.com/Sukhendu2002/boxpool
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/boxpool daemon
+Restart=on-failure
+RestartSec=2
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
