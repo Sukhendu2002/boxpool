@@ -3,7 +3,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -97,5 +99,90 @@ func TestUpDownRefused(t *testing.T) {
 		if code, _, errOut := cli(t, t.TempDir(), "", cmd); code != 1 || !strings.Contains(errOut, want) {
 			t.Errorf("boxpool %s = %d %q, want %q", cmd, code, errOut, want)
 		}
+	}
+}
+
+func TestObserve(t *testing.T) {
+	queryErr := errors.New("systemd query failed")
+	launchErr := &exec.Error{Name: "systemctl", Err: exec.ErrNotFound}
+	exitErr := &exec.ExitError{Stderr: []byte("unit is not enabled")}
+	for _, c := range []struct {
+		name        string
+		enabled     string
+		reload      string
+		pid         string
+		failCommand string
+		commandErr  error
+		unitChanged bool
+		want        upFacts
+		wantErr     string
+	}{
+		{name: "enabled no reload PID zero", enabled: "enabled\n", reload: "no\n", pid: "0\n", want: upFacts{enabled: "enabled"}},
+		{name: "reload pending unit changed", enabled: "enabled", reload: "yes", pid: "0", unitChanged: true, want: upFacts{unitChanged: true, enabled: "enabled", needReload: true}},
+		// A binary-only upgrade must not turn a failed PID query into start:
+		// the old daemon could still answer the subsequent health check.
+		{name: "MainPID query fails during binary upgrade", enabled: "enabled", reload: "no", failCommand: "show -p MainPID --value boxpool", commandErr: queryErr, wantErr: "systemctl show MainPID"},
+		{name: "MainPID query fails with output", enabled: "enabled", reload: "no", pid: "0", failCommand: "show -p MainPID --value boxpool", commandErr: queryErr, wantErr: "systemctl show MainPID"},
+		{name: "reload query fails", enabled: "enabled", failCommand: "show -p NeedDaemonReload --value boxpool", commandErr: queryErr, wantErr: "systemctl show NeedDaemonReload"},
+		{name: "reload query fails with output", enabled: "enabled", reload: "no", failCommand: "show -p NeedDaemonReload --value boxpool", commandErr: queryErr, wantErr: "systemctl show NeedDaemonReload"},
+		{name: "reload empty", enabled: "enabled", pid: "0", wantErr: "NeedDaemonReload: invalid value"},
+		{name: "reload malformed", enabled: "enabled", reload: "maybe", pid: "0", wantErr: "NeedDaemonReload: invalid value"},
+		{name: "reload uppercase", enabled: "enabled", reload: "YES", pid: "0", wantErr: "NeedDaemonReload: invalid value"},
+		{name: "PID empty", enabled: "enabled", reload: "no", wantErr: "MainPID: invalid value"},
+		{name: "PID malformed", enabled: "enabled", reload: "no", pid: "abc", wantErr: "MainPID: invalid value"},
+		{name: "PID negative", enabled: "enabled", reload: "no", pid: "-1", wantErr: "MainPID: invalid value"},
+		{name: "PID signed", enabled: "enabled", reload: "no", pid: "+1", wantErr: "MainPID: invalid value"},
+		{name: "PID nondecimal", enabled: "enabled", reload: "no", pid: "0x10", wantErr: "MainPID: invalid value"},
+		{name: "PID multiple values", enabled: "enabled", reload: "no", pid: "1\n2", wantErr: "MainPID: invalid value"},
+		{name: "PID overflow", enabled: "enabled", reload: "no", pid: "18446744073709551616", wantErr: "MainPID: invalid value"},
+		{name: "disabled nonzero exit", enabled: "disabled\n", reload: "no", pid: "0", failCommand: "is-enabled boxpool", commandErr: exitErr, want: upFacts{enabled: "disabled"}},
+		{name: "masked nonzero exit", enabled: "masked\n", reload: "no", pid: "0", failCommand: "is-enabled boxpool", commandErr: exitErr, want: upFacts{enabled: "masked"}},
+		{name: "runtime enabled", enabled: "enabled-runtime", reload: "no", pid: "0", want: upFacts{enabled: "enabled-runtime"}},
+		{name: "other state", enabled: "linked-runtime", reload: "no", pid: "0", want: upFacts{enabled: "linked-runtime"}},
+		{name: "future state nonzero exit", enabled: "future-state", reload: "no", pid: "0", failCommand: "is-enabled boxpool", commandErr: exitErr, want: upFacts{enabled: "future-state"}},
+		{name: "is-enabled launch error", failCommand: "is-enabled boxpool", commandErr: launchErr, wantErr: "systemctl is-enabled"},
+		{name: "is-enabled other error with output", enabled: "enabled", failCommand: "is-enabled boxpool", commandErr: queryErr, wantErr: "systemctl is-enabled"},
+		{name: "is-enabled empty", wantErr: "is-enabled: invalid state"},
+		{name: "is-enabled empty nonzero exit", failCommand: "is-enabled boxpool", commandErr: exitErr, wantErr: "is-enabled: invalid state"},
+		{name: "is-enabled diagnostic nonzero exit", enabled: "Failed to connect to bus", failCommand: "is-enabled boxpool", commandErr: exitErr, wantErr: "is-enabled: invalid state"},
+		{name: "nonzero PID stat failure", enabled: "enabled", reload: "no", pid: "999999999", want: upFacts{enabled: "enabled", staleExe: true}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			output := func(args ...string) ([]byte, error) {
+				command := strings.Join(args, " ")
+				var out string
+				switch command {
+				case "is-enabled boxpool":
+					out = c.enabled
+				case "show -p NeedDaemonReload --value boxpool":
+					out = c.reload
+				case "show -p MainPID --value boxpool":
+					out = c.pid
+				default:
+					t.Fatalf("unexpected command: systemctl %s", command)
+				}
+				if command == c.failCommand {
+					return []byte(out), c.commandErr
+				}
+				return []byte(out), nil
+			}
+			got, err := observe(c.unitChanged, output)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("observe = %+v, %v; want error containing %q", got, err, c.wantErr)
+				}
+				if got != (upFacts{}) {
+					t.Errorf("failed observation returned partial facts: %+v", got)
+				}
+				var exitErr *exec.ExitError
+				if c.commandErr != nil && !errors.As(c.commandErr, &exitErr) && !errors.Is(err, c.commandErr) {
+					t.Errorf("observation did not preserve command error: %v", err)
+				}
+				return
+			}
+			if err != nil || got != c.want {
+				t.Fatalf("observe = %+v, %v; want %+v", got, err, c.want)
+			}
+		})
 	}
 }

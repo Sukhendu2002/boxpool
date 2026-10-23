@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -116,7 +117,12 @@ func up(args []string) int {
 	report(binChanged, installPath)
 	report(unitChanged, unitPath)
 
-	steps, err := upSteps(observe(unitChanged))
+	facts, err := observe(unitChanged, systemctlOutput)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
+		return 1
+	}
+	steps, err := upSteps(facts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
 		return 1
@@ -165,27 +171,61 @@ type upFacts struct {
 	staleExe    bool   // the service runs, but not the installed binary
 }
 
-// observe reads the upFacts from systemd and /proc.
-func observe(unitChanged bool) upFacts {
-	show := func(prop string) string {
-		out, _ := exec.Command("systemctl", "show", "-p", prop, "--value", "boxpool").Output()
-		return strings.TrimSpace(string(out))
+// systemctlOutput captures stdout separately from errors and stderr, because
+// is-enabled reports valid states even when it exits non-zero.
+func systemctlOutput(args ...string) ([]byte, error) {
+	return exec.Command("systemctl", args...).Output()
+}
+
+// observe reads the upFacts from systemd and /proc. It must not plan from
+// missing state: a healthy old daemon can otherwise hide a failed upgrade.
+func observe(unitChanged bool, output func(...string) ([]byte, error)) (upFacts, error) {
+	show := func(prop string) (string, error) {
+		out, err := output("show", "-p", prop, "--value", "boxpool")
+		if err != nil {
+			return "", fmt.Errorf("systemctl show %s: %w", prop, err)
+		}
+		return strings.TrimSpace(string(out)), nil
 	}
-	// is-enabled prints the state even when it exits non-zero.
-	enabled, _ := exec.Command("systemctl", "is-enabled", "boxpool").Output()
+	enabled, err := output("is-enabled", "boxpool")
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		return upFacts{}, fmt.Errorf("systemctl is-enabled: %w", err)
+	}
+	state := strings.TrimSpace(string(enabled))
+	// Allow future states without a whitelist, but reject empty output and
+	// diagnostics in place of a single systemd state word.
+	if state == "" || state[0] < 'a' || state[0] > 'z' || strings.Trim(state, "abcdefghijklmnopqrstuvwxyz-") != "" {
+		return upFacts{}, fmt.Errorf("systemctl is-enabled: invalid state %q", state)
+	}
+	reload, err := show("NeedDaemonReload")
+	if err != nil {
+		return upFacts{}, err
+	}
+	if reload != "yes" && reload != "no" {
+		return upFacts{}, fmt.Errorf("systemctl show NeedDaemonReload: invalid value %q; want yes or no", reload)
+	}
+	pidText, err := show("MainPID")
+	if err != nil {
+		return upFacts{}, err
+	}
+	pid, err := strconv.ParseUint(pidText, 10, 64)
+	if err != nil {
+		return upFacts{}, fmt.Errorf("systemctl show MainPID: invalid value %q: %w", pidText, err)
+	}
 	f := upFacts{
 		unitChanged: unitChanged,
-		enabled:     strings.TrimSpace(string(enabled)),
-		needReload:  show("NeedDaemonReload") == "yes",
+		enabled:     state,
+		needReload:  reload == "yes",
 	}
-	if pid := show("MainPID"); pid != "" && pid != "0" {
+	if pid != 0 {
 		// Replacing the binary by rename leaves a running daemon on the
 		// old inode; if either stat fails, restarting is the safe answer.
-		running, err1 := os.Stat("/proc/" + pid + "/exe")
+		running, err1 := os.Stat("/proc/" + strconv.FormatUint(pid, 10) + "/exe")
 		installed, err2 := os.Stat(installPath)
 		f.staleExe = err1 != nil || err2 != nil || !os.SameFile(running, installed)
 	}
-	return f
+	return f, nil
 }
 
 // upSteps returns the systemctl commands that bring the service up from
