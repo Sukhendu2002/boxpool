@@ -40,15 +40,24 @@ type Driver struct {
 	root, kernel, rootfs string
 	limits               limits
 	admission            *resources.Manager
-	machines             sync.Map // sandbox ID → *machine, while its VM may run
+	machines             sync.Map     // sandbox ID → *machine, while its VM may run
+	lifetime             sync.RWMutex // Start holds a reader before taking a sandbox lock
+	closed               bool         // protected by lifetime
 }
 
 var _ backend.Driver = (*Driver)(nil)
 
 // machine is one sandbox's running VM.
 type machine struct {
-	vm      *virt.VirtualMachine
-	vsock   *virt.VirtioSocketDevice
+	vm interface {
+		CanRequestStop() bool
+		RequestStop() (bool, error)
+		CanStop() bool
+		Stop() error
+	}
+	vsock interface {
+		Connect(uint32) (*virt.VirtioSocketConnection, error)
+	}
 	stopped chan struct{} // closed once the VM has stopped
 	console chan struct{} // closed once the console rotator has returned
 }
@@ -111,12 +120,34 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	}
 	if err == nil {
 		// Written last: List and Start ignore a directory without it.
-		err = os.WriteFile(l.spec, b, 0600)
+		err = writeSpec(l, b)
 	}
 	if err != nil {
 		return backend.Sandbox{}, fmt.Errorf("create sandbox %s: %w", id, errors.Join(err, os.RemoveAll(l.dir)))
 	}
 	return backend.Sandbox{ID: id, Name: spec.Name, State: backend.StateStopped}, nil
+}
+
+// writeSpec publishes the complete marker atomically, never an empty/partial file.
+func writeSpec(l layout, b []byte) (err error) {
+	f, err := os.CreateTemp(l.dir, ".spec-*")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cleanup := os.Remove(f.Name()); !errors.Is(cleanup, fs.ErrNotExist) {
+			err = errors.Join(err, cleanup)
+		}
+	}()
+	_, err = f.Write(b)
+	if err == nil {
+		err = f.Sync()
+	}
+	err = errors.Join(err, f.Close())
+	if err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), l.spec)
 }
 
 // growDisk extends the disk image sparsely; it never shrinks it.
@@ -136,6 +167,11 @@ func growDisk(path string, size int64) error {
 func (d *Driver) Start(ctx context.Context, id string) error {
 	if err := validID(id); err != nil {
 		return err
+	}
+	d.lifetime.RLock()
+	defer d.lifetime.RUnlock()
+	if d.closed {
+		return errors.New("the vz driver is closed")
 	}
 	unlock, err := d.admission.LockSandbox(ctx, "vz", id)
 	if err != nil {
@@ -339,13 +375,13 @@ func (d *Driver) stop(ctx context.Context, id string) error {
 	}
 	var unclean error
 	if err := shutdownGuest(ctx, m); err != nil {
-		unclean = fmt.Errorf("stop sandbox %s: %w: %v", id, backend.ErrUncleanStop, err)
 		slog.Warn("sandbox did not shut down cleanly; stopping it", "sandbox", id, "err", err)
-		if err := requestStop(m); err != nil {
-			if err := forceStop(m); err != nil {
-				return errors.Join(unclean, err)
+		if requestErr := requestStop(m); requestErr != nil {
+			if forceErr := forceStop(m); forceErr != nil {
+				return fmt.Errorf("stop sandbox %s: %w", id, errors.Join(err, requestErr, forceErr))
 			}
 		}
+		unclean = fmt.Errorf("stop sandbox %s: %w: %v", id, backend.ErrUncleanStop, err)
 	}
 	<-m.console
 	d.machines.CompareAndDelete(id, m)
@@ -441,6 +477,10 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 // Close stops every running sandbox, cleanly if it can, for a daemon that
 // is exiting: its VMs would end with the process anyway, without a sync.
 func (d *Driver) Close() error {
+	// A waiting writer blocks new Starts; active Starts finish before the sweep.
+	d.lifetime.Lock()
+	defer d.lifetime.Unlock()
+	d.closed = true
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var errs []error

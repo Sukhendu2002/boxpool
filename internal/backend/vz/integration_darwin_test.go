@@ -190,6 +190,14 @@ func TestIntegration(t *testing.T) {
 	if d.running(id) != nil {
 		t.Error("the VM still runs after Close")
 	}
+	if err := d.Start(ctx, id); err == nil {
+		t.Fatal("Start after Close succeeded")
+	}
+	// Reopen the disk state with a new driver after closing the old one.
+	d, err = New(ctx, home, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// A boot that fails after VM creation must release the VM and its pipe
 	// before returning, so a subsequent Start can reuse the same disk.
 	oldTimeout := agentTimeout
@@ -205,6 +213,136 @@ func TestIntegration(t *testing.T) {
 	if err := d.Remove(ctx, id); err != nil {
 		t.Fatalf("Remove of running VM: %v", err)
 	}
+}
+
+// integrationSandbox uses the verified artifact cache but owns fresh VM state.
+func integrationSandbox(t *testing.T) (*Driver, string) {
+	t.Helper()
+	ctx := context.Background()
+	paths, err := artifacts.Fetch(ctx, filepath.Join(stateDir(t), artifacts.DirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(ctx, t.TempDir(), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "review"
+	if _, err := d.Create(ctx, id, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := d.Remove(ctx, id); err != nil {
+			t.Error(err)
+		}
+		if err := d.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return d, id
+}
+
+func TestIntegrationFailedForceStop(t *testing.T) {
+	d, id := integrationSandbox(t)
+	ctx := context.Background()
+	if err := d.Start(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	m := d.running(id)
+	originalVM, originalSocket := m.vm, m.vsock
+	defer func() { m.vm, m.vsock = originalVM, originalSocket }()
+	guestErr := errors.New("injected guest failure")
+	requestErr := errors.New("injected RequestStop failure")
+	forceErr := errors.New("injected Stop failure")
+	m.vsock = failedSocket{guestErr}
+	m.vm = &stopVM{requestErr: requestErr, stop: func() error { return forceErr }}
+	err := d.Stop(ctx, id)
+	if err == nil || errors.Is(err, backend.ErrUncleanStop) || !errors.Is(err, forceErr) || !errors.Is(err, requestErr) {
+		t.Fatalf("failed force Stop must be a hard error: %v", err)
+	}
+	m.vm, m.vsock = originalVM, originalSocket
+	ag := m.agent()
+	defer ag.CloseIdleConnections()
+	if _, err := ag.Version(ctx); err != nil {
+		t.Fatalf("VM did not remain alive: %v", err)
+	}
+	list, err := d.List(ctx)
+	if err != nil || len(list) != 1 || list[0].State != backend.StateRunning {
+		t.Fatalf("List after hard failure: %v, %v", list, err)
+	}
+	t.Log("failed RequestStop/Stop: hard error, List running, guest agent still reachable")
+	// Real forced termination, not the injected success used by the unit test.
+	m.vsock = failedSocket{guestErr}
+	oldTimeout := stopTimeout
+	stopTimeout = 100 * time.Millisecond
+	defer func() { stopTimeout = oldTimeout }()
+	if err := d.Stop(ctx, id); !errors.Is(err, backend.ErrUncleanStop) {
+		t.Fatalf("real forced Stop: %v", err)
+	}
+	if d.running(id) != nil {
+		t.Fatal("VM still runs after forced Stop")
+	}
+	t.Log("real forced Stop: ErrUncleanStop only after confirmed termination")
+}
+
+func TestIntegrationCloseDuringStart(t *testing.T) {
+	d, id := integrationSandbox(t)
+	ctx := context.Background()
+	unlock, err := d.admission.LockSandbox(ctx, "vz", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	started := make(chan error, 1)
+	go func() { started <- d.Start(ctx, id) }()
+	waitFor(t, func() bool {
+		if d.lifetime.TryLock() {
+			d.lifetime.Unlock()
+			return false
+		}
+		return true
+	})
+	closed := make(chan error, 1)
+	go func() { closed <- d.Close() }()
+	waitFor(t, func() bool {
+		select {
+		case err := <-closed:
+			t.Fatalf("Close escaped active Start: %v", err)
+		default:
+		}
+		if d.lifetime.TryRLock() {
+			d.lifetime.RUnlock()
+			return false
+		}
+		return true
+	})
+	select {
+	case err := <-closed:
+		t.Fatalf("Close escaped active Start: %v", err)
+	default:
+	}
+	unlock()
+	unlock = nil
+	if err := <-started; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+	if d.running(id) != nil {
+		t.Fatal("Close missed VM booted by concurrent Start")
+	}
+	if err := d.Start(ctx, id); err == nil {
+		t.Fatal("Start after Close succeeded")
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("Close waited for paused Start, stopped the real VM, rejected restart, and closed twice")
 }
 
 // fsck checks that Stop left the sandbox's disk consistent, when the host
