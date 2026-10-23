@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -62,7 +64,13 @@ type CreateRequest struct {
 	DiskGB   int    `json:"disk_gb,omitempty"`
 }
 
-// Sandbox is a sandbox as the API reports it.
+// StateMissing is the state of a sandbox whose record this node has but
+// whose backend no longer knows it, e.g. after its container was deleted by
+// hand. Removing it deletes the record.
+const StateMissing backend.State = "missing"
+
+// Sandbox is a sandbox as the API reports it. State is the backend's live
+// state when the sandbox is on this daemon's backend.
 type Sandbox struct {
 	ID        string        `json:"id"`
 	Name      string        `json:"name"`
@@ -72,6 +80,10 @@ type Sandbox struct {
 	MemoryMB  int           `json:"mem_mb"`
 	DiskGB    int           `json:"disk_gb"`
 	CreatedAt time.Time     `json:"created_at"`
+	// Warning is set by stop and remove when the sandbox did not shut down
+	// cleanly (backend.ErrUncleanStop): it is stopped, but its disk may be
+	// inconsistent.
+	Warning string `json:"warning,omitempty"`
 }
 
 // Error is the body of every API error.
@@ -86,7 +98,7 @@ var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`).MatchString
 type server struct {
 	st *store.Store
 	d  Driver     // nil when this node has no usable backend
-	mu sync.Mutex // serialises creating and starting sandboxes
+	mu sync.Mutex // serialises creating, starting, stopping and removing sandboxes
 }
 
 // Handler returns the daemon's HTTP API. Without a driver, the sandbox
@@ -101,7 +113,10 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 		writeJSON(w, info)
 	})
 	mux.HandleFunc("POST /v1/sandboxes", s.backendOnly(s.create))
+	mux.HandleFunc("GET /v1/sandboxes", s.backendOnly(s.list))
 	mux.HandleFunc("GET /v1/sandboxes/{name}", s.backendOnly(s.get))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.backendOnly(s.stop))
+	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.backendOnly(s.remove))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.backendOnly(s.exec))
 	return mux
 }
@@ -188,9 +203,131 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) get(w http.ResponseWriter, r *http.Request) {
-	if sb, ok := s.lookup(w, r); ok {
-		writeJSON(w, apiSandbox(sb))
+	sb, ok := s.lookup(w, r)
+	if !ok {
+		return
 	}
+	list, err := s.live(r.Context(), []store.Sandbox{sb})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, list[0])
+}
+
+// list returns every sandbox in the store, oldest first, so a restarted
+// daemon still reports the sandboxes an earlier one created.
+func (s *server) list(w http.ResponseWriter, r *http.Request) {
+	records, err := s.st.List(r.Context())
+	if err == nil {
+		var list []Sandbox
+		if list, err = s.live(r.Context(), records); err == nil {
+			writeJSON(w, list)
+			return
+		}
+	}
+	writeError(w, http.StatusInternalServerError, err)
+}
+
+// live returns records as the API reports them, with the driver's live
+// state for those on its backend; the store's state can be stale.
+func (s *server) live(ctx context.Context, records []store.Sandbox) ([]Sandbox, error) {
+	running, err := s.d.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	state := make(map[string]backend.State, len(running))
+	for _, sb := range running {
+		state[sb.ID] = sb.State
+	}
+	list := make([]Sandbox, 0, len(records))
+	for _, sb := range records {
+		if sb.Backend == s.d.Name() {
+			sb.State = cmp.Or(state[sb.ID], StateMissing)
+		}
+		list = append(list, apiSandbox(sb))
+	}
+	return list, nil
+}
+
+// stop shuts the sandbox down, keeping its disk and its reservation.
+func (s *server) stop(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sb, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sameBackend(sb); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	warning, err := s.stopSandbox(r.Context(), sb)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sb.State = backend.StateStopped
+	out := apiSandbox(sb)
+	out.Warning = warning
+	writeJSON(w, out)
+}
+
+// remove deletes the sandbox: its process, disk, network and reservation
+// through the driver, then its record. It refuses a running sandbox unless
+// the force query parameter is true, which stops it first.
+func (s *server) remove(w http.ResponseWriter, r *http.Request) {
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	ctx := r.Context()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sb, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sameBackend(sb); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	list, err := s.live(ctx, []store.Sandbox{sb})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := list[0]
+	if out.State == backend.StateRunning || out.State == backend.StatePaused {
+		if !force {
+			writeError(w, http.StatusConflict, fmt.Errorf("sandbox %q is %s: stop it first, or force the removal", sb.Spec.Name, out.State))
+			return
+		}
+		if out.Warning, err = s.stopSandbox(ctx, sb); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if err := s.d.Remove(ctx, sb.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	// The sandbox is gone: a cancelled request must not leave its record.
+	if err := s.st.Delete(context.WithoutCancel(ctx), sb.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+// stopSandbox stops sb and records it. An unclean stop still stops it, so
+// it is returned as a warning rather than an error.
+func (s *server) stopSandbox(ctx context.Context, sb store.Sandbox) (warning string, err error) {
+	err = s.d.Stop(ctx, sb.ID)
+	if errors.Is(err, backend.ErrUncleanStop) {
+		warning, err = err.Error(), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return warning, s.st.SetState(context.WithoutCancel(ctx), sb.ID, backend.StateStopped)
 }
 
 // exec relays an agent exec session unchanged (docs/agent-protocol.md)

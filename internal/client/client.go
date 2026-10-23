@@ -70,6 +70,33 @@ func (c *Client) GetSandbox(ctx context.Context, name string) (daemon.Sandbox, e
 	return sb, err
 }
 
+// ListSandboxes returns every sandbox on this node, oldest first.
+func (c *Client) ListSandboxes(ctx context.Context) ([]daemon.Sandbox, error) {
+	var list []daemon.Sandbox
+	err := c.get(ctx, "/v1/sandboxes", &list)
+	return list, err
+}
+
+// StopSandbox stops the named sandbox. The result's Warning is set if it
+// did not shut down cleanly.
+func (c *Client) StopSandbox(ctx context.Context, name string) (daemon.Sandbox, error) {
+	var sb daemon.Sandbox
+	err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(name)+"/stop", nil, &sb)
+	return sb, err
+}
+
+// RemoveSandbox deletes the named sandbox and frees its resources. Without
+// force the daemon refuses a running sandbox; with it, it stops it first.
+func (c *Client) RemoveSandbox(ctx context.Context, name string, force bool) (daemon.Sandbox, error) {
+	var sb daemon.Sandbox
+	path := "/v1/sandboxes/" + url.PathEscape(name)
+	if force {
+		path += "?force=1"
+	}
+	err := c.do(ctx, http.MethodDelete, path, nil, &sb)
+	return sb, err
+}
+
 // Exec starts a command in the named sandbox through the daemon, which
 // relays the agent's exec protocol unchanged.
 func (c *Client) Exec(ctx context.Context, name string, req agent.ExecRequest, stdout, stderr io.Writer) (*agent.Session, error) {

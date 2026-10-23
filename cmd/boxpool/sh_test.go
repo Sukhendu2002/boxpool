@@ -44,20 +44,48 @@ func TestMain(m *testing.M) {
 }
 
 // fakeDriver has one agent, on this machine, for every sandbox.
-type fakeDriver struct{ sock string }
+type fakeDriver struct {
+	sock string
+	mu   sync.Mutex
+	up   map[string]bool // created sandboxes, and whether they run
+}
 
-func (d fakeDriver) Name() string { return "fake" }
-func (d fakeDriver) Create(_ context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
+func (d *fakeDriver) Name() string { return "fake" }
+func (d *fakeDriver) Create(_ context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
+	d.set(id, false)
 	return backend.Sandbox{ID: id, Name: spec.Name}, nil
 }
-func (d fakeDriver) Start(context.Context, string) error             { return nil }
-func (d fakeDriver) Stop(context.Context, string) error              { return nil }
-func (d fakeDriver) Pause(context.Context, string) error             { return nil }
-func (d fakeDriver) Resume(context.Context, string) error            { return nil }
-func (d fakeDriver) Remove(context.Context, string) error            { return nil }
-func (d fakeDriver) List(context.Context) ([]backend.Sandbox, error) { return nil, nil }
-func (d fakeDriver) Dial(ctx context.Context, _ string) (net.Conn, error) {
+func (d *fakeDriver) Start(_ context.Context, id string) error { d.set(id, true); return nil }
+func (d *fakeDriver) Stop(_ context.Context, id string) error  { d.set(id, false); return nil }
+func (d *fakeDriver) Pause(context.Context, string) error      { return nil }
+func (d *fakeDriver) Resume(context.Context, string) error     { return nil }
+func (d *fakeDriver) Remove(_ context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.up, id)
+	return nil
+}
+func (d *fakeDriver) List(context.Context) ([]backend.Sandbox, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var list []backend.Sandbox
+	for id, up := range d.up {
+		state := backend.StateStopped
+		if up {
+			state = backend.StateRunning
+		}
+		list = append(list, backend.Sandbox{ID: id, State: state})
+	}
+	return list, nil
+}
+func (d *fakeDriver) Dial(ctx context.Context, _ string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, "unix", d.sock)
+}
+
+func (d *fakeDriver) set(id string, up bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.up[id] = up
 }
 
 // connListener remembers its connections, so kill can drop them all like a
@@ -115,7 +143,7 @@ func startDaemon(t *testing.T, dir string) (kill func()) {
 	}
 	cl := &connListener{Listener: l}
 	info := daemon.Info{Backend: "fake", Warning: "test warning"}
-	h := daemon.Handler(info, st, fakeDriver{sock})
+	h := daemon.Handler(info, st, &fakeDriver{sock: sock, up: map[string]bool{}})
 	go http.Serve(cl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if f := beforeExec.Load(); f != nil && strings.HasSuffix(r.URL.Path, "/exec") {
 			(*f)()

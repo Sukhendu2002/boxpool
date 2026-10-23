@@ -19,8 +19,9 @@ boxpool ls            # list nodes and sandboxes
 boxpool doctor        # check whether this machine can host sandboxes
 ```
 
-Only `boxpool doctor`, `boxpool daemon`, `boxpool sh` and `boxpool version`
-work today, on one Linux machine.
+Only `boxpool doctor`, `boxpool daemon`, `boxpool sh`, `boxpool ls`,
+`boxpool stop`, `boxpool rm` and `boxpool version` work today, on one Linux
+machine.
 
 `boxpool daemon` runs the node daemon in the foreground. It creates the state
 directory (below), takes `daemon.lock` there so only one daemon runs per state
@@ -51,6 +52,16 @@ the first prompt. The daemon's API for this is `POST /v1/sandboxes`
 unchanged.
 
 `boxpool version` also prints the daemon's version when one is running.
+
+`boxpool ls [--json]` lists this machine's sandboxes, oldest first, with
+their name, backend, state, CPUs, memory and age; the state is the
+backend's live one (`missing` if the backend no longer has the sandbox).
+`boxpool stop <name>` shuts a sandbox down and keeps its disk and its
+resource reservation. `boxpool rm [--force] <name>` deletes a stopped
+sandbox with its process, disk, network and reservation; `--force` stops a
+running one first. If a guest does not shut down cleanly, both print a
+warning and still succeed. The API is `GET /v1/sandboxes`,
+`POST /v1/sandboxes/{name}/stop` and `DELETE /v1/sandboxes/{name}?force=1`.
 
 `boxpool-agent` is the process inside every sandbox that runs commands for
 the host, on vsock port 1024 by default or on a unix socket with

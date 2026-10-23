@@ -34,8 +34,10 @@ type fakeDriver struct {
 	mu   sync.Mutex
 	spec map[string]backend.Spec
 	up   map[string]bool
-	n    struct{ create, start int }
+	n    struct{ create, start, stop, remove int }
 	conn net.Conn // the last connection Dial returned
+	// stopErr, if set, is what Stop returns after stopping the sandbox.
+	stopErr error
 }
 
 func (d *fakeDriver) Name() string { return "fake" }
@@ -66,13 +68,35 @@ func (d *fakeDriver) Stop(ctx context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.up[id] = false
+	d.n.stop++
+	return d.stopErr
+}
+
+func (d *fakeDriver) Pause(context.Context, string) error  { return backend.ErrNotSupported }
+func (d *fakeDriver) Resume(context.Context, string) error { return backend.ErrNotSupported }
+
+func (d *fakeDriver) Remove(ctx context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.spec, id)
+	delete(d.up, id)
+	d.n.remove++
 	return nil
 }
 
-func (d *fakeDriver) Pause(context.Context, string) error             { return backend.ErrNotSupported }
-func (d *fakeDriver) Resume(context.Context, string) error            { return backend.ErrNotSupported }
-func (d *fakeDriver) Remove(context.Context, string) error            { return backend.ErrNotSupported }
-func (d *fakeDriver) List(context.Context) ([]backend.Sandbox, error) { return nil, nil }
+func (d *fakeDriver) List(context.Context) ([]backend.Sandbox, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var list []backend.Sandbox
+	for id, spec := range d.spec {
+		state := backend.StateStopped
+		if d.up[id] {
+			state = backend.StateRunning
+		}
+		list = append(list, backend.Sandbox{ID: id, Name: spec.Name, State: state})
+	}
+	return list, nil
+}
 
 func (d *fakeDriver) Dial(ctx context.Context, id string) (net.Conn, error) {
 	d.mu.Lock()
@@ -88,6 +112,13 @@ func (d *fakeDriver) Dial(ctx context.Context, id string) (net.Conn, error) {
 // newAPI serves the API with a fake driver and a fresh store.
 func newAPI(t *testing.T) (*httptest.Server, *fakeDriver) {
 	t.Helper()
+	srv, d, _ := newAPIStore(t)
+	return srv, d
+}
+
+// newAPIStore is newAPI that also returns the store.
+func newAPIStore(t *testing.T) (*httptest.Server, *fakeDriver, *store.Store) {
+	t.Helper()
 	tmp, err := os.MkdirTemp("", "bp") // short: macOS caps socket paths at ~104 bytes
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +132,7 @@ func newAPI(t *testing.T) (*httptest.Server, *fakeDriver) {
 	d := newFakeDriver(t, tmp)
 	srv := httptest.NewServer(Handler(Info{}, st, d))
 	t.Cleanup(srv.Close)
-	return srv, d
+	return srv, d, st
 }
 
 // newFakeDriver returns a fake driver whose agent listens in dir.
@@ -239,6 +270,9 @@ func TestNoBackend(t *testing.T) {
 		httptest.NewRequest(http.MethodPost, "/v1/sandboxes", strings.NewReader(`{}`)),
 		httptest.NewRequest(http.MethodGet, "/v1/sandboxes/web", nil),
 		httptest.NewRequest(http.MethodGet, "/v1/sandboxes/web/exec", nil),
+		httptest.NewRequest(http.MethodGet, "/v1/sandboxes", nil),
+		httptest.NewRequest(http.MethodPost, "/v1/sandboxes/web/stop", nil),
+		httptest.NewRequest(http.MethodDelete, "/v1/sandboxes/web", nil),
 	} {
 		rec := httptest.NewRecorder()
 		Handler(Info{}, nil, nil).ServeHTTP(rec, r)

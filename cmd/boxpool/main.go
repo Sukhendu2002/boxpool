@@ -29,7 +29,9 @@ Commands:
   up        start a pool on this machine (not implemented yet)
   join      join an existing pool (not implemented yet)
   sh        open a shell in a new or existing sandbox
-  ls        list nodes and sandboxes (not implemented yet)
+  ls        list this machine's sandboxes
+  stop      stop a sandbox
+  rm        delete a sandbox and free its resources
 `
 
 func main() {
@@ -49,7 +51,13 @@ func main() {
 		}
 	case "sh":
 		os.Exit(sh(os.Args[2:]))
-	case "up", "join", "ls":
+	case "ls":
+		os.Exit(ls(os.Args[2:]))
+	case "stop":
+		os.Exit(stop(os.Args[2:]))
+	case "rm":
+		os.Exit(rm(os.Args[2:]))
+	case "up", "join":
 		fmt.Fprintf(os.Stderr, "boxpool %s: not implemented yet\n", os.Args[1])
 		os.Exit(1)
 	case "help", "--help", "-h":

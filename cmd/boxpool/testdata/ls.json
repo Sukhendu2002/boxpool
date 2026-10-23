@@ -1,0 +1,32 @@
+[
+  {
+    "id": "0a1b2c",
+    "name": "web",
+    "backend": "firecracker",
+    "state": "running",
+    "cpu": 2,
+    "mem_mb": 2048,
+    "disk_gb": 10,
+    "created_at": "2026-10-01T12:00:00Z"
+  },
+  {
+    "id": "3d4e5f",
+    "name": "sb-0c9a7e",
+    "backend": "firecracker",
+    "state": "stopped",
+    "cpu": 1,
+    "mem_mb": 512,
+    "disk_gb": 1,
+    "created_at": "2026-10-04T17:00:00Z"
+  },
+  {
+    "id": "6a7b8c",
+    "name": "old-docker-box",
+    "backend": "docker",
+    "state": "missing",
+    "cpu": 4,
+    "mem_mb": 1536,
+    "disk_gb": 20,
+    "created_at": "2026-10-05T11:58:30Z"
+  }
+]
