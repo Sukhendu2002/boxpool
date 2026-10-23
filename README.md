@@ -9,6 +9,43 @@ from anywhere, with no per-minute bills.
 
 > Status: early development. Nothing here is usable yet.
 
+## Install from source (Linux)
+
+Use a Linux 5.10+ host with systemd, at least 20 GB free in `/var/lib`,
+Git and Go 1.24+. Firecracker needs `/dev/kvm` and `e2fsprogs` (for
+`resize2fs`); without KVM, install and start Docker Engine for the fallback.
+See the [Linux setup](docs/development.md) for distribution package commands.
+
+```sh
+git clone https://github.com/Sukhendu2002/boxpool.git
+cd boxpool
+go build -o bin/boxpool ./cmd/boxpool
+sudo ./bin/boxpool up
+sudo /usr/local/bin/boxpool sh
+```
+
+`up` installs the binary at `/usr/local/bin/boxpool` and starts the root
+daemon. If a preflight check fails, fix it and rerun `sudo ./bin/boxpool up`.
+The first start needs internet access to download Firecracker and the guest
+image. Exit the sandbox shell with `exit`; the sandbox stays running.
+
+**After `up`, run client commands with `sudo`**, for example
+`sudo boxpool ls`, `sudo boxpool exec <name> -- uname -a`,
+`sudo boxpool cp ./src <name>:/root/`, and `sudo boxpool sh <name>`.
+Use `/usr/local/bin/boxpool` if it is not on sudo's `PATH`. Leave
+`BOXPOOL_HOME` unset to use the service's `/var/lib/boxpool` state directory.
+Files copied to the host with `sudo boxpool cp` are owned by root.
+Stop the service with `sudo boxpool down`.
+
+The service's socket, `/var/lib/boxpool/boxpool.sock`, is `root:root` mode
+`0660`: a normal user gets **permission denied**, not a stopped daemon.
+Do not start another daemon to fix it. No `boxpool` group is created:
+access to a root daemon's socket is effectively root access to the host
+(it can create VMs and copy files as root), so do not make it
+world-accessible or share it with untrusted users. A foreground daemon
+started without sudo is instead used by the same user, with the same
+`BOXPOOL_HOME` if set.
+
 ## Commands
 
 ```sh

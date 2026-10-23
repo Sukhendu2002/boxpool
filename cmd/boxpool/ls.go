@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"text/tabwriter"
 	"time"
@@ -27,7 +26,7 @@ func connect(ctx context.Context, cmd string) (*client.Client, bool) {
 	}
 	c := client.New(dir)
 	if err := c.Health(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "boxpool %s: cannot reach the daemon at %s (start it with boxpool daemon): %v\n", cmd, filepath.Join(dir, daemon.SocketName), err)
+		fmt.Fprintf(os.Stderr, "boxpool %s: %v\n", cmd, err)
 		return nil, false
 	}
 	return c, true

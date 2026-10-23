@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,7 +73,7 @@ func sh(args []string) int {
 	c := client.New(dir)
 	info, err := c.Info(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "boxpool sh: cannot reach the daemon at %s (start it with boxpool daemon): %v\n", filepath.Join(dir, daemon.SocketName), err)
+		fmt.Fprintf(os.Stderr, "boxpool sh: %v\n", err)
 		return 1
 	}
 	if fs.NArg() == 1 {
