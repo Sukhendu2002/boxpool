@@ -41,7 +41,7 @@ func getFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/x-tar")
 	out := &tarResponse{ResponseWriter: w}
-	if err := writeTar(out, src); err != nil {
+	if err := WriteTar(out, src); err != nil {
 		if out.started {
 			// A JSON error inside a tar would look like a successful download.
 			panic(http.ErrAbortHandler)
@@ -67,7 +67,11 @@ func checkFileType(name string, info fs.FileInfo) error {
 	return nil
 }
 
-func writeTar(w io.Writer, src string) error {
+// WriteTar writes src, a file or a directory tree, as a tar rooted at its
+// base name, the format of GET /v1/files: modes and modification times are
+// kept, symlinks stay symlinks, owners are dropped. Other file types are
+// refused.
+func WriteTar(w io.Writer, src string) error {
 	src = filepath.Clean(src)
 	base := filepath.Base(src)
 	if base == ".." {
@@ -155,15 +159,30 @@ func putFiles(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("destination is not a directory"))
 		return
 	}
-	if err := extractTar(r.Body, dest); err != nil {
+	if err := ExtractTar(r.Body, dest, nil); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func extractTar(r io.Reader, dest string) error {
-	// The tar comes from the host; the guest is not a boundary against itself, and safe host extraction is #16's job.
+// ExtractTar extracts a tar into the existing directory dest, as PUT
+// /v1/files does. If check is not nil, it sees each header first and may
+// change it or refuse the entry. Only regular files, directories and
+// symlinks are extracted, with their modes and modification times. No entry
+// is written outside dest: absolute names and .. are refused, parents must
+// be real directories, never symlinks, and an existing entry is unlinked,
+// not written through. Symlinks themselves may point anywhere.
+func ExtractTar(r io.Reader, dest string, check func(*tar.Header) error) error {
+	// Files and directories are created through root, so the kernel keeps
+	// them in dest even if the checks below missed a way out.
+	// shortcut: symlinks, modes and times are set by path, because Go 1.24's
+	// os.Root cannot; move them onto root once go.mod reaches 1.25.
+	root, err := os.OpenRoot(dest)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	tr := tar.NewReader(r)
 	dirs := make(map[string]*tar.Header)
 	last := "<header>"
@@ -176,7 +195,12 @@ func extractTar(r io.Reader, dest string) error {
 			return fmt.Errorf("entry after %q: %w", last, err)
 		}
 		last = h.Name
-		if err := extractEntry(tr, dest, h); err != nil {
+		if check != nil {
+			if err := check(h); err != nil {
+				return fmt.Errorf("entry %q: %w", last, err)
+			}
+		}
+		if err := extractEntry(tr, root, dest, h); err != nil {
 			return fmt.Errorf("entry %q: %w", h.Name, err)
 		}
 		if h.Typeflag == tar.TypeDir {
@@ -195,7 +219,7 @@ func extractTar(r io.Reader, dest string) error {
 		return len(names[i]) > len(names[j])
 	})
 	for _, name := range names {
-		p, err := entryPath(dest, name)
+		_, p, err := entryPath(dest, name)
 		if err == nil {
 			err = setMetadata(p, dirs[name])
 		}
@@ -206,10 +230,13 @@ func extractTar(r io.Reader, dest string) error {
 	return nil
 }
 
-func entryPath(dest, name string) (string, error) {
+// entryPath returns the archive name's path relative to dest and joined
+// to it, after creating missing parents and checking that every parent is
+// a directory.
+func entryPath(dest, name string) (rel, full string, err error) {
 	clean := path.Clean(name)
 	if name == "" || path.IsAbs(name) || clean == ".." || strings.HasPrefix(clean, "../") || !filepath.IsLocal(filepath.FromSlash(clean)) {
-		return "", errors.New("path escapes destination")
+		return "", "", errors.New("path escapes destination")
 	}
 	p := dest
 	parts := strings.Split(clean, "/")
@@ -218,25 +245,26 @@ func entryPath(dest, name string) (string, error) {
 		info, err := os.Lstat(p)
 		if errors.Is(err, os.ErrNotExist) {
 			if err := os.Mkdir(p, 0755); err != nil {
-				return "", err
+				return "", "", err
 			}
 			continue
 		}
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if !info.IsDir() {
-			return "", errors.New("parent is not a directory (symlink parents are not allowed)")
+			return "", "", errors.New("parent is not a directory (symlink parents are not allowed)")
 		}
 	}
-	return filepath.Join(dest, filepath.FromSlash(clean)), nil
+	rel = filepath.FromSlash(clean)
+	return rel, filepath.Join(dest, rel), nil
 }
 
-func extractEntry(tr io.Reader, dest string, h *tar.Header) error {
+func extractEntry(tr io.Reader, root *os.Root, dest string, h *tar.Header) error {
 	if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeSymlink {
 		return fmt.Errorf("unsupported tar type %d", h.Typeflag)
 	}
-	p, err := entryPath(dest, h.Name)
+	rel, p, err := entryPath(dest, h.Name)
 	if err != nil {
 		return err
 	}
@@ -249,7 +277,7 @@ func extractEntry(tr io.Reader, dest string, h *tar.Header) error {
 			return errors.New("directory conflicts with an existing entry")
 		}
 		if err != nil {
-			return os.Mkdir(p, 0700)
+			return root.Mkdir(rel, 0700)
 		}
 		return os.Chmod(p, info.Mode()|0700) // allow contents before restoring the archived mode
 	}
@@ -271,7 +299,7 @@ func extractEntry(tr io.Reader, dest string, h *tar.Header) error {
 		}
 		return setSymlinkMetadata(p, h.FileInfo().Mode(), h.ModTime)
 	}
-	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}

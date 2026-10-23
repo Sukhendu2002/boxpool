@@ -5,7 +5,9 @@ package daemon_test
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -134,8 +136,130 @@ printf '%s\n' "$limit"`))
 	if got := run("cat /root/marker"); got != "kept\n" {
 		t.Errorf("marker = %q", got)
 	}
+
+	// boxpool exec passes the exit code through.
+	s, err := c.Exec(ctx, sb.Name, agent.ExecRequest{Argv: []string{"sh", "-c", "exit 7"}}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, err := s.Wait(); code != 7 || err != nil {
+		t.Errorf("exit 7 = %d, %v", code, err)
+	}
+	copyRoundTrip(t, ctx, c, sb.Name)
+
+	// ls, stop and rm, across a daemon restart.
+	other, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "other", CPUs: 1, MemoryMB: 512, DiskGB: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := names(t, c); got != sb.Name+"=running other=running" {
+		t.Errorf("ls = %q", got)
+	}
+	if _, err := c.RemoveSandbox(ctx, sb.Name, false); err == nil || !strings.Contains(err.Error(), "is running") {
+		t.Errorf("rm of a running sandbox = %v", err)
+	}
+	if stopped, err := c.StopSandbox(ctx, sb.Name); err != nil || stopped.State != "stopped" {
+		t.Fatalf("stop = %+v, %v", stopped, err)
+	} else if stopped.Warning != "" {
+		t.Logf("stop warning: %s", stopped.Warning)
+	}
 	if err := stop(); err != nil {
 		t.Fatal(err)
+	}
+	stop = start(t, dir, daemon.Info{Backend: backend})
+	// Firecracker kills its orphaned VMs on start (#27 will re-adopt them);
+	// Docker keeps containers running.
+	got := names(t, c)
+	if got != sb.Name+"=stopped other=stopped" && got != sb.Name+"=stopped other=running" {
+		t.Errorf("ls after a daemon restart = %q", got)
+	}
+	if _, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "other"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, rm := range []struct {
+		name  string
+		force bool
+	}{{sb.Name, false}, {"other", true}} {
+		if _, err := c.RemoveSandbox(ctx, rm.name, rm.force); err != nil {
+			t.Errorf("rm %s = %v", rm.name, err)
+		}
+	}
+	if got := names(t, c); got != "" {
+		t.Errorf("ls after rm = %q", got)
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	// The drivers freed everything: no VM, container, disk or reservation.
+	if backend == "firecracker" {
+		for _, id := range []string{sb.ID, other.ID} {
+			if _, err := os.Stat(filepath.Join(dir, "sandboxes", id)); !os.IsNotExist(err) {
+				t.Errorf("sandbox %s directory: %v", id, err)
+			}
+			if out, _ := exec.Command("pgrep", "-f", id).Output(); len(out) != 0 {
+				t.Errorf("processes left for sandbox %s: %s", id, out)
+			}
+		}
+	}
+	d, err := daemon.OpenDriver(ctx, dir, &daemon.Info{Backend: backend}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list, err := d.List(ctx); err != nil || len(list) != 0 {
+		t.Errorf("driver still lists %+v, %v", list, err)
+	}
+}
+
+// names returns the daemon's sandboxes as name=state pairs.
+func names(t *testing.T, c *client.Client) string {
+	t.Helper()
+	list, err := c.ListSandboxes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s []string
+	for _, sb := range list {
+		s = append(s, sb.Name+"="+string(sb.State))
+	}
+	return strings.Join(s, " ")
+}
+
+// copyRoundTrip uploads a directory to /tmp in the sandbox, downloads it
+// again and compares the two, as boxpool cp does.
+func copyRoundTrip(t *testing.T, ctx context.Context, c *client.Client, name string) {
+	t.Helper()
+	host := t.TempDir()
+	src := filepath.Join(host, "dir")
+	if err := os.MkdirAll(filepath.Join(src, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(src, "a.txt"), []byte("hello\n"), 0640)
+	os.WriteFile(filepath.Join(src, "sub", "big"), bytes.Repeat([]byte("0123456789abcdef"), 1<<16), 0755)
+	os.Symlink("../a.txt", filepath.Join(src, "sub", "link"))
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(agent.WriteTar(pw, src)) }()
+	if err := c.Upload(ctx, name, "/tmp", pr); err != nil {
+		t.Fatal(err)
+	}
+	tr, err := c.Download(ctx, name, "/tmp/dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	out := filepath.Join(host, "out")
+	os.Mkdir(out, 0755)
+	if err := agent.ExtractTar(tr, out, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := exec.Command("diff", "-r", "--no-dereference", src, filepath.Join(out, "dir")).CombinedOutput(); err != nil {
+		t.Errorf("diff -r: %v\n%s", err, b)
+	}
+	for _, f := range []string{"a.txt", "sub/big"} {
+		a, _ := os.Lstat(filepath.Join(src, f))
+		b, err := os.Lstat(filepath.Join(out, "dir", f))
+		if err != nil || a.Mode() != b.Mode() || !a.ModTime().Equal(b.ModTime()) {
+			t.Errorf("%s: %v %v, want %v %v (%v)", f, b.Mode(), b.ModTime(), a.Mode(), a.ModTime(), err)
+		}
 	}
 }
 

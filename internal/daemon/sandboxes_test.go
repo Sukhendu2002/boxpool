@@ -273,6 +273,8 @@ func TestNoBackend(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/v1/sandboxes", nil),
 		httptest.NewRequest(http.MethodPost, "/v1/sandboxes/web/stop", nil),
 		httptest.NewRequest(http.MethodDelete, "/v1/sandboxes/web", nil),
+		httptest.NewRequest(http.MethodGet, "/v1/sandboxes/web/files?path=/", nil),
+		httptest.NewRequest(http.MethodPut, "/v1/sandboxes/web/files?path=/", nil),
 	} {
 		rec := httptest.NewRecorder()
 		Handler(Info{}, nil, nil).ServeHTTP(rec, r)

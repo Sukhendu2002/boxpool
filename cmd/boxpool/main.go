@@ -29,6 +29,8 @@ Commands:
   up        start a pool on this machine (not implemented yet)
   join      join an existing pool (not implemented yet)
   sh        open a shell in a new or existing sandbox
+  exec      run a command in a sandbox
+  cp        copy files between this machine and a sandbox
   ls        list this machine's sandboxes
   stop      stop a sandbox
   rm        delete a sandbox and free its resources
@@ -51,6 +53,10 @@ func main() {
 		}
 	case "sh":
 		os.Exit(sh(os.Args[2:]))
+	case "exec":
+		os.Exit(execCmd(os.Args[2:]))
+	case "cp":
+		os.Exit(cp(os.Args[2:]))
 	case "ls":
 		os.Exit(ls(os.Args[2:]))
 	case "stop":

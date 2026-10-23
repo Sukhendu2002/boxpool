@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"regexp"
 	"strconv"
 	"sync"
@@ -118,6 +120,8 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.backendOnly(s.stop))
 	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.backendOnly(s.remove))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.backendOnly(s.exec))
+	mux.HandleFunc("GET /v1/sandboxes/{name}/files", s.backendOnly(s.files))
+	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.backendOnly(s.files))
 	return mux
 }
 
@@ -357,6 +361,35 @@ func (s *server) exec(w http.ResponseWriter, r *http.Request) {
 	}
 	defer c.CloseNow()
 	relay(r.Context(), c, ag)
+}
+
+// files relays a request to the agent's file API (docs/agent-protocol.md)
+// unchanged, streaming the tar both ways. A download that fails after its
+// status was sent is aborted, so the client cannot mistake it for a whole
+// tar.
+func (s *server) files(w http.ResponseWriter, r *http.Request) {
+	sb, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sameBackend(sb); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	p := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL = &url.URL{Scheme: "http", Host: "agent", Path: "/v1/files", RawQuery: pr.In.URL.RawQuery}
+			pr.Out.Host = "agent"
+		},
+		Transport: &http.Transport{
+			DialContext:       func(ctx context.Context, _, _ string) (net.Conn, error) { return s.d.Dial(ctx, sb.ID) },
+			DisableKeepAlives: true,
+		},
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			writeError(w, http.StatusBadGateway, fmt.Errorf("cannot reach the agent in sandbox %q (is it running?): %w", sb.Spec.Name, err))
+		},
+	}
+	p.ServeHTTP(w, r)
 }
 
 // relay copies messages both ways until either side closes or fails, then
