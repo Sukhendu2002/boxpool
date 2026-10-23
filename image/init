@@ -1,6 +1,9 @@
 #!/bin/sh
 # VM-only init. Docker starts tini directly and never runs this setup.
 set -eu
+# The kernel starts init with no PATH (and HOME=/); match the Docker image so
+# the agent can find commands. Keep a caller's PATH for the stubbed init test.
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" HOME=/root
 mount -t proc -o nosuid,nodev,noexec proc /proc
 # The pinned kernel mounts devtmpfs before starting init. Verify that contract
 # before remounting: remount alone does not check the existing filesystem type.
