@@ -18,8 +18,8 @@ import (
 	"boxpool.run/boxpool/internal/store"
 )
 
-// shutdownTimeout is how long Run waits for in-flight requests on shutdown,
-// and then again for exec sessions to close.
+// shutdownTimeout is the HTTP shutdown grace period and the delay before
+// warning about handlers that have not finished their cleanup.
 var shutdownTimeout = 5 * time.Second
 
 // openBackend is openDriver; tests replace it with a fake.
@@ -29,7 +29,9 @@ var openBackend = openDriver
 // store and the backend named by info.Backend (on Linux: firecracker or
 // docker; any other name serves no backend) and serves the API on the
 // socket in dir until ctx is cancelled. Only one daemon may run per state
-// directory.
+// directory. Shutdown cancels sessions and waits for every handler before
+// releasing the store and lock. Cleanup may outlast shutdownTimeout when a
+// backend operation cannot finish immediately after cancellation.
 func Run(ctx context.Context, dir string, info Info) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
@@ -86,6 +88,7 @@ func Run(ctx context.Context, dir string, info Info) error {
 	defer endSessions()
 	var mu sync.Mutex
 	var active sync.WaitGroup
+	requests := 0 // guarded by mu
 	h := Handler(info, st, d)
 	srv := &http.Server{
 		BaseContext: func(net.Listener) context.Context { return sessions },
@@ -97,8 +100,14 @@ func Run(ctx context.Context, dir string, info Info) error {
 				return
 			}
 			active.Add(1)
+			requests++
 			mu.Unlock()
-			defer active.Done()
+			defer func() {
+				mu.Lock()
+				requests--
+				mu.Unlock()
+				active.Done()
+			}()
 			h.ServeHTTP(w, r)
 		}),
 	}
@@ -110,16 +119,16 @@ func Run(ctx context.Context, dir string, info Info) error {
 	}
 
 	select {
-	case err := <-served:
-		return err
+	case err = <-served:
+		srv.Close()
 	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err = srv.Shutdown(shutdownCtx); err != nil {
+			srv.Close() // drop connections that did not finish in time
+		}
+		<-served
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	if err = srv.Shutdown(shutdownCtx); err != nil {
-		srv.Close() // drop connections that did not finish in time
-	}
-	<-served
 	mu.Lock()
 	endSessions() // each exec relay closes both its WebSockets
 	mu.Unlock()
@@ -128,9 +137,13 @@ func Run(ctx context.Context, dir string, info Info) error {
 	select {
 	case <-idle:
 	case <-time.After(shutdownTimeout):
-		if err == nil {
-			err = errors.New("requests still running after shutdown")
-		}
+		mu.Lock()
+		n := requests
+		mu.Unlock()
+		slog.Warn("requests still running after shutdown; waiting for cleanup", "requests", n)
+		// A handler can still need the store for rollback after a slow
+		// backend operation. A timeout must not release its store or lock.
+		<-idle
 	}
 	slog.Info("daemon stopped")
 	return err

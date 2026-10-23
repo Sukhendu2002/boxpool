@@ -247,6 +247,13 @@ Its Firecracker case skips without `/dev/kvm`, its Docker case without a
 reachable engine (or fails, with `BOXPOOL_TEST_REQUIRE_DOCKER=1`). Each
 removes its sandbox afterwards.
 
+Daemon shutdown closes exec sessions and waits for request cleanup before
+closing the store or releasing its lock. If cleanup exceeds the shutdown
+grace period, it logs the number of requests still running and keeps
+waiting. A backend operation that ignores cancellation can therefore delay
+shutdown indefinitely; returning early would let rollback use a closed
+store or race a replacement daemon.
+
 The networking test (`TestIntegrationNetwork`) needs root, since it creates
 tap devices and firewall rules; without root it skips. Build the test binary
 as yourself and run only it with `sudo`, pointing it at your artifact cache:
