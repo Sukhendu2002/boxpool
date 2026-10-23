@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
+	github.com/klauspost/compress v1.19.2
 	golang.org/x/sys v0.37.0
 	modernc.org/sqlite v1.46.1
 )

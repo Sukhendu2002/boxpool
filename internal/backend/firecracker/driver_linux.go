@@ -1,0 +1,429 @@
+//go:build linux
+
+package firecracker
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"boxpool.run/boxpool/internal/agent"
+	"boxpool.run/boxpool/internal/artifacts"
+	"boxpool.run/boxpool/internal/backend"
+)
+
+// Timeouts; tests may shorten them.
+var (
+	apiTimeout   = 5 * time.Second  // firecracker start to its API socket accepting
+	agentTimeout = 30 * time.Second // InstanceStart to the agent answering
+	stopTimeout  = 10 * time.Second // each stage of Stop before the next, harsher one
+)
+
+// Driver is the Firecracker backend. All its state is in the sandbox
+// directories, so a new Driver sees the sandboxes an earlier one created.
+type Driver struct {
+	root                        string // <state dir>/sandboxes
+	firecracker, kernel, rootfs string
+}
+
+var _ backend.Driver = (*Driver)(nil)
+
+// New unpacks the fetched artifacts, creates the sandboxes directory in
+// stateDir and kills firecracker processes left behind by an earlier daemon.
+func New(ctx context.Context, stateDir string, paths artifacts.Paths) (*Driver, error) {
+	fc, rootfs, err := prepare(paths)
+	if err != nil {
+		return nil, err
+	}
+	// Absolute, because running matches the API socket path on firecracker's
+	// command line.
+	stateDir, err = filepath.Abs(stateDir)
+	if err != nil {
+		return nil, err
+	}
+	d := &Driver{root: filepath.Join(stateDir, "sandboxes"), firecracker: fc, kernel: paths.Kernel, rootfs: rootfs}
+	if err := os.MkdirAll(d.root, 0700); err != nil {
+		return nil, err
+	}
+	return d, killOrphans(ctx, d.root)
+}
+
+// killOrphans kills every sandbox's firecracker process: whoever started it
+// is gone, so nothing would ever stop it.
+// shortcut: kills running VMs instead of re-adopting them; #27 re-adopts.
+func killOrphans(ctx context.Context, root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		l := sandboxLayout(root, e.Name())
+		if pid, ok := running(l); ok {
+			slog.Warn("killing orphaned firecracker process", "sandbox", e.Name(), "pid", pid)
+		}
+		if err := kill(ctx, l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Driver) Name() string { return "firecracker" }
+
+// Create copies the base rootfs into a new sandbox directory. Spec.Image is
+// ignored (there is one image) and so is Spec.DiskGB (see apiCalls).
+func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
+	if err := validID(id); err != nil {
+		return backend.Sandbox{}, err
+	}
+	if spec.CPUs < 1 || spec.MemoryMB < 1 {
+		return backend.Sandbox{}, fmt.Errorf("sandbox %s: need at least 1 CPU and 1 MiB of memory, got %d and %d", id, spec.CPUs, spec.MemoryMB)
+	}
+	l := sandboxLayout(d.root, id)
+	// sun_path holds 108 bytes including the terminating NUL.
+	if len(l.vsock) > 107 {
+		return backend.Sandbox{}, fmt.Errorf("sandbox %s: socket path %s is longer than 107 bytes: use a shorter state directory", id, l.vsock)
+	}
+	if err := os.Mkdir(l.dir, 0700); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return backend.Sandbox{}, fmt.Errorf("sandbox %s already exists", id)
+		}
+		return backend.Sandbox{}, err
+	}
+	b, _ := json.Marshal(spec)
+	err := copyRootfs(l.rootfs, d.rootfs)
+	if err == nil {
+		// Written last: List and Start ignore a directory without it.
+		err = os.WriteFile(l.spec, b, 0600)
+	}
+	if err != nil {
+		os.RemoveAll(l.dir)
+		return backend.Sandbox{}, fmt.Errorf("create sandbox %s: %w", id, err)
+	}
+	return backend.Sandbox{ID: id, Name: spec.Name, State: backend.StateStopped}, nil
+}
+
+// Start boots the sandbox and returns once its agent answers. Starting a
+// running sandbox does nothing.
+func (d *Driver) Start(ctx context.Context, id string) error {
+	l, spec, err := d.load(id)
+	if err != nil {
+		return err
+	}
+	if _, ok := running(l); ok {
+		return nil
+	}
+	// Firecracker cannot bind over sockets left by an unclean exit.
+	if err := removeRuntimeFiles(l); err != nil {
+		return err
+	}
+	// Firecracker opens its log without creating it.
+	if err := os.WriteFile(l.log, nil, 0600); err != nil {
+		return err
+	}
+	console, err := os.OpenFile(l.console, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(d.firecracker, "--api-sock", l.api, "--enable-pci", "--log-path", l.log, "--level", "Info")
+	cmd.Stdout, cmd.Stderr = console, console
+	// Its own session keeps a Ctrl-C in the daemon's terminal away from the
+	// VM. No Pdeathsig: VMs are meant to outlive a daemon crash (#27).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	err = cmd.Start()
+	console.Close()
+	if err != nil {
+		return err
+	}
+	go cmd.Wait() // reap it; running reads /proc, not cmd
+	err = os.WriteFile(l.pid, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0600)
+	if err == nil {
+		err = d.boot(ctx, l, spec)
+	}
+	if err != nil {
+		cmd.Process.Kill()
+		kill(context.WithoutCancel(ctx), l)
+		return fmt.Errorf("start sandbox %s: %w (see %s and %s)", id, err, l.log, l.console)
+	}
+	return nil
+}
+
+func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec) error {
+	api := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", l.api)
+		},
+	}}
+	defer api.CloseIdleConnections()
+	err := poll(ctx, l, apiTimeout, "the API socket", func(ctx context.Context) error {
+		c, err := net.Dial("unix", l.api)
+		if err == nil {
+			c.Close()
+		}
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	for _, c := range apiCalls(spec, d.kernel, l) {
+		if err := put(ctx, api, c); err != nil {
+			return err
+		}
+	}
+	ag := d.agent(l)
+	defer ag.CloseIdleConnections()
+	return poll(ctx, l, agentTimeout, "the guest agent", func(ctx context.Context) error {
+		_, err := ag.Version(ctx)
+		return err
+	})
+}
+
+func put(ctx context.Context, c *http.Client, call apiCall) error {
+	b, err := json.Marshal(call.body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://firecracker"+call.path, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("PUT %s: %w", call.path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return fmt.Errorf("PUT %s: %s: %s", call.path, resp.Status, bytes.TrimSpace(msg))
+	}
+	return nil
+}
+
+// poll calls try every few milliseconds until it succeeds, the sandbox's
+// firecracker process exits or timeout passes.
+func poll(ctx context.Context, l layout, timeout time.Duration, what string, try func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		err := try(ctx)
+		if err == nil {
+			return nil
+		}
+		if _, ok := running(l); !ok {
+			return fmt.Errorf("firecracker exited while waiting for %s", what)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for %s: %w (last error: %v)", what, ctx.Err(), err)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// Stop shuts the guest down after flushing its disk and waits for
+// firecracker to exit, sending SIGTERM and then SIGKILL if it does not.
+func (d *Driver) Stop(ctx context.Context, id string) error {
+	l, _, err := d.load(id)
+	if err != nil {
+		return err
+	}
+	if pid, ok := running(l); ok {
+		if err := d.shutdownGuest(ctx, l); err != nil {
+			slog.Warn("sandbox did not shut down cleanly; terminating it", "sandbox", id, "err", err)
+			syscall.Kill(pid, syscall.SIGTERM)
+			if waitExit(ctx, l, stopTimeout) != nil {
+				return kill(context.WithoutCancel(ctx), l)
+			}
+		}
+	}
+	return removeRuntimeFiles(l)
+}
+
+// shutdownGuest flushes the guest's disk, remounts its root read-only and
+// reboots it with sysrq, then waits for firecracker to exit, which reboot=k
+// (x86_64) or PSCI (arm64) makes it do.
+// shortcut: guest processes get no SIGTERM first, because SendCtrlAltDel
+// needs an i8042 driver the pinned kernel lacks (CONFIG_SERIO is off) and the
+// image has no reboot command; add an agent shutdown endpoint for that.
+func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
+	ctx, cancel := context.WithTimeout(ctx, stopTimeout)
+	defer cancel()
+	c := d.agent(l)
+	defer c.CloseIdleConnections()
+	run := func(script string) (*agent.Session, error) {
+		return c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", script}}, io.Discard, io.Discard)
+	}
+	// The remount fails if a guest process has a file open for writing; the
+	// sync before it is what keeps the data.
+	s, err := run("sync && { mount -o remount,ro / || true; }")
+	if err != nil {
+		return err
+	}
+	if code, err := s.Wait(); err != nil || code != 0 {
+		return fmt.Errorf("sync in the guest: exit status %d, %v", code, err)
+	}
+	// The guest reboots at once, so this command never exits. Keep ctx alive
+	// until firecracker does: cancelling it would close the session and could
+	// make the agent kill the command first.
+	if _, err := run("echo b > /proc/sysrq-trigger"); err != nil {
+		return err
+	}
+	return waitExit(ctx, l, stopTimeout)
+}
+
+// Remove kills the sandbox if it runs and deletes its directory.
+func (d *Driver) Remove(ctx context.Context, id string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
+	l := sandboxLayout(d.root, id)
+	if err := kill(ctx, l); err != nil {
+		return err
+	}
+	return os.RemoveAll(l.dir)
+}
+
+func (d *Driver) Pause(ctx context.Context, id string) error {
+	return fmt.Errorf("pause: %w until snapshots land in M3", backend.ErrNotSupported)
+}
+
+func (d *Driver) Resume(ctx context.Context, id string) error {
+	return fmt.Errorf("resume: %w until snapshots land in M3", backend.ErrNotSupported)
+}
+
+// List returns the sandboxes on disk, running or stopped.
+func (d *Driver) List(ctx context.Context) ([]backend.Sandbox, error) {
+	entries, err := os.ReadDir(d.root)
+	if err != nil {
+		return nil, err
+	}
+	var list []backend.Sandbox
+	for _, e := range entries {
+		l, spec, err := d.load(e.Name())
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // not a sandbox, or Create has not finished
+		}
+		if err != nil {
+			return nil, err
+		}
+		state := backend.StateStopped
+		if _, ok := running(l); ok {
+			state = backend.StateRunning
+		}
+		list = append(list, backend.Sandbox{ID: e.Name(), Name: spec.Name, State: state})
+	}
+	return list, nil
+}
+
+// Dial connects to the agent in a running sandbox, for agent.NewClient.
+func (d *Driver) Dial(ctx context.Context, id string) (net.Conn, error) {
+	if err := validID(id); err != nil {
+		return nil, err
+	}
+	return dialAgent(ctx, sandboxLayout(d.root, id).vsock)
+}
+
+func (d *Driver) agent(l layout) *agent.Client {
+	return agent.NewClient(func(ctx context.Context) (net.Conn, error) { return dialAgent(ctx, l.vsock) })
+}
+
+func (d *Driver) load(id string) (layout, backend.Spec, error) {
+	var spec backend.Spec
+	if err := validID(id); err != nil {
+		return layout{}, spec, err
+	}
+	l := sandboxLayout(d.root, id)
+	b, err := os.ReadFile(l.spec)
+	if err != nil {
+		return l, spec, fmt.Errorf("sandbox %s: %w", id, err)
+	}
+	return l, spec, json.Unmarshal(b, &spec)
+}
+
+func validID(id string) error {
+	if id == "." || id == ".." || filepath.Base(id) != id {
+		return fmt.Errorf("invalid sandbox ID %q", id)
+	}
+	return nil
+}
+
+// running returns the pid of the sandbox's firecracker process. A live pid
+// is not enough: the process must also have this sandbox's API socket on its
+// command line, which a process that reused the pid would not.
+func running(l layout) (int, bool) {
+	b, err := os.ReadFile(l.pid)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	// Empty for a zombie, so an exited but unreaped process counts as gone.
+	cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		return 0, false
+	}
+	for _, arg := range bytes.Split(cmdline, []byte{0}) {
+		if string(arg) == l.api {
+			return pid, true
+		}
+	}
+	return 0, false
+}
+
+func waitExit(ctx context.Context, l layout, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		if _, ok := running(l); !ok {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("firecracker did not exit: %w", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// kill SIGKILLs the sandbox's firecracker process if it runs, waits for it
+// to go and removes its sockets and pid file.
+func kill(ctx context.Context, l layout) error {
+	if pid, ok := running(l); ok {
+		if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
+		if err := waitExit(ctx, l, stopTimeout); err != nil {
+			return err
+		}
+	}
+	return removeRuntimeFiles(l)
+}
+
+func removeRuntimeFiles(l layout) error {
+	for _, p := range []string{l.pid, l.api, l.vsock} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
