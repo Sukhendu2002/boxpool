@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -85,6 +86,9 @@ func (l *connListener) kill() {
 	}
 }
 
+// beforeExec, if set, runs before the test daemon handles an exec request.
+var beforeExec atomic.Pointer[func()]
+
 // startDaemon serves the daemon API on dir's socket with a fake driver and
 // a real agent, and returns a function that kills it.
 func startDaemon(t *testing.T, dir string) (kill func()) {
@@ -110,7 +114,13 @@ func startDaemon(t *testing.T, dir string) (kill func()) {
 	}
 	cl := &connListener{Listener: l}
 	info := daemon.Info{Backend: "fake", Warning: "test warning"}
-	go http.Serve(cl, daemon.Handler(info, st, fakeDriver{sock}))
+	h := daemon.Handler(info, st, fakeDriver{sock})
+	go http.Serve(cl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f := beforeExec.Load(); f != nil && strings.HasSuffix(r.URL.Path, "/exec") {
+			(*f)()
+		}
+		h.ServeHTTP(w, r)
+	}))
 	t.Cleanup(cl.kill)
 	return cl.kill
 }
@@ -270,6 +280,28 @@ func TestSh(t *testing.T) {
 		r, tm := boxpool(t, tmp, "sh", "web")
 		tm.expect(prompt)
 		tm.send("\x04")
+		r.wait(t, 0)
+	})
+
+	t.Run("resize during handshake", func(t *testing.T) {
+		reached, release := make(chan struct{}), make(chan struct{})
+		hold := func() { close(reached); <-release }
+		beforeExec.Store(&hold)
+		defer beforeExec.Store(nil)
+		r, tm := boxpool(t, tmp, "sh", "--name", "web")
+		select {
+		case <-reached:
+		case <-time.After(10 * time.Second):
+			t.Fatal("boxpool sh never sent the exec request")
+		}
+		if err := pty.Setsize(tm.ptmx, &pty.Winsize{Rows: 40, Cols: 120}); err != nil {
+			t.Fatal(err)
+		}
+		close(release)
+		tm.expect(prompt)
+		tm.send("stty size\r")
+		tm.expect("40 120")
+		tm.send("exit\r")
 		r.wait(t, 0)
 	})
 

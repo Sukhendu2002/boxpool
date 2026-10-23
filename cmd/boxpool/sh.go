@@ -126,20 +126,25 @@ func attach(ctx context.Context, c *client.Client, name string, in *os.File, out
 	}
 	defer term.Restore(fd, old)
 
+	// Before the handshake, so a resize during it is not lost.
+	winch := make(chan os.Signal, 1)
+	notifyResize(winch)
+	defer signal.Stop(winch)
 	s, err := c.Exec(ctx, name, req, out, out)
 	if err != nil {
 		term.Restore(fd, old)
 		fmt.Fprintf(errOut, "boxpool sh: %v\n", err)
 		return -1
 	}
-	winch := make(chan os.Signal, 1)
-	notifyResize(winch)
-	defer signal.Stop(winch)
+	resize := func() {
+		if cols, rows, err := term.GetSize(fd); err == nil {
+			s.Resize(uint16(rows), uint16(cols))
+		}
+	}
+	resize() // the size may have changed since req was built
 	go func() {
 		for range winch {
-			if cols, rows, err := term.GetSize(fd); err == nil {
-				s.Resize(uint16(rows), uint16(cols))
-			}
+			resize()
 		}
 	}()
 	// shortcut: this goroutine stays blocked reading in after the session
