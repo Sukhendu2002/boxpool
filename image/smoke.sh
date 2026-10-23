@@ -69,7 +69,7 @@ args = "console=ttyS0 reboot=k panic=1 root=/dev/vda rw init=/sbin/init i8042.no
 with open(work + "/config.json", "w") as f:
     json.dump({"boot-source": {"kernel_image_path": kernel, "boot_args": args},
                "drives": [{"drive_id": "rootfs", "path_on_host": work + "/rootfs.ext4", "is_root_device": True, "is_read_only": False}],
-               "machine-config": {"vcpu_count": 2, "mem_size_mib": 256},
+               "machine-config": {"vcpu_count": 1, "mem_size_mib": 512},
                "vsock": {"guest_cid": 3, "uds_path": work + "/vsock.sock"}}, f)
 PY
 timeout --signal=TERM --kill-after=2 45 "$fc" --no-api --enable-pci --config-file "$work/config.json" \

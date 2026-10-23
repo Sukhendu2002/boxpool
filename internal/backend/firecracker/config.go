@@ -45,8 +45,8 @@ type apiCall struct {
 }
 
 // apiCalls returns the API requests, in order, that configure and boot a
-// sandbox, with a network interface unless n is nil. Spec.DiskGB is not
-// applied: the disk is the image's size until #13 adds limits.
+// sandbox, with a network interface unless n is nil. Create has already
+// sized the root filesystem to Spec.DiskGB GiB.
 func apiCalls(spec backend.Spec, kernel string, l layout, n *nic) []apiCall {
 	args := bootArgs
 	if n != nil {

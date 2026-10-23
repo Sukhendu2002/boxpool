@@ -123,6 +123,7 @@ type hostConfig struct {
 	Memory         int64
 	MemorySwap     int64
 	PidsLimit      int64
+	CpusetCpus     string
 }
 
 // containerConfig is the body of POST /containers/create.

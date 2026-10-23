@@ -24,6 +24,7 @@ import (
 
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/backend"
+	"boxpool.run/boxpool/internal/client"
 	"boxpool.run/boxpool/internal/daemon"
 	"boxpool.run/boxpool/internal/store"
 )
@@ -281,6 +282,19 @@ func TestSh(t *testing.T) {
 		tm.expect(prompt)
 		tm.send("\x04")
 		r.wait(t, 0)
+	})
+
+	t.Run("resource flags", func(t *testing.T) {
+		r, tm := boxpool(t, tmp, "sh", "--name", "limited", "--cpu", "1", "--mem", "512m", "--disk", "1g")
+		tm.expect(prompt)
+		tm.send("exit\r")
+		r.wait(t, 0)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		sb, err := client.New(tmp).GetSandbox(ctx, "limited")
+		if err != nil || sb.CPUs != 1 || sb.MemoryMB != 512 || sb.DiskGB != 1 {
+			t.Fatalf("resource flags: %+v, %v", sb, err)
+		}
 	})
 
 	t.Run("resize during handshake", func(t *testing.T) {

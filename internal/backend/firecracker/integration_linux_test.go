@@ -54,7 +54,7 @@ func TestIntegration(t *testing.T) {
 	b := make([]byte, 6)
 	rand.Read(b)
 	id := hex.EncodeToString(b)
-	if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 2, MemoryMB: 512}); err != nil {
+	if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
 		t.Fatal(err)
 	}
 	l := sandboxLayout(d.root, id)
@@ -120,7 +120,19 @@ func TestIntegration(t *testing.T) {
 			t.Errorf("List does not show %s running: %+v", id, list)
 		}
 		if boot == 1 {
-			out := run("uname -a")
+			// nproc follows the virtual CPU count. Linux reserves some of
+			// the configured 512 MiB for its kernel, so MemTotal is lower.
+			out := run(`test "$(nproc)" -eq 1 && awk '/^MemTotal:/ { print; if ($2 < 419430 || $2 > 524288) exit 1 }' /proc/meminfo && test "$(blockdev --getsize64 /dev/vda)" -eq 1073741824 && df -k /`)
+			t.Logf("requested 1 CPU, 512 MiB, 1 GiB disk:\n%s", out)
+			// The filesystem, as well as its block device, must have grown.
+			run(`df -k --output=size / | tail -n 1 | { read size; test "$size" -gt 900000; }`)
+			if _, err := d.Create(ctx, "too-much-memory", backend.Spec{CPUs: 1, MemoryMB: 1 << 30, DiskGB: 1}); err == nil || !strings.Contains(err.Error(), "insufficient memory") {
+				t.Fatalf("capacity refusal: %v", err)
+			}
+			if _, err := os.Stat(sandboxLayout(d.root, "too-much-memory").dir); !os.IsNotExist(err) {
+				t.Fatalf("refused request allocated disk: %v", err)
+			}
+			out = run("uname -a")
 			t.Logf("uname -a: %s", strings.TrimSpace(out))
 			if !strings.HasPrefix(out, "Linux ") {
 				t.Errorf("uname -a: %q", out)

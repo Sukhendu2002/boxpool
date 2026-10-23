@@ -47,6 +47,7 @@ func TestContainerConfig(t *testing.T) {
 		"Memory":         float64(512 << 20),
 		"MemorySwap":     float64(512 << 20),
 		"PidsLimit":      float64(pidsLimit),
+		"CpusetCpus":     "",
 		"Mounts": []any{
 			map[string]any{"Type": "volume", "Source": "boxpool-x-abc", "Target": "/root"},
 			map[string]any{"Type": "bind", "Source": "/state/docker/abc/agent", "Target": "/run/boxpool"},

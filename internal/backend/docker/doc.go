@@ -38,8 +38,11 @@
 //     packages fails; that needs a writable root, which this backend does not
 //     offer.
 //   - Spec.CPUs and Spec.MemoryMB become CPU and memory limits, with no swap;
-//     at most 4096 processes. Spec.DiskGB is not applied: a plain volume has
-//     no quota (#13).
+//     at most 4096 processes. A cpuset also makes nproc report Spec.CPUs.
+//     Spec.DiskGB is advisory: a plain named volume has no portable quota,
+//     so Docker disk growth is not limited or reserved. Monitor the Engine's
+//     data filesystem. /proc/meminfo and free report host memory; inspect
+//     the memory cgroup for the enforced limit.
 //   - Each sandbox has its own bridge network, and Docker's own rules drop
 //     traffic between bridges, so sandboxes cannot reach each other. The
 //     engine manages all of it; boxpool changes no host firewall rules.
@@ -70,4 +73,11 @@
 //     more.
 //   - SELinux hosts would need the agent directory relabelled; not handled.
 //   - Pause and Resume are not supported, as on Firecracker until M3.
+//
+// Shared resource admission (internal/resources) keeps one CPU and the
+// larger of 1 GiB or 10% of memory for the host. Defaults are 2 CPUs,
+// 2048 MiB and 10 GiB. S/docker/x/resources.json retains the reservation
+// until Remove, including after Stop or a failed Create whose rollback
+// could not finish. New records the limits of older verified containers
+// without changing their settings; old containers keep their old affinity.
 package docker

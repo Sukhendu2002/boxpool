@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"boxpool.run/boxpool/internal/agent"
+	"boxpool.run/boxpool/internal/resources"
 )
 
 // fakeEngine is the part of the Docker Engine API the driver uses, in
@@ -105,6 +106,9 @@ func (f *fakeEngine) driver(ctx context.Context, sock string) *Driver {
 	d, err := newDriver(e, filepath.Join(shortTemp(f.t), "docker"))
 	if err != nil {
 		f.t.Fatal(err)
+	}
+	d.admission.Probe = func(string) (resources.Capacity, error) {
+		return resources.Capacity{CPUs: []int{0, 1, 2, 3, 4, 5, 6, 7}, MemoryMB: 32768, AvailableMB: 32768, DiskBytes: 1 << 40}, nil
 	}
 	return d
 }
@@ -263,6 +267,7 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "GET json":
 			var out container
 			out.ID, out.Name, out.Config.Labels = c.id, "/"+name, c.cfg.Labels
+			out.HostConfig = c.cfg.HostConfig
 			out.State.Running, out.State.ExitCode = c.running, c.exit
 			json.NewEncoder(w).Encode(out)
 		case "POST start":

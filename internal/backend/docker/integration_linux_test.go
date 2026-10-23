@@ -69,6 +69,8 @@ func owned(ctx context.Context, t *testing.T, d *Driver) []string {
 	for _, v := range vs.Volumes {
 		list = append(list, "volume "+v.Name)
 	}
+	// Engine list endpoints do not promise a stable resource order.
+	slices.Sort(list)
 	return list
 }
 
@@ -87,7 +89,7 @@ type sandbox struct {
 
 func newSandbox(ctx context.Context, t *testing.T, d *Driver) *sandbox {
 	id := randomID()
-	if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 1, MemoryMB: 256}); err != nil {
+	if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 1, MemoryMB: 512}); err != nil {
 		t.Fatal(err)
 	}
 	c := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, id) })
@@ -134,6 +136,9 @@ const (
 
 type inspected struct {
 	HostConfig struct {
+		NanoCPUs                     int64 `json:"NanoCpus"`
+		Memory, MemorySwap           int64
+		CpusetCpus                   string
 		CapDrop, CapAdd, SecurityOpt []string
 		ReadonlyRootfs, Privileged   bool
 		NetworkMode, PidMode         string
@@ -176,6 +181,9 @@ func TestIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := in.HostConfig
+	if h.NanoCPUs != 1e9 || h.Memory != 512<<20 || h.MemorySwap != h.Memory || h.CpusetCpus == "" {
+		t.Errorf("resource limits not applied: %+v", h)
+	}
 	t.Logf("CapDrop %v CapAdd %v SecurityOpt %v ReadonlyRootfs %v NetworkMode %s", h.CapDrop, h.CapAdd, h.SecurityOpt, h.ReadonlyRootfs, h.NetworkMode)
 	if !slices.Equal(h.CapDrop, []string{"ALL"}) || len(h.CapAdd) != 0 || !slices.Contains(h.SecurityOpt, "no-new-privileges:true") ||
 		!h.ReadonlyRootfs || h.Privileged || h.NetworkMode != d.name(a.id) || len(h.PortBindings) != 0 || len(h.Devices) != 0 || len(h.Binds) != 0 ||
@@ -197,6 +205,19 @@ func TestIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Logf("Start %s until the agent answered: %v", s.id, time.Since(start))
+		out := s.run(ctx, `set -eu
+test "$(nproc)" -eq 1
+if test -r /sys/fs/cgroup/memory.max; then
+  test "$(cat /sys/fs/cgroup/memory.max)" -eq 536870912
+  set -- $(cat /sys/fs/cgroup/cpu.max); test "$1" -eq "$2"
+  cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpuset.cpus.effective
+else
+  test "$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)" -eq 536870912
+  test "$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)" -eq "$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)"
+  cat /sys/fs/cgroup/memory/memory.limit_in_bytes
+fi
+awk '/^MemTotal:/ {print "host memory view:", $0}' /proc/meminfo`)
+		t.Logf("requested 1 CPU and 512 MiB; cgroup limits:\n%s", out)
 	}
 
 	// The agent socket: made by the container's root, reachable by the
@@ -309,6 +330,9 @@ func TestIntegration(t *testing.T) {
 	// A duplicate Create, and one with an image that does not exist, fail
 	// and leave nothing new behind.
 	before := owned(ctx, t, d)
+	if _, err := d.Create(ctx, "too-much-memory", backend.Spec{CPUs: 1, MemoryMB: 1 << 30}); err == nil || !strings.Contains(err.Error(), "insufficient memory") {
+		t.Fatalf("capacity refusal: %v", err)
+	}
 	if _, err := d.Create(ctx, a.id, backend.Spec{CPUs: 1, MemoryMB: 256}); err == nil {
 		t.Error("duplicate Create succeeded")
 	}

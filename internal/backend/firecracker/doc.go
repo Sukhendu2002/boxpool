@@ -13,6 +13,14 @@
 //	firecracker.log   Firecracker's log
 //	console.log       the guest's serial console
 //	console.log.1     its previous MiB or more, once it outgrew 1 MiB
+//	resources.json    its persistent CPU, memory and disk reservation
+//
+// Create defaults to 2 vCPUs, 2048 MiB RAM and a 10 GiB disk. Shared
+// admission keeps one CPU and max(1 GiB, 10% of RAM) for the host. Stopped
+// sandboxes keep their reservations until Remove. The private sparse rootfs
+// is grown with resize2fs (host e2fsprogs required); the cached base is never
+// resized, and smaller-than-base requests are refused. Guest MemTotal is
+// slightly below configured memory because the guest kernel reserves RAM.
 //
 // Firecracker runs without its jailer. The jailer needs root to chroot,
 // create device nodes, join cgroups and drop to another uid, and boxpool's
