@@ -45,22 +45,42 @@ func TestInstallFile(t *testing.T) {
 }
 
 func TestUpSteps(t *testing.T) {
+	const (
+		enable  = "enable --no-reload boxpool; "
+		reload  = "daemon-reload; "
+		restart = "restart boxpool"
+		start   = "start boxpool"
+	)
 	for _, c := range []struct {
-		bin, unit, enabled bool
-		want               string
+		name string
+		f    upFacts
+		want string
 	}{
-		{true, true, false, "enable --no-reload boxpool; daemon-reload; restart boxpool"}, // first run
-		{false, true, true, "enable --no-reload boxpool; daemon-reload; restart boxpool"},
-		{true, false, true, "restart boxpool"},
-		{false, false, false, "enable --no-reload boxpool; daemon-reload; start boxpool"}, // after down
-		{false, false, true, "start boxpool"},                                             // nothing changed: no reload, no restart
+		{"first install", upFacts{unitChanged: true, enabled: "disabled", needReload: true}, enable + reload + restart},
+		{"unit file changed", upFacts{unitChanged: true, enabled: "enabled", needReload: true}, reload + restart},
+		{"nothing to do", upFacts{enabled: "enabled"}, start}, // no reload, no restart
+		{"failed or stopped", upFacts{enabled: "enabled"}, start},
+		{"after down", upFacts{enabled: "disabled"}, enable + reload + start},
+		{"not found", upFacts{enabled: ""}, enable + reload + start},
+		// An earlier daemon-reload failed after the unit file was written.
+		{"reload pending", upFacts{enabled: "enabled", needReload: true}, reload + restart},
+		// Enabled until the next reboot only.
+		{"enabled-runtime", upFacts{enabled: "enabled-runtime"}, enable + reload + start},
+		// An earlier restart failed after the binary was replaced.
+		{"old binary running", upFacts{enabled: "enabled", staleExe: true}, restart},
 	} {
+		steps, err := upSteps(c.f)
 		var got []string
-		for _, s := range upSteps(c.bin, c.unit, c.enabled) {
+		for _, s := range steps {
 			got = append(got, strings.Join(s, " "))
 		}
-		if g := strings.Join(got, "; "); g != c.want {
-			t.Errorf("upSteps(%v, %v, %v) = %q, want %q", c.bin, c.unit, c.enabled, g, c.want)
+		if g := strings.Join(got, "; "); err != nil || g != c.want {
+			t.Errorf("%s: upSteps(%+v) = %q, %v; want %q", c.name, c.f, g, err, c.want)
+		}
+	}
+	for _, state := range []string{"masked", "masked-runtime"} {
+		if steps, err := upSteps(upFacts{enabled: state}); err == nil || !strings.Contains(err.Error(), "systemctl unmask boxpool") {
+			t.Errorf("upSteps(%s) = %v, %v; want an error that says to unmask", state, steps, err)
 		}
 	}
 }

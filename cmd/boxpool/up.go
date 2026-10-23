@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"boxpool.run/boxpool/internal/client"
@@ -115,11 +116,15 @@ func up(args []string) int {
 	report(binChanged, installPath)
 	report(unitChanged, unitPath)
 
-	if binChanged || unitChanged {
-		fmt.Println("restarting boxpool.service")
+	steps, err := upSteps(observe(unitChanged))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
+		return 1
 	}
-	enabled := exec.Command("systemctl", "is-enabled", "--quiet", "boxpool").Run() == nil
-	for _, s := range upSteps(binChanged, unitChanged, enabled) {
+	for _, s := range steps {
+		if s[0] == "restart" {
+			fmt.Println("restarting boxpool.service")
+		}
 		if err := systemctl(s...); err != nil {
 			fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
 			return 1
@@ -150,20 +155,63 @@ func up(args []string) int {
 	return 0
 }
 
-// upSteps returns the systemctl commands that bring the service up after
-// installing its files. enable reloads systemd on every call unless
-// --no-reload, and a reload before it would leave its new symlink unseen;
-// so enable only when needed and then reload once. A second up with
-// nothing to do only runs start, which does nothing if it is running.
-func upSteps(binChanged, unitChanged, enabled bool) [][]string {
+// upFacts is the systemd state boxpool up observed after installing its
+// files. It decides from these rather than from what this run changed, so
+// a run that failed halfway is finished by the next one.
+type upFacts struct {
+	unitChanged bool   // this run rewrote the unit file
+	enabled     string // what systemctl is-enabled printed
+	needReload  bool   // systemd has not loaded the unit file on disk
+	staleExe    bool   // the service runs, but not the installed binary
+}
+
+// observe reads the upFacts from systemd and /proc.
+func observe(unitChanged bool) upFacts {
+	show := func(prop string) string {
+		out, _ := exec.Command("systemctl", "show", "-p", prop, "--value", "boxpool").Output()
+		return strings.TrimSpace(string(out))
+	}
+	// is-enabled prints the state even when it exits non-zero.
+	enabled, _ := exec.Command("systemctl", "is-enabled", "boxpool").Output()
+	f := upFacts{
+		unitChanged: unitChanged,
+		enabled:     strings.TrimSpace(string(enabled)),
+		needReload:  show("NeedDaemonReload") == "yes",
+	}
+	if pid := show("MainPID"); pid != "" && pid != "0" {
+		// Replacing the binary by rename leaves a running daemon on the
+		// old inode; if either stat fails, restarting is the safe answer.
+		running, err1 := os.Stat("/proc/" + pid + "/exe")
+		installed, err2 := os.Stat(installPath)
+		f.staleExe = err1 != nil || err2 != nil || !os.SameFile(running, installed)
+	}
+	return f
+}
+
+// upSteps returns the systemctl commands that bring the service up from
+// the state in f. enable reloads systemd on every call unless --no-reload,
+// and a reload before it would leave its new symlink unseen; so enable
+// only when needed and then reload once. A second up with nothing to do
+// only runs start, which does nothing if it is running and starts it if it
+// failed or was stopped.
+func upSteps(f upFacts) ([][]string, error) {
 	var steps [][]string
-	if unitChanged || !enabled {
-		steps = [][]string{{"enable", "--no-reload", "boxpool"}, {"daemon-reload"}}
+	reload := f.unitChanged || f.needReload
+	switch {
+	case strings.HasPrefix(f.enabled, "masked"):
+		return nil, errors.New("boxpool.service is masked; unmask it first: sudo systemctl unmask boxpool")
+	case f.enabled != "enabled": // also enabled-runtime, which a reboot forgets
+		steps = append(steps, []string{"enable", "--no-reload", "boxpool"})
+		reload = true
 	}
-	if binChanged || unitChanged {
-		return append(steps, []string{"restart", "boxpool"})
+	if reload {
+		steps = append(steps, []string{"daemon-reload"})
 	}
-	return append(steps, []string{"start", "boxpool"})
+	// A pending reload means the running daemon has the old unit settings.
+	if f.unitChanged || f.needReload || f.staleExe {
+		return append(steps, []string{"restart", "boxpool"}), nil
+	}
+	return append(steps, []string{"start", "boxpool"}), nil
 }
 
 func down(args []string) int {
