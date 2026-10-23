@@ -29,6 +29,42 @@ type delayedCreate struct {
 	release  chan struct{}
 }
 
+type closeDriver struct {
+	*fakeDriver
+	close func() error
+}
+
+func (d *closeDriver) Close() error { return d.close() }
+
+func TestRunClosesBackendBeforeStore(t *testing.T) {
+	tmp, err := os.MkdirTemp("", "bp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmp)
+	oldOpen := openBackend
+	defer func() { openBackend = oldOpen }()
+	closeErr := errors.New("backend close error")
+	closed := false
+	openBackend = func(_ context.Context, _ string, _ *Info, st *store.Store) (Driver, error) {
+		return &closeDriver{fakeDriver: newFakeDriver(t, tmp), close: func() error {
+			closed = true
+			if _, err := st.List(context.Background()); err != nil {
+				t.Errorf("store closed before backend: %v", err)
+			}
+			return closeErr
+		}}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := Run(ctx, filepath.Join(tmp, "state"), Info{}); !errors.Is(err, closeErr) {
+		t.Errorf("Run lost backend cleanup error: %v", err)
+	}
+	if !closed {
+		t.Error("Run did not close backend")
+	}
+}
+
 func (d *delayedCreate) Create(ctx context.Context, id string, _ backend.Spec) (backend.Sandbox, error) {
 	d.entered <- id
 	<-ctx.Done()

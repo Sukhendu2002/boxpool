@@ -27,12 +27,12 @@ var openBackend = openDriver
 
 // Run creates the state directory, takes the daemon lock, opens the sandbox
 // store and the backend named by info.Backend (on Linux: firecracker or
-// docker; any other name serves no backend) and serves the API on the
+// docker; on macOS: the Virtualization framework) and serves the API on the
 // socket in dir until ctx is cancelled. Only one daemon may run per state
 // directory. Shutdown cancels sessions and waits for every handler before
 // releasing the store and lock. Cleanup may outlast shutdownTimeout when a
 // backend operation cannot finish immediately after cancellation.
-func Run(ctx context.Context, dir string, info Info) error {
+func Run(ctx context.Context, dir string, info Info) (err error) {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
 	}
@@ -63,6 +63,10 @@ func Run(ctx context.Context, dir string, info Info) error {
 	d, err := openBackend(ctx, dir, &info, st)
 	if err != nil {
 		return fmt.Errorf("open the %s backend: %w", info.Backend, err)
+	}
+
+	if closer, ok := d.(interface{ Close() error }); ok {
+		defer func() { err = errors.Join(err, closer.Close()) }()
 	}
 
 	sock := filepath.Join(dir, SocketName)

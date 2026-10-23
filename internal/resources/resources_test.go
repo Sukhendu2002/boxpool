@@ -21,6 +21,26 @@ func capacity() Capacity {
 	return Capacity{CPUs: []int{2, 4, 6, 8}, MemoryMB: 8192, AvailableMB: 8192, DiskBytes: 40 << 30}
 }
 
+func TestVZReservations(t *testing.T) {
+	m := &Manager{StateDir: t.TempDir(), Probe: func(string) (Capacity, error) { return capacity(), nil }}
+	spec := backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1}
+	ctx := context.Background()
+	if _, err := m.Create(ctx, "vz", "first", spec, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(m.StateDir, "sandboxes", "first", manifest)); err != nil {
+		t.Fatal(err)
+	}
+	// Reading the shared VM directory twice would charge each VM twice.
+	allocations, err := m.allocations()
+	if err != nil || len(allocations) != 1 || allocations[0].DiskBytes != 1<<30 {
+		t.Fatalf("vz reservation: %+v, %v", allocations, err)
+	}
+	if _, err := m.Create(ctx, "vz", "second", backend.Spec{CPUs: 3, MemoryMB: 512}, 1<<30); err == nil {
+		t.Error("ignored existing vz reservation")
+	}
+}
+
 func TestAdmit(t *testing.T) {
 	spec := backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1}
 	for _, tc := range []struct {
