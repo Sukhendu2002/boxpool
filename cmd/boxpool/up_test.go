@@ -44,6 +44,27 @@ func TestInstallFile(t *testing.T) {
 	}
 }
 
+func TestUpSteps(t *testing.T) {
+	for _, c := range []struct {
+		bin, unit, enabled bool
+		want               string
+	}{
+		{true, true, false, "enable --no-reload boxpool; daemon-reload; restart boxpool"}, // first run
+		{false, true, true, "enable --no-reload boxpool; daemon-reload; restart boxpool"},
+		{true, false, true, "restart boxpool"},
+		{false, false, false, "enable --no-reload boxpool; daemon-reload; start boxpool"}, // after down
+		{false, false, true, "start boxpool"},                                             // nothing changed: no reload, no restart
+	} {
+		var got []string
+		for _, s := range upSteps(c.bin, c.unit, c.enabled) {
+			got = append(got, strings.Join(s, " "))
+		}
+		if g := strings.Join(got, "; "); g != c.want {
+			t.Errorf("upSteps(%v, %v, %v) = %q, want %q", c.bin, c.unit, c.enabled, g, c.want)
+		}
+	}
+}
+
 func TestUpDownRefused(t *testing.T) {
 	if os.Geteuid() == 0 && runtime.GOOS == "linux" {
 		t.Skip("as root on Linux, up would install the service")

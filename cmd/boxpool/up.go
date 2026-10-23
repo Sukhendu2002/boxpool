@@ -115,15 +115,11 @@ func up(args []string) int {
 	report(binChanged, installPath)
 	report(unitChanged, unitPath)
 
-	steps := [][]string{{"enable", "--now", "boxpool"}} // starts it only if it is not running
 	if binChanged || unitChanged {
-		steps = [][]string{{"enable", "boxpool"}, {"restart", "boxpool"}}
 		fmt.Println("restarting boxpool.service")
 	}
-	if unitChanged {
-		steps = append([][]string{{"daemon-reload"}}, steps...)
-	}
-	for _, s := range steps {
+	enabled := exec.Command("systemctl", "is-enabled", "--quiet", "boxpool").Run() == nil
+	for _, s := range upSteps(binChanged, unitChanged, enabled) {
 		if err := systemctl(s...); err != nil {
 			fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
 			return 1
@@ -152,6 +148,22 @@ func up(args []string) int {
 		fmt.Fprintf(os.Stderr, "warning: %s\n", info.Warning)
 	}
 	return 0
+}
+
+// upSteps returns the systemctl commands that bring the service up after
+// installing its files. enable reloads systemd on every call unless
+// --no-reload, and a reload before it would leave its new symlink unseen;
+// so enable only when needed and then reload once. A second up with
+// nothing to do only runs start, which does nothing if it is running.
+func upSteps(binChanged, unitChanged, enabled bool) [][]string {
+	var steps [][]string
+	if unitChanged || !enabled {
+		steps = [][]string{{"enable", "--no-reload", "boxpool"}, {"daemon-reload"}}
+	}
+	if binChanged || unitChanged {
+		return append(steps, []string{"restart", "boxpool"})
+	}
+	return append(steps, []string{"start", "boxpool"})
 }
 
 func down(args []string) int {
