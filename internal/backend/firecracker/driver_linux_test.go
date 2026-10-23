@@ -169,7 +169,7 @@ func TestNewThroughSymlink(t *testing.T) {
 	os.WriteFile(filepath.Join(art, "fc"), nil, 0755)
 	os.WriteFile(filepath.Join(art, "rootfs.ext4"), nil, 0644)
 
-	d, err := New(context.Background(), link, paths)
+	d, err := New(context.Background(), link, paths, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

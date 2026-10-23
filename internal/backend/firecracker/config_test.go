@@ -2,6 +2,7 @@ package firecracker
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"boxpool.run/boxpool/internal/backend"
@@ -26,7 +27,7 @@ func TestSandboxLayout(t *testing.T) {
 
 func TestAPICalls(t *testing.T) {
 	spec := backend.Spec{Name: "web", CPUs: 2, MemoryMB: 512, DiskGB: 10}
-	calls := apiCalls(spec, "/a/vmlinux-amd64", sandboxLayout("/s", "abc"))
+	calls := apiCalls(spec, "/a/vmlinux-amd64", sandboxLayout("/s", "abc"), nil)
 	want := []struct{ path, body string }{
 		{"/machine-config", `{"mem_size_mib":512,"vcpu_count":2}`},
 		{"/boot-source", `{"boot_args":"console=ttyS0 reboot=k panic=1 root=/dev/vda rw init=/sbin/init i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd","kernel_image_path":"/a/vmlinux-amd64"}`},
@@ -45,5 +46,24 @@ func TestAPICalls(t *testing.T) {
 		if c.path != want[i].path || string(b) != want[i].body {
 			t.Errorf("call %d: got PUT %s %s, want PUT %s %s", i, c.path, b, want[i].path, want[i].body)
 		}
+	}
+}
+
+func TestAPICallsWithNetwork(t *testing.T) {
+	n := sandboxNIC("abc", 1)
+	calls := apiCalls(backend.Spec{CPUs: 1, MemoryMB: 256}, "/k", sandboxLayout("/s", "abc"), &n)
+	if len(calls) != 6 {
+		t.Fatalf("got %d calls, want 6", len(calls))
+	}
+	boot, _ := json.Marshal(calls[1].body)
+	if !strings.Contains(string(boot), `i8042.dumbkbd ip=10.200.0.6::10.200.0.5:255.255.255.252::eth0:off"`) {
+		t.Errorf("boot-source: %s", boot)
+	}
+	b, _ := json.Marshal(calls[4].body)
+	if want := `{"host_dev_name":"` + tapName("abc") + `","iface_id":"eth0"}`; calls[4].path != "/network-interfaces/eth0" || string(b) != want {
+		t.Errorf("call 4: got PUT %s %s, want PUT /network-interfaces/eth0 %s", calls[4].path, b, want)
+	}
+	if calls[5].path != "/actions" {
+		t.Errorf("last call is %s, want /actions", calls[5].path)
 	}
 }

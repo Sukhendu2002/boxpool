@@ -45,14 +45,21 @@ type apiCall struct {
 }
 
 // apiCalls returns the API requests, in order, that configure and boot a
-// sandbox. Spec.DiskGB is not applied: the disk is the image's size until
-// #13 adds limits.
-func apiCalls(spec backend.Spec, kernel string, l layout) []apiCall {
-	return []apiCall{
+// sandbox, with a network interface unless n is nil. Spec.DiskGB is not
+// applied: the disk is the image's size until #13 adds limits.
+func apiCalls(spec backend.Spec, kernel string, l layout, n *nic) []apiCall {
+	args := bootArgs
+	if n != nil {
+		args += " " + n.bootArg()
+	}
+	calls := []apiCall{
 		{"/machine-config", map[string]any{"vcpu_count": spec.CPUs, "mem_size_mib": spec.MemoryMB}},
-		{"/boot-source", map[string]any{"kernel_image_path": kernel, "boot_args": bootArgs}},
+		{"/boot-source", map[string]any{"kernel_image_path": kernel, "boot_args": args}},
 		{"/drives/rootfs", map[string]any{"drive_id": "rootfs", "path_on_host": l.rootfs, "is_root_device": true, "is_read_only": false}},
 		{"/vsock", map[string]any{"guest_cid": guestCID, "uds_path": l.vsock}},
-		{"/actions", map[string]any{"action_type": "InstanceStart"}},
 	}
+	if n != nil {
+		calls = append(calls, apiCall{"/network-interfaces/eth0", map[string]any{"iface_id": "eth0", "host_dev_name": n.tap}})
+	}
+	return append(calls, apiCall{"/actions", map[string]any{"action_type": "InstanceStart"}})
 }
