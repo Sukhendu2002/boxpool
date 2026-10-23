@@ -39,8 +39,12 @@ func TestSocketError(t *testing.T) {
 					t.Errorf("unrelated start hint: %v", err)
 				}
 			}
-			if errors.Is(tt.err, os.ErrPermission) && !strings.Contains(err.Error(), "permission denied") {
-				t.Errorf("permission problem not explained: %v", err)
+			if errors.Is(tt.err, os.ErrPermission) {
+				for _, want := range []string{"permission denied", "daemon status is unknown", "parent directory"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error = %v, want %q", err, want)
+					}
+				}
 			}
 		})
 	}

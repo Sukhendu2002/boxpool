@@ -13,9 +13,10 @@ import (
 )
 
 func TestClientSocketErrors(t *testing.T) {
-	for _, problem := range []string{"missing", "refused", "permission"} {
+	for _, problem := range []string{"missing", "refused", "permission", "permission-missing"} {
 		t.Run(problem, func(t *testing.T) {
-			if problem == "permission" && os.Geteuid() == 0 {
+			permission := strings.HasPrefix(problem, "permission")
+			if permission && os.Geteuid() == 0 {
 				t.Skip("root bypasses directory permissions; client classification is tested separately")
 			}
 			dir, err := os.MkdirTemp("", "bp-cli") // Short Unix socket path for macOS.
@@ -24,7 +25,7 @@ func TestClientSocketErrors(t *testing.T) {
 			}
 			t.Cleanup(func() { os.RemoveAll(dir) })
 			sock := filepath.Join(dir, daemon.SocketName)
-			if problem != "missing" {
+			if problem == "refused" || problem == "permission" {
 				l, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
 				if err != nil {
 					t.Fatal(err)
@@ -35,13 +36,14 @@ func TestClientSocketErrors(t *testing.T) {
 					if err := l.Close(); err != nil {
 						t.Fatal(err)
 					}
-				} else {
-					// A live socket behind an inaccessible directory, as with a root daemon.
-					if err := os.Chmod(dir, 0000); err != nil {
-						t.Fatal(err)
-					}
-					t.Cleanup(func() { os.Chmod(dir, 0700) })
 				}
+			}
+			if permission {
+				// Simulate a root-owned 0750 directory: lookup fails even without a socket.
+				if err := os.Chmod(dir, 0000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(dir, 0700) })
 			}
 			for _, tt := range []struct {
 				args []string
@@ -70,7 +72,7 @@ func TestClientSocketErrors(t *testing.T) {
 							t.Errorf("local version missing: %q", stdout)
 						}
 					}
-					if tt.args[0] == "version" && problem != "permission" {
+					if tt.args[0] == "version" && !permission {
 						if stderr != "" {
 							t.Errorf("offline version should stay quiet: %q", stderr)
 						}
@@ -79,8 +81,8 @@ func TestClientSocketErrors(t *testing.T) {
 					if !strings.Contains(stderr, sock) {
 						t.Errorf("socket missing from error: %q", stderr)
 					}
-					if problem == "permission" {
-						for _, want := range []string{"permission denied", "root or another user", "sudo boxpool <command>"} {
+					if permission {
+						for _, want := range []string{"permission denied", "daemon status is unknown", "parent directory", "sudo boxpool <command>"} {
 							if !strings.Contains(stderr, want) {
 								t.Errorf("stderr = %q, want %q", stderr, want)
 							}
@@ -92,6 +94,16 @@ func TestClientSocketErrors(t *testing.T) {
 						t.Errorf("start hint missing: %q", stderr)
 					}
 				})
+			}
+			if problem == "permission-missing" {
+				// Restore search access to model retrying as root or the daemon's user.
+				if err := os.Chmod(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				code, _, stderr := cli(t, dir, "", "ls")
+				if code != 1 || !strings.Contains(stderr, "sudo boxpool up") || strings.Contains(stderr, "permission denied") {
+					t.Errorf("authorized probe = %d %q, want missing-socket startup hint", code, stderr)
+				}
 			}
 		})
 	}

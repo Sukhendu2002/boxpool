@@ -45,7 +45,7 @@ func New(stateDir string) *Client {
 func socketError(sock string, err error) error {
 	switch {
 	case errors.Is(err, os.ErrPermission):
-		return fmt.Errorf("permission denied connecting to daemon socket %s (the daemon may be running as root or another user; use sudo boxpool <command> for a root daemon, or run as the daemon's user): %w", sock, err)
+		return fmt.Errorf("permission denied accessing daemon socket %s (daemon status is unknown: the socket or a parent directory is inaccessible; use sudo boxpool <command> for a root daemon, or run as the daemon's user): %w", sock, err)
 	case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ECONNREFUSED):
 		return fmt.Errorf("cannot reach the daemon at %s (start it with sudo boxpool up on Linux with systemd, or boxpool daemon in the foreground): %w", sock, err)
 	default:
