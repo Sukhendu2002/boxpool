@@ -70,7 +70,9 @@ reads the `time to prompt:` line, and then removes the sandbox with
 `sudo boxpool rm --force`. Each invocation names its sandboxes
 `gate-<random>-<n>`, stops if a name already exists, removes only the
 sandboxes it created (also on failure), and fails if a session or a removal
-fails. It keeps each run's transcript in a temp dir and prints its path. `--timing` measures
+fails. A run also fails if the first guest output after `time to prompt:` is
+not the prompt followed by the typed `exit`, or if the shell is still
+running 30 s after `exit`. It keeps each run's transcript in a temp dir and prints its path. `--timing` measures
 from the start of `boxpool sh` to the first output of the sandbox's login
 shell. For a new sandbox that includes the create request (rootfs copy and
 resize), the Firecracker boot, the guest agent coming up, and `bash -l`

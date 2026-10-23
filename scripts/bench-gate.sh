@@ -4,21 +4,24 @@
 #
 # Usage: scripts/bench-gate.sh install <binary>  # sudo <binary> up, then the first shell prompt
 #        scripts/bench-gate.sh boot [runs]        # cold boots: a new sandbox per run (default 10)
-#        scripts/bench-gate.sh selftest           # check the duration parser
+#        scripts/bench-gate.sh selftest           # check the duration parser and, with
+#                                                 # util-linux script(1), a stub session
 #
 # boxpool sh has no one-shot command and needs a terminal, so each shell runs
 # under script(1). The script waits for the shell's prompt, then types "exit"
 # and removes the sandbox. --timing measures from sh's start to the shell's
-# first output. Each run's transcript is kept in $LOG_DIR (default: a new
-# temp dir, printed at the start), so you can see what that output was.
+# first output, so a run fails unless that first output is the prompt with
+# the typed exit after it. Each run's transcript is kept in $LOG_DIR (default:
+# a new temp dir, printed at the start).
 #
 # Sandboxes are named gate-<random>-<n>, new for every invocation. The script
 # stops if a name already exists, and removes only the sandboxes it created,
 # also when it fails.
 set -euo pipefail
 
-PROMPT_RE=${PROMPT_RE:-'[#$] $'} # the end of bash's prompt, e.g. "root@host:/# "
+PROMPT_RE=${PROMPT_RE:-'^root@[^:]*:~# $'} # the guest's whole prompt, e.g. "root@10:~# "
 PROMPT_TIMEOUT_S=60
+EXIT_TIMEOUT_S=${EXIT_TIMEOUT_S:-30} # how long the shell gets to end after "exit"
 
 # ms DURATION prints a Go time.Duration string (437ms, 1.2s, 1m2.5s) in whole
 # ms, rounded. Anything else is an error.
@@ -61,13 +64,83 @@ selftest() {
 		fi
 		echo "ok: '$t' rejected"
 	done
+	stubtest
+}
+
+# stubtest runs `boot 1` against stub sudo and boxpool commands, one per
+# kind of shell, and checks the result.
+stubtest() {
+	local dir t mode want rc out
+	if ! script -V 2>/dev/null | grep -q util-linux; then
+		echo "skip: the stub sessions need util-linux script(1)"
+		return 0
+	fi
+	dir=$(mktemp -d "${TMPDIR:-/tmp}/bench-gate-stub.XXXXXX")
+	printf '#!/usr/bin/env bash\nexec "$@"\n' >"$dir/sudo"
+	cat >"$dir/boxpool" <<'STUB'
+#!/usr/bin/env bash
+case $1 in
+ls) echo '[]' ;;
+rm) echo "$3" >>"$STUB_DIR/rm" ;;
+sh)
+	[[ $STUB != banner-before ]] || printf 'Welcome $ \r\n'
+	printf 'time to prompt: 5ms\r\n' >&2
+	[[ $STUB != banner-after ]] || { printf 'Welcome $ \r\n' && sleep 1; }
+	printf '\e[?2004hroot@10:~# '
+	[[ $STUB != hang ]] || { echo $$ >"$STUB_DIR/pid" && exec sleep 600; }
+	read -r _ && printf 'logout\r\n'
+	;;
+esac
+STUB
+	chmod +x "$dir/sudo" "$dir/boxpool"
+	for t in prompt=0 banner-before=0 banner-after=1 hang=1; do
+		mode=${t%=*} want=${t#*=} rc=0
+		rm -f "$dir/rm" "$dir/pid"
+		SECONDS=0
+		out=$(STUB=$mode STUB_DIR=$dir PATH=$dir:$PATH LOG_DIR=$dir/$mode EXIT_TIMEOUT_S=2 \
+			bash "$0" boot 1 2>&1) || rc=$?
+		if ((rc == 0 ? want != 0 : want == 0)) || ((SECONDS > 10)) ||
+			{ ((want == 0)) && [[ $out != *"median: 5 ms"* ]]; } ||
+			! grep -q '^gate-' "$dir/rm" ||
+			compgen -G "$dir/$mode/*.in" >/dev/null ||
+			{ [[ -s $dir/pid ]] && kill -0 "$(cat "$dir/pid")" 2>/dev/null; }; then
+			echo "FAIL: stub $mode: exit $rc in ${SECONDS}s, want $want; output:" >&2
+			echo "$out" >&2
+			return 1
+		fi
+		echo "ok: stub $mode: exit $rc in ${SECONDS}s, sandbox removed"
+	done
+	rm -rf "$dir"
 }
 
 current="" # the sandbox this invocation created and has not removed yet
 pid=""     # the running script(1) session, if any
 
+# clean drops CRs and the terminal escapes bash writes around its prompt
+# (bracketed paste, window title).
+clean() { sed $'s/\e\\][^\a]*\a//g; s/\e\\[[0-9;?]*[A-Za-z]//g' | tr -d '\r'; }
+
+# wait_pid SECONDS waits for $pid to end and fails if it has not by then.
+wait_pid() {
+	local i
+	for ((i = 0; i < $1 * 10; i++)); do
+		kill -0 "$pid" 2>/dev/null || return 0
+		sleep 0.1
+	done
+	return 1
+}
+
+# stop_session ends and reaps the script(1) session; script passes SIGTERM
+# on to its child.
+stop_session() {
+	kill "$pid" 2>/dev/null || true
+	wait_pid 5 || kill -KILL "$pid" 2>/dev/null || true
+	wait "$pid" 2>/dev/null || true
+	pid=""
+}
+
 cleanup() {
-	[[ -z $pid ]] || kill "$pid" 2>/dev/null || true
+	[[ -z $pid ]] || stop_session
 	[[ -z $current ]] || sudo boxpool rm --force "$current" >/dev/null ||
 		echo "warning: could not remove sandbox $current" >&2
 }
@@ -76,7 +149,7 @@ cleanup() {
 # that must not exist yet, types exit at its prompt, removes the sandbox, and
 # sets ms_to_prompt.
 session() {
-	local name=$1 log=$LOG_DIR/$1.log fifo=$LOG_DIR/$1.in list rc=0 i v
+	local name=$1 log=$LOG_DIR/$1.log fifo=$LOG_DIR/$1.in list rc=0 i v first
 	list=$(sudo boxpool ls --json) || {
 		echo "boxpool ls failed" >&2
 		return 1
@@ -92,17 +165,22 @@ session() {
 	exec 3>"$fifo"
 	rm "$fifo"
 	for ((i = 0; i < PROMPT_TIMEOUT_S * 10; i++)); do
-		tail -n 1 "$log" 2>/dev/null | grep -qE "$PROMPT_RE" && break
+		tail -n 1 "$log" 2>/dev/null | clean | grep -qE "$PROMPT_RE" && break
 		kill -0 "$pid" 2>/dev/null || break
 		sleep 0.1
 	done
-	if ! tail -n 1 "$log" 2>/dev/null | grep -qE "$PROMPT_RE"; then
+	if ! tail -n 1 "$log" 2>/dev/null | clean | grep -qE "$PROMPT_RE"; then
 		exec 3>&-
 		echo "$name: no prompt matching '$PROMPT_RE' (sh ended, or ${PROMPT_TIMEOUT_S}s passed); transcript: $log" >&2
 		return 1
 	fi
 	printf 'exit\n' >&3
 	exec 3>&-
+	if ! wait_pid "$EXIT_TIMEOUT_S"; then
+		stop_session
+		echo "$name: shell still running ${EXIT_TIMEOUT_S}s after exit; stopped it; transcript: $log" >&2
+		return 1
+	fi
 	wait "$pid" || rc=$?
 	pid=""
 	if ((rc != 0)); then
@@ -114,6 +192,11 @@ session() {
 		return 1
 	}
 	current=""
+	first=$(clean <"$log" | sed -n '/time to prompt: /{n;p;q;}')
+	if [[ $first != *exit || ! ${first%exit} =~ $PROMPT_RE ]]; then
+		echo "$name: first output after the timing is '$first', not the prompt and exit; transcript: $log" >&2
+		return 1
+	fi
 	v=$(grep -ao 'time to prompt: [^[:space:]]*' "$log" | head -n 1 | cut -d' ' -f4)
 	[[ -n $v ]] || {
 		echo "$name: no timing in $log" >&2
