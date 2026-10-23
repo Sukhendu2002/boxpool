@@ -173,7 +173,8 @@ backend drivers; the vsock smoke needs neither a TAP device nor SSH.
 
 Docker runs tini directly, using Docker's mounts and the agent's
 `unix:/run/boxpool/agent.sock` transport. It needs no privileged mode or
-extra capabilities. The future Docker driver can mount `/run/boxpool`.
+extra capabilities. The Docker driver (`internal/backend/docker`) bind-mounts
+`/run/boxpool` and runs the agent with all capabilities dropped.
 The full command can be replaced without invoking VM initialization:
 
 ```sh

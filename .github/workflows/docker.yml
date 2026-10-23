@@ -1,0 +1,64 @@
+name: Docker fallback
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      # Forced even though this runner has KVM: this job tests the fallback.
+      BOXPOOL_BACKEND: docker
+      BOXPOOL_TEST_REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Require a reachable Docker Engine as the runner user
+        run: |
+          id
+          ls -l /var/run/docker.sock
+          timeout 30 docker version
+      - name: Record boxpool-labelled resources before
+        run: |
+          {
+            timeout 30 docker ps -a --filter label=run.boxpool.owner --format 'container {{.Names}}'
+            timeout 30 docker network ls --filter label=run.boxpool.owner --format 'network {{.Name}}'
+            timeout 30 docker volume ls --filter label=run.boxpool.owner --format 'volume {{.Name}}'
+          } | tee "$RUNNER_TEMP/before.txt"
+          test ! -s "$RUNNER_TEMP/before.txt"
+        shell: bash
+      - name: Build Boxpool
+        run: go build -o bin/boxpool ./cmd/boxpool
+      - name: Require the forced Docker backend and its warning
+        shell: bash
+        run: |
+          ./bin/boxpool doctor | tee "$RUNNER_TEMP/doctor.log"
+          grep -Eq '✓ docker engine \(fallback\)' "$RUNNER_TEMP/doctor.log"
+          grep -Fxq 'Backend: docker' "$RUNNER_TEMP/doctor.log"
+          grep -Eq '^Warning: fallback mode: .*weaker' "$RUNNER_TEMP/doctor.log"
+      - name: Run the Docker driver integration test
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -tags integration -count=1 -v -timeout 12m -run '^TestIntegration$' ./internal/backend/docker/ | tee "$RUNNER_TEMP/integration.log"
+          grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/integration.log"
+          ! grep -q -- '--- SKIP' "$RUNNER_TEMP/integration.log"
+      - name: Require no boxpool-labelled resources left
+        if: always()
+        shell: bash
+        run: |
+          {
+            timeout 30 docker ps -a --filter label=run.boxpool.owner --format 'container {{.Names}}'
+            timeout 30 docker network ls --filter label=run.boxpool.owner --format 'network {{.Name}}'
+            timeout 30 docker volume ls --filter label=run.boxpool.owner --format 'volume {{.Name}}'
+          } | tee "$RUNNER_TEMP/after.txt"
+          test ! -s "$RUNNER_TEMP/after.txt"

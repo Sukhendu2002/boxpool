@@ -10,9 +10,13 @@ as a last resort. Windows hosts and automated provisioning are out of scope.
 
 Only `doctor` and `version` work today. `Backend: firecracker` means doctor
 could open `/dev/kvm` for reading and writing; it does not boot a microVM or
-check for a Firecracker executable. Docker is the planned fallback with
-weaker isolation. Doctor only checks that `docker` is on `PATH`, so test the
-daemon separately below.
+check for a Firecracker executable. Without KVM, doctor picks `Backend:
+docker`, the fallback, when the Docker Engine API answers on
+`/var/run/docker.sock` (or a `unix://` `DOCKER_HOST`), and prints a
+`Warning:` line: containers share the host's kernel, so isolation is weaker.
+Set `BOXPOOL_BACKEND=docker` or `firecracker` to force a backend; doctor
+fails if the forced one is not usable. The daemon logs the same warning at
+start and serves it in `/v1/info`.
 
 ## Option A: a spare Linux machine over SSH
 
@@ -143,7 +147,7 @@ boxpool doctor: linux/amd64
 
   ✓ /dev/kvm                       present and accessible
   ✓ CPU virtualization (vmx/svm)   supported
-  ✓ docker (fallback)              found
+  ✓ docker engine (fallback)       Docker 28.0.4, API 1.47, on /var/run/docker.sock
 
 Backend: firecracker
 ```
@@ -181,7 +185,7 @@ chmod +x ~/boxpool
 
 Replace the Mac path above. The result must include `✓ /dev/kvm` and
 `Backend: firecracker`. A successful exit code alone is insufficient: doctor
-also exits successfully when it selects `docker (weaker isolation)`.
+also exits successfully when it selects `Backend: docker`.
 
 ## Linux testing for each PR
 
@@ -263,6 +267,38 @@ They cover foreign devices, owned orphans, creation failures/crashes,
 canceled Stop/Remove, genuine cleanup failures and cleanup deadlines. Each
 root regression creates its own namespace and refuses the host namespace.
 
+### Docker fallback
+
+The Docker driver's integration test runs real containers of the published
+base image and needs a rootful Docker Engine your user can reach (root, or
+the root-equivalent `docker` group). It does not need KVM, and ignores it:
+
+```sh
+go test -tags integration -v -run TestIntegration ./internal/backend/docker/
+```
+
+It creates two sandboxes in a fresh temporary state directory and checks the
+hardening as the engine reports it and from inside, the agent socket's
+permissions, that the two cannot connect to each other (with listener
+controls that can be reached), persistence across Stop and Start, discovery
+by a new driver, and that failed and duplicate creates leave nothing. It
+touches only resources labelled with that state directory and fails if any
+are left. Without a reachable engine it skips; set
+`BOXPOOL_TEST_REQUIRE_DOCKER=1` to make that a failure, as the
+[Docker fallback workflow](../.github/workflows/docker.yml) does on every PR.
+To inspect a sandbox by hand:
+
+```sh
+docker inspect <container> --format '{{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.HostConfig.ReadonlyRootfs}}'
+# [ALL] [no-new-privileges:true] true
+```
+
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) is a different
+product: it runs microVMs and [needs KVM on Linux](https://docs.docker.com/ai/sandboxes/install/),
+so it is no fallback for hosts without it. This backend uses ordinary
+Docker Engine containers; `internal/backend/docker` documents its hardening
+and limits.
+
 To run it on every `git push`, enable the repo's hooks once:
 
 ```sh
@@ -289,8 +325,10 @@ that machine. Only you, over SSH, can.
 - `CPU virtualization (vmx/svm)` — `not reported by the CPU`: on amd64, check
   firmware settings or whether the outer hypervisor exposes virtualization
   extensions. This check is absent on arm64.
-- `docker (fallback)` — `not found`: install Docker on Linux and ensure the
-  CLI is on `PATH`. If doctor says `found` but hello-world fails, start the
-  daemon (`sudo systemctl start docker`) and recheck Docker group membership.
-- `Backend: none`: neither accessible KVM nor a Docker CLI was found. Fix KVM
-  for Firecracker development; a Docker fallback does not meet that goal.
+- `docker engine (fallback)` — `no Docker Engine is listening`: install
+  Docker and start it (`sudo systemctl start docker`). `permission denied`:
+  recheck Docker group membership and log in again. Doctor reads only
+  `DOCKER_HOST` (`unix://` URLs), not Docker contexts.
+- `Backend: none`: neither accessible KVM nor a reachable Docker Engine, or
+  `BOXPOOL_BACKEND` names one that is not usable. Fix KVM for Firecracker
+  development; a Docker fallback does not meet that goal.

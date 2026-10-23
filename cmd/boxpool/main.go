@@ -71,6 +71,9 @@ func doctor() int {
 		fmt.Printf("  %s %-30s %s\n", mark, c.Name, c.Detail)
 	}
 	fmt.Printf("\nBackend: %s\n", r.Backend)
+	if r.Warning != "" {
+		fmt.Printf("Warning: %s\n", r.Warning)
+	}
 	if !r.Ready() {
 		return 1
 	}
@@ -87,7 +90,7 @@ func runDaemon() int {
 	r := preflight.Run()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	info := daemon.Info{Version: version, OS: r.OS, Arch: r.Arch, StateDir: dir, Backend: r.Backend}
+	info := daemon.Info{Version: version, OS: r.OS, Arch: r.Arch, StateDir: dir, Backend: r.Backend, Warning: r.Warning}
 	if err := daemon.Run(ctx, dir, info); err != nil {
 		slog.Error("daemon failed", "err", err)
 		return 1
