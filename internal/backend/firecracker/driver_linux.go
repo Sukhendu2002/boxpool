@@ -159,10 +159,13 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 		return err
 	}
 	var n *nic
+	vmGone := true
 	if d.store != nil {
 		defer func() {
-			if err != nil {
-				d.stopNetwork(context.WithoutCancel(ctx), id)
+			if err != nil && vmGone {
+				cleanup, cancel := cleanupContext(ctx)
+				defer cancel()
+				err = errors.Join(err, d.stopNetwork(cleanup, id))
 			}
 		}()
 		if n, err = d.startNetwork(ctx, id); err != nil {
@@ -184,6 +187,7 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 	if err != nil {
 		return err
 	}
+	vmGone = false
 	exited := make(chan struct{})
 	go func() { cmd.Wait(); close(exited) }() // reap it; running reads /proc, not cmd
 	rotated := make(chan struct{})
@@ -197,9 +201,18 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 		err = d.boot(ctx, l, spec, n)
 	}
 	if err != nil {
-		cmd.Process.Kill()
-		if kill(context.WithoutCancel(ctx), l) == nil {
+		cleanup, cancel := cleanupContext(ctx)
+		defer cancel()
+		killErr := cmd.Process.Kill()
+		// Wait on the process we started, including when writing its pid
+		// file failed. Never remove its network while it may still run.
+		select {
+		case <-exited:
+			vmGone = true
 			d.waitConsole(id)
+			err = errors.Join(err, removeRuntimeFiles(l))
+		case <-cleanup.Done():
+			err = errors.Join(err, fmt.Errorf("wait for failed start cleanup: %w", cleanup.Err()), killErr)
 		}
 		return fmt.Errorf("start sandbox %s: %w (see %s and %s)", id, err, l.log, l.console)
 	}
@@ -309,20 +322,25 @@ func (d *Driver) Stop(ctx context.Context, id string) error {
 			slog.Warn("sandbox did not shut down cleanly; terminating it", "sandbox", id, "err", err)
 			syscall.Kill(pid, syscall.SIGTERM)
 			if waitExit(ctx, l, stopTimeout) != nil {
-				if err := kill(context.WithoutCancel(ctx), l); err != nil {
+				cleanup, cancel := cleanupContext(ctx)
+				err := kill(cleanup, l)
+				cancel()
+				if err != nil {
 					return err
 				}
 			}
 		}
 	}
+	// The VM is confirmed gone. Caller cancellation must not strand its
+	// network; cleanup still has a deadline of its own.
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
 	d.waitConsole(id)
-	if err := removeRuntimeFiles(l); err != nil {
-		return err
-	}
-	if err := d.stopNetwork(ctx, id); err != nil {
-		return err
-	}
-	return unclean
+	return errors.Join(unclean, removeRuntimeFiles(l), d.stopNetwork(cleanup, id))
+}
+
+func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
 }
 
 // shutdownGuest flushes and freezes the guest's root filesystem, which
@@ -372,16 +390,19 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 	if err := kill(ctx, l); err != nil {
 		return err
 	}
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
 	d.waitConsole(id)
-	if err := d.stopNetwork(ctx, id); err != nil {
+	if err := d.stopNetwork(cleanup, id); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(l.dir); err != nil {
 		return err
 	}
 	if d.store != nil {
-		if err := d.store.FreeNetSlot(ctx, id); err != nil {
-			return err
-		}
+		return d.store.FreeNetSlot(cleanup, id)
 	}
-	return os.RemoveAll(l.dir)
+	return nil
 }
 
 func (d *Driver) Pause(ctx context.Context, id string) error {

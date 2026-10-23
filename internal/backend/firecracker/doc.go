@@ -29,7 +29,9 @@
 // 10.200.0.0/16: the host's end of its tap device bp-<hash of the ID> is
 // the gateway, the guest the next address, set with the kernel's ip= boot
 // argument. Start creates the tap and Stop and Remove delete it; Remove
-// frees the slot. Its /etc/resolv.conf is rewritten on every boot with the
+// frees the slot. Once the VM is gone, cleanup uses its own bounded
+// context so caller cancellation does not strand the network. The guest
+// /etc/resolv.conf is rewritten on every boot with the
 // host's upstream nameservers that the host routes out of its outbound
 // interface (from /run/systemd/resolve/resolv.conf when systemd-resolved
 // runs, since its 127.0.0.53 stub is the host's), or else 1.1.1.1 and
@@ -52,7 +54,15 @@
 // keeps the old one if the host's default route moves; other firewalls that
 // drop forwarded traffic (firewalld, a final DROP rule under an ACCEPT
 // policy) are not handled; two daemons on one host would race over the
-// table. New deletes every bp-* tap, since it has killed every VM.
+// table. New removes orphaned TAPs only when their exact generated names,
+// TAP type and ownership aliases match persisted allocations. An unrelated
+// bp-* device is preserved, including at a sandbox's generated name (Start
+// rejects that collision). Unmarked TAPs from an older binary or a lost
+// allocation database need operator inspection; a prefix alone is not proof
+// of ownership. The prefix remains reserved for the firewall's matching.
+// TAPs become persistent only after their alias is installed, so a crash
+// during creation cannot leave an unmarked persistent device. Keep the
+// allocation database with the state directory for crash recovery.
 //
 // The driver is built only on Linux; elsewhere this package is empty.
 package firecracker

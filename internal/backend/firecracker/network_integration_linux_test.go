@@ -39,7 +39,7 @@ func TestIntegrationNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := store.Open(filepath.Join(home, "network-state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestIntegrationNetwork(t *testing.T) {
 		c := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, id) })
 		defer c.CloseIdleConnections()
 		var out bytes.Buffer
-		s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"bash", "-c", script}}, &out, &out)
+		s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"bash", "-o", "pipefail", "-c", script}}, &out, &out)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -141,13 +141,30 @@ func TestIntegrationNetwork(t *testing.T) {
 	lo := listen(t, "127.0.0.1:0")
 	all := listen(t, "0.0.0.0:0")
 	hostIP := outboundIP(t)
+	// Prove both host listeners reachable locally before attributing the
+	// guest's connection failures to isolation.
+	for _, addr := range []hostPort{{"127.0.0.1", lo}, {hostIP, all}} {
+		c, err := net.DialTimeout("tcp", net.JoinHostPort(addr.ip, fmt.Sprint(addr.port)), time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.Close()
+	}
 	blocked(a, "a host service on 127.0.0.1, through A's gateway", hostPort{nics[a].gateway.String(), lo})
 	blocked(a, "a host service on 0.0.0.0, through A's gateway", hostPort{nics[a].gateway.String(), all})
 	blocked(a, "a host service on 0.0.0.0, through B's gateway", hostPort{nics[b].gateway.String(), all})
 	blocked(a, "a host service on 0.0.0.0, at the host's LAN IP", hostPort{hostIP, all})
 	if os.Getenv("BOXPOOL_TEST_APT") == "1" {
 		must(a, "apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends curl iputils-ping >/dev/null")
-		t.Logf("A curl -sI https://example.com: %s", must(a, "curl -sSI https://example.com | head -n1"))
+		probe := func(p networkProbe) string {
+			t.Helper()
+			out, code := sh(a, p.command)
+			if err := p.validate(out, code); err != nil {
+				t.Fatal(err)
+			}
+			return out
+		}
+		t.Logf("A HTTPS: %s", probe(httpsProbe))
 		for _, target := range []string{nics[b].guest.String(), nics[b].gateway.String(), nics[a].gateway.String(), hostIP} {
 			if out, code := sh(a, "ping -c1 -W2 "+target); code == 0 {
 				t.Errorf("A pinged %s: %s", target, out)
@@ -155,7 +172,7 @@ func TestIntegrationNetwork(t *testing.T) {
 				t.Logf("A ping %s: fails (exit %d)", target, code)
 			}
 		}
-		t.Logf("A ping 1.1.1.1: %s", must(a, "ping -c1 -W2 1.1.1.1 | tail -n2 | head -n1"))
+		t.Logf("A external ping: %s", probe(pingProbe))
 	}
 }
 

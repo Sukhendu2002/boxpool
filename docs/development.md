@@ -241,9 +241,27 @@ sudo env BOXPOOL_TEST_HOME="$HOME/.cache/boxpool-test" /tmp/fc-it.test -test.v -
 ```
 
 Add `BOXPOOL_TEST_APT=1` to also install `curl` and `ping` in a sandbox from
-the image's Debian mirror and check HTTPS and ICMP. When it ends, `ip -br link`
-shows no `bp-*` device, `sudo nft list table inet boxpool` fails and
-`sudo iptables -S | grep boxpool` prints nothing.
+the image's Debian mirror and check HTTPS (HTTP 200 or 301) and an actual
+external ICMP reply. The test checks command exit codes and full responses.
+Keep `BOXPOOL_TEST_HOME` fixed between crash-recovery runs: its
+`network-state.db` contains the allocations needed to verify TAP ownership.
+For independent runs, use separate homes and symlink their `artifacts`
+directory to the existing artifact cache. Do not run network tests concurrently:
+the firewall table is shared. When a run ends, its owned TAPs are gone,
+`sudo nft list table inet boxpool` fails and
+`sudo iptables -S | grep boxpool` prints nothing. Unrelated `bp-*` interfaces
+are preserved; that prefix remains reserved for firewall matching.
+
+Root cleanup and collision regressions run only in disposable network
+namespaces (no KVM or external access needed):
+
+```sh
+sudo /tmp/fc-it.test -test.v -test.run '^TestNetwork' -test.timeout=2m
+```
+
+They cover foreign devices, owned orphans, creation failures/crashes,
+canceled Stop/Remove, genuine cleanup failures and cleanup deadlines. Each
+root regression creates its own namespace and refuses the host namespace.
 
 To run it on every `git push`, enable the repo's hooks once:
 

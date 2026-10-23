@@ -5,17 +5,18 @@ package firecracker
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/netip"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 // checkNetwork reports what sandbox networking lacks on this host.
@@ -42,6 +43,10 @@ func (d *Driver) startNetwork(ctx context.Context, id string) (*nic, error) {
 	n := sandboxNIC(id, slot)
 	d.netMu.Lock()
 	defer d.netMu.Unlock()
+	// Refuse foreign collisions before changing the firewall or deleting anything.
+	if err := d.deleteTap(ctx, id, slot); err != nil {
+		return nil, err
+	}
 	uplink, err := routeDev(ctx, "1.1.1.1")
 	if err != nil {
 		return nil, fmt.Errorf("find the host's outbound interface: %w", err)
@@ -56,10 +61,10 @@ func (d *Driver) startNetwork(ctx context.Context, id string) (*nic, error) {
 		return nil, err
 	}
 	n.dns = resolvers(ctx, uplink)
-	deleteTap(ctx, n.tap) // left by a crash between creating and recording it
-	uid := strconv.Itoa(os.Geteuid())
+	if err := d.createTap(ctx, id, slot); err != nil {
+		return nil, err
+	}
 	for _, args := range [][]string{
-		{"tuntap", "add", "dev", n.tap, "mode", "tap", "user", uid},
 		{"addr", "add", n.gateway.String() + "/30", "dev", n.tap},
 		{"link", "set", n.tap, "up"},
 	} {
@@ -78,64 +83,143 @@ func (d *Driver) stopNetwork(ctx context.Context, id string) error {
 	}
 	d.netMu.Lock()
 	defer d.netMu.Unlock()
-	if err := deleteTap(ctx, tapName(id)); err != nil {
-		return err
-	}
-	return removeRulesIfUnused(ctx)
-}
-
-// sweepNetwork deletes every boxpool tap device, and then the firewall
-// rules, after killOrphans has killed every sandbox's VM. It frees the slots
-// of sandboxes that are gone.
-// shortcut: deletes taps of VMs it could re-adopt; #27 must keep those.
-func (d *Driver) sweepNetwork(ctx context.Context) error {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return err
-	}
-	for _, i := range ifaces {
-		if strings.HasPrefix(i.Name, tapPrefix) {
-			slog.Warn("deleting orphaned tap device", "tap", i.Name)
-			if err := deleteTap(ctx, i.Name); err != nil {
-				return err
-			}
-		}
-	}
-	if err := removeRulesIfUnused(ctx); err != nil {
-		return err
-	}
 	slots, err := d.store.NetSlots(ctx)
 	if err != nil {
 		return err
 	}
-	for id := range slots {
+	var deleteErr error
+	if slot, ok := slots[id]; ok {
+		deleteErr = d.deleteTap(ctx, id, slot)
+	}
+	return errors.Join(deleteErr, d.removeRulesIfUnused(ctx))
+}
+
+// sweepNetwork removes verified owned taps after killOrphans has killed
+// every sandbox VM, then frees allocations whose sandbox directory is gone.
+// shortcut: deletes taps of VMs it could re-adopt; #27 must keep those.
+func (d *Driver) sweepNetwork(ctx context.Context) error {
+	slots, err := d.store.NetSlots(ctx)
+	if err != nil {
+		return err
+	}
+	for id, slot := range slots {
+		// Foreign devices, even at an allocated name, are never ours to delete.
+		link, err := lookupLink(ctx, tapName(id))
+		if err != nil {
+			return err
+		}
+		if link != nil && d.ownsTap(*link, id, slot) {
+			slog.Warn("deleting orphaned tap device", "tap", link.Name)
+			if err := d.deleteTap(ctx, id, slot); err != nil {
+				return err
+			}
+		}
 		if _, err := os.Stat(sandboxLayout(d.root, id).dir); errors.Is(err, fs.ErrNotExist) {
 			if err := d.store.FreeNetSlot(ctx, id); err != nil {
 				return err
 			}
+		} else if err != nil {
+			return err
 		}
 	}
-	return nil
+	return d.removeRulesIfUnused(ctx)
 }
 
-func deleteTap(ctx context.Context, tap string) error {
-	if _, err := net.InterfaceByName(tap); err != nil {
-		return nil // already gone
+// tapAlias binds the kernel device to the durable allocation and state root.
+// The full hash also distinguishes sandbox IDs with colliding short tap names.
+func (d *Driver) tapAlias(id string, slot int) string {
+	return fmt.Sprintf("boxpool:%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", d.root, id, slot))))
+}
+
+type networkLink struct {
+	Name  string `json:"ifname"`
+	Alias string `json:"ifalias"`
+	Info  struct {
+		Kind string `json:"info_kind"`
+		Data struct {
+			Type string `json:"type"`
+		} `json:"info_data"`
+	} `json:"linkinfo"`
+}
+
+func lookupLink(ctx context.Context, name string) (*networkLink, error) {
+	// Listing avoids treating command failures as an absent device. It also
+	// works in network namespaces where the host's sysfs mount sees other links.
+	out, err := run(ctx, "", "ip", "-d", "-j", "link", "show")
+	if err != nil {
+		return nil, err
 	}
-	_, err := run(ctx, "", "ip", "link", "del", "dev", tap)
-	return err
+	var links []networkLink
+	if err := json.Unmarshal([]byte(out), &links); err != nil {
+		return nil, err
+	}
+	for _, link := range links {
+		if link.Name == name {
+			return &link, nil
+		}
+	}
+	return nil, nil
 }
 
-// removeRulesIfUnused removes boxpool's firewall rules unless a tap device
-// still needs them. The iptables accepts go first, so a tap is never
-// forwarded without the isolation rules.
-func removeRulesIfUnused(ctx context.Context) error {
-	ifaces, err := net.Interfaces()
+func (d *Driver) ownsTap(link networkLink, id string, slot int) bool {
+	return link.Name == tapName(id) && link.Alias == d.tapAlias(id, slot) &&
+		link.Info.Kind == "tun" && link.Info.Data.Type == "tap"
+}
+
+// createTap keeps the TAP nonpersistent until its ownership alias is set.
+// A failure or crash before that point closes the fd and removes the device;
+// after persistence, the stored allocation and alias make it recoverable.
+func (d *Driver) createTap(ctx context.Context, id string, slot int) error {
+	f, err := os.OpenFile("/dev/net/tun", os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
-	for _, i := range ifaces {
-		if strings.HasPrefix(i.Name, tapPrefix) {
+	defer f.Close()
+	req, err := unix.NewIfreq(tapName(id))
+	if err != nil {
+		return err
+	}
+	req.SetUint16(unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_TUN_EXCL)
+	if err := unix.IoctlIfreq(int(f.Fd()), unix.TUNSETIFF, req); err != nil {
+		return fmt.Errorf("create tap %s: %w", tapName(id), err)
+	}
+	if err := unix.IoctlSetInt(int(f.Fd()), unix.TUNSETOWNER, os.Geteuid()); err != nil {
+		return err
+	}
+	if _, err := run(ctx, "", "ip", "link", "set", "dev", tapName(id), "alias", d.tapAlias(id, slot)); err != nil {
+		return err
+	}
+	return unix.IoctlSetInt(int(f.Fd()), unix.TUNSETPERSIST, 1)
+}
+
+// deleteTap requires the caller to have read the persisted allocation. A
+// foreign device at the exact generated name is an error, never a deletion.
+func (d *Driver) deleteTap(ctx context.Context, id string, slot int) error {
+	link, err := lookupLink(ctx, tapName(id))
+	if err != nil || link == nil {
+		return err
+	}
+	if !d.ownsTap(*link, id, slot) {
+		return fmt.Errorf("refusing foreign interface at sandbox tap name %s", link.Name)
+	}
+	_, err = run(ctx, "", "ip", "link", "del", "dev", link.Name)
+	return err
+}
+
+// removeRulesIfUnused counts only verified allocated TAPs. Unrelated bp-*
+// devices must not keep boxpool rules alive. Accepts go first, so an owned
+// TAP is never forwarded without the isolation drops.
+func (d *Driver) removeRulesIfUnused(ctx context.Context) error {
+	slots, err := d.store.NetSlots(ctx)
+	if err != nil {
+		return err
+	}
+	for id, slot := range slots {
+		link, err := lookupLink(ctx, tapName(id))
+		if err != nil {
+			return err
+		}
+		if link != nil && d.ownsTap(*link, id, slot) {
 			return nil
 		}
 	}
