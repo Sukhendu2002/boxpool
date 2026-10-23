@@ -9,7 +9,7 @@ import (
 // bootArgs are the image smoke test's. reboot=k and panic=1 turn a guest
 // reboot or panic into the firecracker process exiting; the i8042 options
 // skip a keyboard probe that costs about 0.5 s (docs/benchmarks/m1-boot.md).
-const bootArgs = "console=ttyS0 reboot=k panic=1 root=/dev/vda rw init=/sbin/does-not-exist i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
+const bootArgs = "console=ttyS0 reboot=k panic=1 root=/dev/vda rw init=/sbin/init i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
 
 const (
 	// guestCID is the guest's vsock context ID. Every VM has its own vsock
