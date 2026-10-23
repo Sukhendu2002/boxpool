@@ -248,27 +248,44 @@ func (d *Driver) adopt(ctx context.Context) error {
 		return err
 	}
 	for _, sb := range list {
-		c, err := d.inspect(ctx, sb.ID)
-		if err != nil {
-			return err
-		}
-		h := c.HostConfig
-		if h.NanoCPUs < 1 || h.Memory < 1 {
-			return fmt.Errorf("sandbox %s has no CPU or memory limit; remove it before creating more sandboxes", sb.ID)
-		}
-		cpus, err := resources.ParseCPUSet(h.CpusetCpus)
-		if err != nil {
-			return err
-		}
-		spec := backend.Spec{Name: sb.Name, CPUs: int((h.NanoCPUs-1)/1_000_000_000 + 1), MemoryMB: int((h.Memory-1)/(1<<20) + 1), DiskGB: backend.DefaultDiskGB}
-		if spec, err = spec.WithDefaults(); err != nil {
-			return fmt.Errorf("sandbox %s has invalid limits: %w", sb.ID, err)
-		}
-		if err := d.admission.Adopt(ctx, "docker", sb.ID, resources.Allocation{Spec: spec, CPUs: cpus}); err != nil {
+		if err := d.adoptSandbox(ctx, sb.ID); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (d *Driver) adoptSandbox(ctx context.Context, id string) error {
+	if err := checkID(id); err != nil {
+		return err
+	}
+	// Keep Remove from deleting the reservation between inspection and
+	// adoption; otherwise the stale inspection could recreate its directory.
+	unlock, err := d.admission.LockSandbox(ctx, "docker", id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	c, err := d.inspect(ctx, id)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil // removed since List
+	}
+	if err != nil {
+		return err
+	}
+	h := c.HostConfig
+	if h.NanoCPUs < 1 || h.Memory < 1 {
+		return fmt.Errorf("sandbox %s has no CPU or memory limit; remove it before creating more sandboxes", id)
+	}
+	cpus, err := resources.ParseCPUSet(h.CpusetCpus)
+	if err != nil {
+		return err
+	}
+	spec := backend.Spec{Name: c.Config.Labels[labelName], CPUs: int((h.NanoCPUs-1)/1_000_000_000 + 1), MemoryMB: int((h.Memory-1)/(1<<20) + 1), DiskGB: backend.DefaultDiskGB}
+	if spec, err = spec.WithDefaults(); err != nil {
+		return fmt.Errorf("sandbox %s has invalid limits: %w", id, err)
+	}
+	return d.admission.Adopt(ctx, "docker", id, resources.Allocation{Spec: spec, CPUs: cpus})
 }
 
 // errForeign is returned for a resource with a sandbox's name that this

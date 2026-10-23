@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,5 +169,100 @@ func TestCreateRemoveKeepsReservationUntilCreateFinishes(t *testing.T) {
 	}
 	if err := d.Remove(ctx, "pending"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAdoptConcurrentRemove(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, phase := range []string{"inspection", "list"} {
+			name := phase + "/current"
+			if legacy {
+				name = phase + "/legacy"
+			}
+			t.Run(name, func(t *testing.T) {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				f := newFakeEngine(t)
+				d := f.driver(ctx, f.serve())
+				if _, err := d.Create(ctx, "old", spec); err != nil {
+					t.Fatal(err)
+				}
+				if legacy {
+					if err := os.Remove(filepath.Join(d.root, "old", "resources.json")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				other, err := newDriver(d.e, d.root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				paused, release := make(chan struct{}), make(chan struct{})
+				var held atomic.Bool
+				path := "/containers/" + d.name("old") + "/json"
+				if phase == "list" {
+					path = "/containers/json"
+				}
+				f.hook = func(method, requestPath string) {
+					if method == "GET" && requestPath == path && held.CompareAndSwap(false, true) {
+						close(paused)
+						<-release
+					}
+				}
+				finished := make(chan struct{})
+				var adoptErr error
+				go func() { adoptErr = other.adopt(ctx); close(finished) }()
+				var resume sync.Once
+				defer func() {
+					resume.Do(func() { close(release) })
+					select {
+					case <-finished:
+					case <-time.After(5 * time.Second):
+						t.Error("adoption did not finish after release")
+					}
+				}()
+				select {
+				case <-paused:
+				case <-ctx.Done():
+					t.Fatal("adoption never reached pause")
+				}
+				removeCtx := ctx
+				if phase == "inspection" {
+					var stop context.CancelFunc
+					removeCtx, stop = context.WithTimeout(ctx, 100*time.Millisecond)
+					defer stop()
+				}
+				removeErr := d.Remove(removeCtx, "old")
+				if phase == "inspection" && !errors.Is(removeErr, context.DeadlineExceeded) {
+					t.Errorf("Remove bypassed adoption's lifecycle lock: %v", removeErr)
+				}
+				if phase == "list" && removeErr != nil {
+					t.Fatalf("Remove while List was paused: %v", removeErr)
+				}
+				resume.Do(func() { close(release) })
+				select {
+				case <-finished:
+				case <-ctx.Done():
+					t.Fatal("adoption did not finish")
+				}
+				if adoptErr != nil {
+					t.Errorf("adoption after concurrent removal: %v", adoptErr)
+				}
+				if errors.Is(removeErr, context.DeadlineExceeded) {
+					// The lock held Remove out; retry after adoption finishes.
+					if err := d.Remove(ctx, "old"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := os.Stat(filepath.Join(d.root, "old")); !os.IsNotExist(err) {
+					t.Errorf("adoption resurrected removed reservation: %v", err)
+				}
+				d.admission.Probe = func(string) (resources.Capacity, error) {
+					return resources.Capacity{CPUs: []int{0, 1}, MemoryMB: 8192, AvailableMB: 8192}, nil
+				}
+				if _, err := d.Create(ctx, "next", spec); err != nil {
+					t.Errorf("removed sandbox still consumes capacity: %v", err)
+				}
+			})
+		}
 	}
 }
