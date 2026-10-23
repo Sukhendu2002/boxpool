@@ -69,6 +69,8 @@ func owned(ctx context.Context, t *testing.T, d *Driver) []string {
 	for _, v := range vs.Volumes {
 		list = append(list, "volume "+v.Name)
 	}
+	// Engine list endpoints do not promise a stable resource order.
+	slices.Sort(list)
 	return list
 }
 
