@@ -21,7 +21,8 @@ import (
 // DirName is the artifact cache's directory name inside the state directory.
 const DirName = "artifacts"
 
-// Bumping either version means updating the matching checksums below.
+// Bumping either version means updating the matching checksums and sizes
+// below.
 const (
 	imageVersion = "v0.0.1-alpha.1"
 	imageURL     = "https://github.com/Sukhendu2002/boxpool/releases/download/" + imageVersion + "/"
@@ -34,6 +35,7 @@ type artifact struct {
 	name   string // file name in the cache directory
 	url    string
 	sha256 string
+	size   int64 // exact byte count; caps the download
 }
 
 // platform is the artifact set for one GOOS/GOARCH. firecracker is empty on
@@ -42,29 +44,29 @@ type platform struct {
 	firecracker, kernel, rootfs artifact
 }
 
-func image(name, sum string) artifact {
-	return artifact{name, imageURL + name, sum}
+func image(name, sum string, size int64) artifact {
+	return artifact{name, imageURL + name, sum, size}
 }
 
-func firecracker(arch, sum string) artifact {
+func firecracker(arch, sum string, size int64) artifact {
 	name := "firecracker-" + firecrackerVersion + "-" + arch + ".tgz"
-	return artifact{name, firecrackerURL + name, sum}
+	return artifact{name, firecrackerURL + name, sum, size}
 }
 
 var pinned = map[string]platform{
 	"linux/amd64": {
-		firecracker: firecracker("x86_64", "06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558"),
-		kernel:      image("vmlinux-amd64", "6515997fbf84e4f7875065e96dc2066cf535d2d825f0c255706147344ae0d13a"),
-		rootfs:      image("rootfs-amd64.ext4.zst", "c01c9efebc735c3c911e3633e886b9db37d14042a95c783211f19881f693d934"),
+		firecracker: firecracker("x86_64", "06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558", 7464385),
+		kernel:      image("vmlinux-amd64", "6515997fbf84e4f7875065e96dc2066cf535d2d825f0c255706147344ae0d13a", 24451352),
+		rootfs:      image("rootfs-amd64.ext4.zst", "c01c9efebc735c3c911e3633e886b9db37d14042a95c783211f19881f693d934", 27264258),
 	},
 	"linux/arm64": {
-		firecracker: firecracker("aarch64", "e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256"),
-		kernel:      image("vmlinux-arm64", "3bf6f78dd6690fdf58ea7fed4fa5be71233defe9d21b0b1efb77238a2c6c06e1"),
-		rootfs:      image("rootfs-arm64.ext4.zst", "e5246037ad7241f0ca791c8f4552644c0739ee0ded3d1edac7255becc29ae3d2"),
+		firecracker: firecracker("aarch64", "e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256", 7294031),
+		kernel:      image("vmlinux-arm64", "3bf6f78dd6690fdf58ea7fed4fa5be71233defe9d21b0b1efb77238a2c6c06e1", 18883072),
+		rootfs:      image("rootfs-arm64.ext4.zst", "e5246037ad7241f0ca791c8f4552644c0739ee0ded3d1edac7255becc29ae3d2", 25900667),
 	},
 	"darwin/arm64": {
-		kernel: image("vmlinux-arm64", "3bf6f78dd6690fdf58ea7fed4fa5be71233defe9d21b0b1efb77238a2c6c06e1"),
-		rootfs: image("rootfs-arm64.ext4.zst", "e5246037ad7241f0ca791c8f4552644c0739ee0ded3d1edac7255becc29ae3d2"),
+		kernel: image("vmlinux-arm64", "3bf6f78dd6690fdf58ea7fed4fa5be71233defe9d21b0b1efb77238a2c6c06e1", 18883072),
+		rootfs: image("rootfs-arm64.ext4.zst", "e5246037ad7241f0ca791c8f4552644c0739ee0ded3d1edac7255becc29ae3d2", 25900667),
 	},
 }
 
@@ -124,7 +126,7 @@ func fetch(ctx context.Context, dir string, client *http.Client, list []artifact
 	}
 	var downloaded []string
 	for _, a := range list {
-		ok, err := verified(filepath.Join(dir, a.name), a.sha256)
+		ok, err := verified(filepath.Join(dir, a.name), a)
 		if err != nil {
 			return downloaded, err
 		}
@@ -139,9 +141,9 @@ func fetch(ctx context.Context, dir string, client *http.Client, list []artifact
 	return downloaded, nil
 }
 
-// verified reports whether path exists and has the given sha256. A file with
+// verified reports whether path exists with a's size and sha256. A file with
 // any other content is not trusted and gets downloaded again.
-func verified(path, sum string) (bool, error) {
+func verified(path string, a artifact) (bool, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
@@ -150,11 +152,14 @@ func verified(path, sum string) (bool, error) {
 		return false, err
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err != nil || fi.Size() != a.size {
+		return false, err
+	}
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return false, fmt.Errorf("verify %s: %w", path, err)
 	}
-	return hex.EncodeToString(h.Sum(nil)) == sum, nil
+	return hex.EncodeToString(h.Sum(nil)) == a.sha256, nil
 }
 
 // download retries transient failures (network errors, 5xx). There is no
@@ -191,6 +196,9 @@ func downloadOnce(ctx context.Context, dir string, client *http.Client, a artifa
 	if resp.StatusCode != http.StatusOK {
 		return resp.StatusCode >= 500, fmt.Errorf("download %s: GET %s: %s", a.name, a.url, resp.Status)
 	}
+	if resp.ContentLength >= 0 && resp.ContentLength != a.size {
+		return false, fmt.Errorf("download %s from %s: Content-Length is %d, want %d", a.name, a.url, resp.ContentLength, a.size)
+	}
 
 	tmp, err := os.CreateTemp(dir, "."+a.name+".*.part")
 	if err != nil {
@@ -199,8 +207,17 @@ func downloadOnce(ctx context.Context, dir string, client *http.Client, a artifa
 	defer os.Remove(tmp.Name()) // a no-op once renamed
 	defer tmp.Close()
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, h), resp.Body); err != nil {
+	// Read one byte past the pinned size so an oversized or endless body is
+	// cut off instead of filling the disk.
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(resp.Body, a.size+1))
+	if err != nil {
 		return true, fmt.Errorf("download %s: %w", a.name, err)
+	}
+	if n > a.size {
+		return false, fmt.Errorf("download %s from %s: more than the expected %d bytes; discarded it", a.name, a.url, a.size)
+	}
+	if n < a.size {
+		return false, fmt.Errorf("download %s from %s: got %d bytes, want %d; discarded it", a.name, a.url, n, a.size)
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != a.sha256 {
 		return false, fmt.Errorf("download %s from %s: sha256 is %s, want %s; discarded it", a.name, a.url, got, a.sha256)

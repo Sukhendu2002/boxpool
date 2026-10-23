@@ -35,7 +35,7 @@ func TestForPlatform(t *testing.T) {
 		var names []string
 		for _, a := range list {
 			names = append(names, a.name)
-			if !strings.HasSuffix(a.url, "/"+a.name) || !hexSum.MatchString(a.sha256) {
+			if !strings.HasSuffix(a.url, "/"+a.name) || !hexSum.MatchString(a.sha256) || a.size <= 0 {
 				t.Errorf("%s/%s: bad pin %+v", tt.goos, tt.goarch, a)
 			}
 			for _, other := range tt.otherArch {
@@ -103,7 +103,7 @@ func TestFetchVerifiesAndSkips(t *testing.T) {
 	good := []byte("kernel bytes")
 	srv, hits := server(t, map[string][]byte{"kernel": good}, nil)
 	dir := filepath.Join(t.TempDir(), DirName)
-	list := []artifact{{"kernel", srv.URL + "/kernel", sum(good)}}
+	list := []artifact{{"kernel", srv.URL + "/kernel", sum(good), int64(len(good))}}
 
 	got, err := fetch(context.Background(), dir, srv.Client(), list)
 	if err != nil || !slices.Equal(got, []string{"kernel"}) {
@@ -143,8 +143,8 @@ func TestFetchRejectsCorruptDownload(t *testing.T) {
 	srv, _ := server(t, map[string][]byte{"good": good, "rootfs": bad}, nil)
 	dir := t.TempDir()
 	list := []artifact{
-		{"good", srv.URL + "/good", sum(good)},
-		{"rootfs", srv.URL + "/rootfs", sum(good)},
+		{"good", srv.URL + "/good", sum(good), int64(len(good))},
+		{"rootfs", srv.URL + "/rootfs", sum(good), int64(len(good))},
 	}
 	got, err := fetch(context.Background(), dir, srv.Client(), list)
 	if err == nil {
@@ -167,7 +167,7 @@ func TestFetchRetries(t *testing.T) {
 	good := []byte("tarball")
 	srv, hits := server(t, map[string][]byte{"fc": good}, map[string]int{"fc": attempts - 1})
 	dir := t.TempDir()
-	if _, err := fetch(context.Background(), dir, srv.Client(), []artifact{{"fc", srv.URL + "/fc", sum(good)}}); err != nil {
+	if _, err := fetch(context.Background(), dir, srv.Client(), []artifact{{"fc", srv.URL + "/fc", sum(good), int64(len(good))}}); err != nil {
 		t.Fatal(err)
 	}
 	if n := hits["fc"].Load(); int(n) != attempts {
@@ -175,15 +175,91 @@ func TestFetchRetries(t *testing.T) {
 	}
 
 	// Client errors are not retried.
-	_, err := fetch(context.Background(), dir, srv.Client(), []artifact{{"missing", srv.URL + "/missing", sum(good)}})
+	_, err := fetch(context.Background(), dir, srv.Client(), []artifact{{"missing", srv.URL + "/missing", sum(good), int64(len(good))}})
 	if err == nil || !strings.Contains(err.Error(), "404") {
 		t.Errorf("got %v, want a 404 error", err)
 	}
 
 	srv2, hits2 := server(t, map[string][]byte{"fc": good}, map[string]int{"fc": attempts})
-	_, err = fetch(context.Background(), t.TempDir(), srv2.Client(), []artifact{{"fc", srv2.URL + "/fc", sum(good)}})
+	_, err = fetch(context.Background(), t.TempDir(), srv2.Client(), []artifact{{"fc", srv2.URL + "/fc", sum(good), int64(len(good))}})
 	if err == nil || !strings.Contains(err.Error(), "503") || int(hits2["fc"].Load()) != attempts {
 		t.Errorf("got %v after %d requests, want a 503 error after %d", err, hits2["fc"].Load(), attempts)
+	}
+}
+
+// TestFetchRejectsOversizedDownload serves an endless body without a
+// Content-Length and checks the client hangs up after size+1 bytes.
+func TestFetchRejectsOversizedDownload(t *testing.T) {
+	const limit = 64 << 20
+	var sent atomic.Int64
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		chunk := make([]byte, 64<<10)
+		for sent.Load() < limit {
+			n, err := w.Write(chunk)
+			sent.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}))
+	retryDelay = 0
+	dir := t.TempDir()
+	_, err := fetch(context.Background(), dir, srv.Client(), []artifact{{"kernel", srv.URL + "/kernel", sum([]byte("good")), 4}})
+	srv.Close() // waits for the handler, which stops once the client hangs up
+	if err == nil || !strings.Contains(err.Error(), "kernel") || !strings.Contains(err.Error(), "more than the expected 4 bytes") {
+		t.Errorf("got %v, want an oversize error", err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("%d requests, want 1 (no retry)", n)
+	}
+	if n := sent.Load(); n >= limit {
+		t.Errorf("server sent all %d bytes; the client did not cut the download off", n)
+	}
+	if names := entries(t, dir); len(names) != 0 {
+		t.Errorf("dir holds %v, want nothing", names)
+	}
+}
+
+// TestFetchRejectsShortDownload sends one byte too few, chunked so there is no
+// Content-Length to catch it first.
+func TestFetchRejectsShortDownload(t *testing.T) {
+	good := []byte("kernel bytes")
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.(http.Flusher).Flush()
+		w.Write(good[:len(good)-1])
+	}))
+	t.Cleanup(srv.Close)
+	retryDelay = 0
+	dir := t.TempDir()
+	_, err := fetch(context.Background(), dir, srv.Client(), []artifact{{"kernel", srv.URL + "/kernel", sum(good), int64(len(good))}})
+	if err == nil || !strings.Contains(err.Error(), "got 11 bytes, want 12") {
+		t.Errorf("got %v, want a short-download error", err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("%d requests, want 1 (no retry)", n)
+	}
+	if names := entries(t, dir); len(names) != 0 {
+		t.Errorf("dir holds %v, want nothing", names)
+	}
+}
+
+func TestFetchRejectsWrongContentLength(t *testing.T) {
+	good := []byte("kernel bytes")
+	srv, hits := server(t, map[string][]byte{"kernel": good}, nil)
+	dir := t.TempDir()
+	_, err := fetch(context.Background(), dir, srv.Client(), []artifact{{"kernel", srv.URL + "/kernel", sum(good), 4}})
+	if err == nil || !strings.Contains(err.Error(), "Content-Length is 12, want 4") {
+		t.Errorf("got %v, want a Content-Length error", err)
+	}
+	if n := hits["kernel"].Load(); n != 1 {
+		t.Errorf("%d requests, want 1 (no retry)", n)
+	}
+	if names := entries(t, dir); len(names) != 0 {
+		t.Errorf("dir holds %v, want nothing", names)
 	}
 }
 
