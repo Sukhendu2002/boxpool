@@ -7,8 +7,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -100,7 +102,7 @@ func TestIntegration(t *testing.T) {
 		}
 	}
 
-	for boot := 1; boot <= 2; boot++ {
+	for boot := 1; boot <= 3; boot++ {
 		start := time.Now()
 		if err := d.Start(ctx, id); err != nil {
 			t.Fatal(err)
@@ -123,11 +125,64 @@ func TestIntegration(t *testing.T) {
 			if !strings.HasPrefix(out, "Linux ") {
 				t.Errorf("uname -a: %q", out)
 			}
+			t.Logf("fsfreeze: %s", strings.TrimSpace(run("command -v fsfreeze")))
 			// No sync: Stop must flush it, or the next boot will not see it.
 			run("echo kept > /root/stop-test")
+			// More than the console's bound of about 2 MiB plus a second's output.
+			start := time.Now()
+			run("head -c 4194304 /dev/zero | tr '\\0' x > /dev/ttyS0")
+			t.Logf("4 MiB to the serial console: %v", time.Since(start))
+			time.Sleep(1500 * time.Millisecond) // a rotation after the last write
+			var total int64
+			for _, p := range []string{l.console, l.console + ".1"} {
+				if fi, err := os.Stat(p); err == nil {
+					total += fi.Size()
+				}
+			}
+			t.Logf("console.log and console.log.1: %d bytes", total)
+			if total > 3<<20 {
+				t.Errorf("console logs hold %d bytes after 4 MiB of output, want at most 3 MiB", total)
+			}
 		} else if got := run("cat /root/stop-test"); got != "kept\n" {
 			t.Errorf("file written before Stop: %q, want kept", got)
 		}
-		stop()
+		if boot == 2 {
+			// A process writing through an open file while Stop runs; it
+			// stays in the background after the exec session ends.
+			run("sh -c 'exec 3>>/root/busy; while :; do echo x >&3; done' >/dev/null 2>&1 &")
+			run("sleep 0.5; test -s /root/busy")
+		}
+		if boot < 3 {
+			stop()
+		}
+		if boot == 2 {
+			fsck(t, l.rootfs)
+		}
+	}
+	// Without fsfreeze, Stop still stops the VM but reports it as unclean.
+	run("mv /usr/sbin/fsfreeze /root/")
+	if err := d.Stop(ctx, id); !errors.Is(err, backend.ErrUncleanStop) {
+		t.Errorf("Stop without fsfreeze: %v, want ErrUncleanStop", err)
+	} else {
+		t.Logf("Stop without fsfreeze: %v", err)
+	}
+	if _, ok := running(l); ok {
+		t.Error("firecracker still runs after an unclean Stop")
+	}
+}
+
+// fsck checks that Stop left the sandbox's disk consistent.
+func fsck(t *testing.T, rootfs string) {
+	t.Helper()
+	e2fsck, err := exec.LookPath("e2fsck")
+	if err != nil {
+		t.Logf("not checking the disk: %v", err)
+		return
+	}
+	out, err := exec.Command(e2fsck, "-fn", rootfs).CombinedOutput()
+	t.Logf("e2fsck -fn rootfs.ext4: %v\n%s", err, out)
+	// e2fsck -n exits 0 even when the journal still needs replaying.
+	if err != nil || bytes.Contains(out, []byte("journal recovery")) {
+		t.Errorf("disk inconsistent after Stop with an active writer: %v", err)
 	}
 }

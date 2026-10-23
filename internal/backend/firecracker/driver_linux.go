@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -36,8 +37,9 @@ var (
 // Driver is the Firecracker backend. All its state is in the sandbox
 // directories, so a new Driver sees the sandboxes an earlier one created.
 type Driver struct {
-	root                        string // <state dir>/sandboxes
+	root                        string // <state dir>/sandboxes, symlinks resolved
 	firecracker, kernel, rootfs string
+	consoles                    sync.Map // sandbox ID → chan closed when its console rotator returns
 }
 
 var _ backend.Driver = (*Driver)(nil)
@@ -49,16 +51,20 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths) (*Driver, 
 	if err != nil {
 		return nil, err
 	}
-	// Absolute, because running matches the API socket path on firecracker's
-	// command line.
-	stateDir, err = filepath.Abs(stateDir)
+	root := filepath.Join(stateDir, "sandboxes")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return nil, err
+	}
+	// Absolute and without symlinks, because running matches the API socket
+	// path on firecracker's command line: an alias of the state directory
+	// would not see the VMs started through another.
+	if root, err = filepath.Abs(root); err == nil {
+		root, err = filepath.EvalSymlinks(root)
+	}
 	if err != nil {
 		return nil, err
 	}
-	d := &Driver{root: filepath.Join(stateDir, "sandboxes"), firecracker: fc, kernel: paths.Kernel, rootfs: rootfs}
-	if err := os.MkdirAll(d.root, 0700); err != nil {
-		return nil, err
-	}
+	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs}
 	return d, killOrphans(ctx, d.root)
 }
 
@@ -138,7 +144,8 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	if err := os.WriteFile(l.log, nil, 0600); err != nil {
 		return err
 	}
-	console, err := os.OpenFile(l.console, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	// O_APPEND, so rotateConsole can truncate it under firecracker.
+	console, err := os.OpenFile(l.console, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
@@ -152,14 +159,23 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	go cmd.Wait() // reap it; running reads /proc, not cmd
+	exited := make(chan struct{})
+	go func() { cmd.Wait(); close(exited) }() // reap it; running reads /proc, not cmd
+	rotated := make(chan struct{})
+	d.consoles.Store(id, rotated)
+	go func() {
+		defer close(rotated)
+		boundConsole(l.console, exited)
+	}()
 	err = os.WriteFile(l.pid, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0600)
 	if err == nil {
 		err = d.boot(ctx, l, spec)
 	}
 	if err != nil {
 		cmd.Process.Kill()
-		kill(context.WithoutCancel(ctx), l)
+		if kill(context.WithoutCancel(ctx), l) == nil {
+			d.waitConsole(id)
+		}
 		return fmt.Errorf("start sandbox %s: %w (see %s and %s)", id, err, l.log, l.console)
 	}
 	return nil
@@ -238,31 +254,44 @@ func poll(ctx context.Context, l layout, timeout time.Duration, what string, try
 	}
 }
 
-// Stop shuts the guest down after flushing its disk and waits for
-// firecracker to exit, sending SIGTERM and then SIGKILL if it does not.
+// Stop freezes the guest's disk, reboots the guest and waits for firecracker
+// to exit. If the freeze or the reboot fails, it sends SIGTERM and then
+// SIGKILL instead, and, once firecracker is gone, returns an error wrapping
+// backend.ErrUncleanStop: the sandbox is stopped, but its disk may be
+// inconsistent.
 func (d *Driver) Stop(ctx context.Context, id string) error {
 	l, _, err := d.load(id)
 	if err != nil {
 		return err
 	}
+	var unclean error
 	if pid, ok := running(l); ok {
 		if err := d.shutdownGuest(ctx, l); err != nil {
+			unclean = fmt.Errorf("stop sandbox %s: %w: %v", id, backend.ErrUncleanStop, err)
 			slog.Warn("sandbox did not shut down cleanly; terminating it", "sandbox", id, "err", err)
 			syscall.Kill(pid, syscall.SIGTERM)
 			if waitExit(ctx, l, stopTimeout) != nil {
-				return kill(context.WithoutCancel(ctx), l)
+				if err := kill(context.WithoutCancel(ctx), l); err != nil {
+					return err
+				}
 			}
 		}
 	}
-	return removeRuntimeFiles(l)
+	d.waitConsole(id)
+	if err := removeRuntimeFiles(l); err != nil {
+		return err
+	}
+	return unclean
 }
 
-// shutdownGuest flushes the guest's disk, remounts its root read-only and
-// reboots it with sysrq, then waits for firecracker to exit, which reboot=k
-// (x86_64) or PSCI (arm64) makes it do.
-// shortcut: guest processes get no SIGTERM first, because SendCtrlAltDel
-// needs an i8042 driver the pinned kernel lacks (CONFIG_SERIO is off) and the
-// image has no reboot command; add an agent shutdown endpoint for that.
+// shutdownGuest flushes and freezes the guest's root filesystem, which
+// leaves it consistent on disk with a clean journal, and reboots the guest
+// with sysrq. It then waits for firecracker to exit, which reboot=k (x86_64)
+// or PSCI (arm64) makes it do.
+// shortcut: guest processes get no SIGTERM first (writers block on the frozen
+// filesystem and die with the VM), because SendCtrlAltDel needs an i8042
+// driver the pinned kernel lacks (CONFIG_SERIO is off) and the image has no
+// reboot command; add an agent shutdown endpoint for that.
 func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
 	ctx, cancel := context.WithTimeout(ctx, stopTimeout)
 	defer cancel()
@@ -271,16 +300,19 @@ func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
 	run := func(script string) (*agent.Session, error) {
 		return c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", script}}, io.Discard, io.Discard)
 	}
-	// The remount fails if a guest process has a file open for writing; the
-	// sync before it is what keeps the data.
-	s, err := run("sync && { mount -o remount,ro / || true; }")
+	// Unlike a read-only remount, the freeze succeeds while guest processes
+	// have files open for writing.
+	var out bytes.Buffer
+	s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", "sync && fsfreeze --freeze /"}}, &out, &out)
 	if err != nil {
 		return err
 	}
 	if code, err := s.Wait(); err != nil || code != 0 {
-		return fmt.Errorf("sync in the guest: exit status %d, %v", code, err)
+		return fmt.Errorf("freeze the guest's disk: exit status %d, %v: %s", code, err, bytes.TrimSpace(out.Bytes()))
 	}
-	// The guest reboots at once, so this command never exits. Keep ctx alive
+	// sysrq-trigger is on procfs, not the frozen disk, and sh is already
+	// cached from the freeze, so this runs. The guest reboots at once, so
+	// this command never exits. Keep ctx alive
 	// until firecracker does: cancelling it would close the session and could
 	// make the agent kill the command first.
 	if _, err := run("echo b > /proc/sysrq-trigger"); err != nil {
@@ -298,6 +330,7 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 	if err := kill(ctx, l); err != nil {
 		return err
 	}
+	d.waitConsole(id)
 	return os.RemoveAll(l.dir)
 }
 
@@ -339,6 +372,67 @@ func (d *Driver) Dial(ctx context.Context, id string) (net.Conn, error) {
 		return nil, err
 	}
 	return dialAgent(ctx, sandboxLayout(d.root, id).vsock)
+}
+
+// consoleMax is the size at which boundConsole rotates a console log.
+const consoleMax = 1 << 20
+
+// boundConsole rotates the console log at path once a second until exited
+// is closed, which bounds it and its one rotated copy to about 2 MiB.
+// shortcut: a guest writing faster than the serial port allows overshoots by
+// a second's output, and output written during a rotation is lost; read the
+// console through a pipe if that matters.
+func boundConsole(path string, exited <-chan struct{}) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-exited:
+			return
+		case <-t.C:
+			if err := rotateConsole(path); err != nil {
+				slog.Warn("rotating console log", "path", path, "err", err)
+			}
+		}
+	}
+}
+
+// rotateConsole copies path to path.1, replacing it, and empties path once
+// path is larger than consoleMax. Firecracker writes path with O_APPEND, so
+// it carries on at the new end.
+func rotateConsole(path string) error {
+	fi, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) || err == nil && fi.Size() <= consoleMax {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(path+".1", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(dst, src)
+	if cerr := dst.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Truncate(path, 0)
+}
+
+// waitConsole waits for the console rotator of a sandbox whose firecracker
+// process is gone, so it no longer touches the sandbox's files.
+func (d *Driver) waitConsole(id string) {
+	if done, ok := d.consoles.LoadAndDelete(id); ok {
+		<-done.(chan struct{})
+	}
 }
 
 func (d *Driver) agent(l layout) *agent.Client {

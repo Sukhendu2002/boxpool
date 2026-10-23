@@ -13,6 +13,7 @@
 //	vsock.sock        the host end of the guest's vsock device
 //	firecracker.log   Firecracker's log
 //	console.log       the guest's serial console
+//	console.log.1     its previous MiB or more, once it outgrew 1 MiB
 //
 // Firecracker runs without its jailer. The jailer needs root to chroot,
 // create device nodes, join cgroups and drop to another uid, and boxpool's

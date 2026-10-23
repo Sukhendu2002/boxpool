@@ -3,6 +3,7 @@
 package firecracker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+	"time"
 
+	"boxpool.run/boxpool/internal/artifacts"
 	"boxpool.run/boxpool/internal/backend"
 )
 
@@ -89,43 +92,127 @@ func TestCreateListRemove(t *testing.T) {
 	}
 }
 
+// fakeFirecracker starts a process with args on its command line and writes
+// sandbox id's runtime files for it, as Start would.
+func fakeFirecracker(t *testing.T, root, id string, args ...string) (*exec.Cmd, layout) {
+	t.Helper()
+	l := sandboxLayout(root, id)
+	os.Mkdir(l.dir, 0700)
+	// A loop, so sh does not exec sleep and keeps args on its command line.
+	cmd := exec.Command("sh", append([]string{"-c", "while :; do sleep 1; done", "sh"}, args...)...)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+	os.WriteFile(l.pid, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0600)
+	os.WriteFile(l.api, nil, 0600)
+	os.WriteFile(l.vsock, nil, 0600)
+	return cmd, l
+}
+
+// assertKilled checks that cmd was killed and its runtime files removed.
+func assertKilled(t *testing.T, exited <-chan error, l layout) {
+	t.Helper()
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Error("orphan exited by itself")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("orphan was not killed")
+	}
+	for _, p := range []string{l.pid, l.api, l.vsock} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s left behind: %v", p, err)
+		}
+	}
+}
+
 func TestKillOrphans(t *testing.T) {
 	root := t.TempDir()
-	start := func(id string, args ...string) (*exec.Cmd, layout) {
-		t.Helper()
-		l := sandboxLayout(root, id)
-		os.Mkdir(l.dir, 0700)
-		// A loop, so sh does not exec sleep and keeps args on its command line.
-		cmd := exec.Command("sh", append([]string{"-c", "while :; do sleep 1; done", "sh"}, args...)...)
-		if err := cmd.Start(); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
-		os.WriteFile(l.pid, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0600)
-		os.WriteFile(l.api, nil, 0600)
-		os.WriteFile(l.vsock, nil, 0600)
-		return cmd, l
-	}
-	orphan, ol := start("orphan", "--api-sock", sandboxLayout(root, "orphan").api)
+	orphan, ol := fakeFirecracker(t, root, "orphan", "--api-sock", sandboxLayout(root, "orphan").api)
 	// A pid file naming a process that is not this sandbox's firecracker,
 	// as after the pid was reused.
-	other, _ := start("reused", "--api-sock", "/elsewhere/fc.sock")
+	other, _ := fakeFirecracker(t, root, "reused", "--api-sock", "/elsewhere/fc.sock")
 	exited := make(chan error, 1)
 	go func() { exited <- orphan.Wait() }()
 
 	if err := killOrphans(context.Background(), root); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-exited; err == nil {
-		t.Error("orphan was not killed")
-	}
-	for _, p := range []string{ol.pid, ol.api, ol.vsock} {
-		if _, err := os.Stat(p); !os.IsNotExist(err) {
-			t.Errorf("%s left behind: %v", p, err)
-		}
-	}
+	assertKilled(t, exited, ol)
 	// A killed child would be a zombie with an empty command line.
 	if b, _ := os.ReadFile("/proc/" + strconv.Itoa(other.Process.Pid) + "/cmdline"); len(b) == 0 {
 		t.Error("unrelated process was killed")
+	}
+}
+
+// A VM started through the real state directory is an orphan to a Driver
+// made through a symlink to it.
+func TestNewThroughSymlink(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, "sandboxes")
+	os.Mkdir(root, 0700)
+	orphan, ol := fakeFirecracker(t, root, "orphan", "--api-sock", sandboxLayout(root, "orphan").api)
+	exited := make(chan error, 1)
+	go func() { exited <- orphan.Wait() }()
+	link := filepath.Join(t.TempDir(), "state")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	// Unpacked artifacts that are present, so prepare keeps them.
+	art := t.TempDir()
+	paths := artifacts.Paths{Firecracker: filepath.Join(art, "fc.tgz"), Kernel: filepath.Join(art, "vmlinux"), Rootfs: filepath.Join(art, "rootfs.ext4.zst")}
+	os.WriteFile(filepath.Join(art, "fc"), nil, 0755)
+	os.WriteFile(filepath.Join(art, "rootfs.ext4"), nil, 0644)
+
+	d, err := New(context.Background(), link, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.root != root {
+		t.Errorf("root is %s, want %s", d.root, root)
+	}
+	assertKilled(t, exited, ol)
+}
+
+func TestRotateConsole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "console.log")
+	if err := rotateConsole(path); err != nil {
+		t.Errorf("missing log: %v", err)
+	}
+	small := bytes.Repeat([]byte("a"), consoleMax)
+	os.WriteFile(path, small, 0600)
+	if err := rotateConsole(path); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); !bytes.Equal(b, small) {
+		t.Errorf("log at the limit changed to %d bytes", len(b))
+	}
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Errorf("log at the limit rotated: %v", err)
+	}
+
+	os.WriteFile(path+".1", []byte("older"), 0600)
+	big := append(small, 'b')
+	// Appending like firecracker, through an fd held across the rotation.
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	f.Write(big)
+	if err := rotateConsole(path); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path + ".1"); !bytes.Equal(b, big) {
+		t.Errorf("rotated copy has %d bytes, want %d", len(b), len(big))
+	}
+	f.Write([]byte("after"))
+	if b, _ := os.ReadFile(path); string(b) != "after" {
+		t.Errorf("log after rotation: %d bytes %.20q", len(b), b)
 	}
 }
