@@ -64,7 +64,8 @@ func TestRun(t *testing.T) {
 	if err := os.WriteFile(sock, nil, 0600); err != nil { // left by a crashed daemon
 		t.Fatal(err)
 	}
-	want := daemon.Info{Version: "test", OS: "linux", Arch: "amd64", StateDir: dir, Backend: "firecracker"}
+	// A backend this daemon does not know serves none, without fetching anything.
+	want := daemon.Info{Version: "test", OS: "linux", Arch: "amd64", StateDir: dir, Backend: "none"}
 	stop := start(t, dir, want)
 
 	got, err := client.New(dir).Info(context.Background())

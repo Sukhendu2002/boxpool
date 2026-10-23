@@ -52,6 +52,12 @@ jobs:
           go test -tags integration -count=1 -v -timeout 12m -run '^TestIntegration$' ./internal/backend/docker/ | tee "$RUNNER_TEMP/integration.log"
           grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/integration.log"
           ! grep -q -- '--- SKIP' "$RUNNER_TEMP/integration.log"
+      - name: Run boxpool sh's daemon integration test on Docker
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -tags integration -count=1 -v -timeout 10m -run '^TestIntegrationSh$/^docker$' ./internal/daemon/ | tee "$RUNNER_TEMP/daemon.log"
+          grep -q -- '--- PASS: TestIntegrationSh/docker ' "$RUNNER_TEMP/daemon.log"
       - name: Require no boxpool-labelled resources left
         if: always()
         shell: bash

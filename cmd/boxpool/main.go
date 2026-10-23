@@ -28,7 +28,7 @@ Commands:
   version   print the version
   up        start a pool on this machine (not implemented yet)
   join      join an existing pool (not implemented yet)
-  sh        open a shell in a new sandbox (not implemented yet)
+  sh        open a shell in a new or existing sandbox
   ls        list nodes and sandboxes (not implemented yet)
 `
 
@@ -47,7 +47,9 @@ func main() {
 		if v := daemonVersion(); v != "" {
 			fmt.Println("daemon ", v)
 		}
-	case "up", "join", "sh", "ls":
+	case "sh":
+		os.Exit(sh(os.Args[2:]))
+	case "up", "join", "ls":
 		fmt.Fprintf(os.Stderr, "boxpool %s: not implemented yet\n", os.Args[1])
 		os.Exit(1)
 	case "help", "--help", "-h":
