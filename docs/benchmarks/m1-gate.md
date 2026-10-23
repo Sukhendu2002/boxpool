@@ -3,15 +3,15 @@
 Issue #19. Checks the M1 exit criteria on real hardware.
 
 **Status:** criteria 1 and 2 pass on the reference Linux box. Criterion 3 was
-not run: no old laptop is available. It is tracked in #98, and M2 starts
-without it (see [Decision](#decision)).
+not run: no old laptop is available. The gate proceeded to M2 with
+criterion 3 deferred (#98); see [Decision](#decision).
 
 ## Results
 
 | # | Criterion | Target | Result | Status |
 | --- | --- | --- | --- | --- |
 | 1 | Install to first shell | under 5 min | 36.6 s and 41.0 s from a wiped state (1.3 s with cached artifacts) | **PASS** |
-| 2 | `boxpool sh` cold boot, reference box | under 2 s median | **437 ms median, 448 ms p90** over 10 runs | **PASS** |
+| 2 | `boxpool sh` cold boot, reference box | under 2 s median | **427 ms median, 454 ms p90** over 10 runs | **PASS** |
 | 3 | Old laptop runs a sandbox; `doctor` explains the backend | runs | not run: no hardware available (#98) | **NOT RUN** |
 | 4 | Results committed; misses get follow-ups and a decision | this doc | this doc, #98 | **PASS** |
 
@@ -65,8 +65,12 @@ It needs a Linux box with KVM, systemd and passwordless `sudo`.
 
 `boxpool sh` takes no command (the issue's `boxpool sh --timing -- true`
 does not exist), and it needs a terminal. So the script runs each shell
-under `script(1)`, feeds it `exit`, reads the `time to prompt:` line, and
-then removes the sandbox with `sudo boxpool rm --force`. `--timing` measures
+under `script(1)`, waits until the shell's prompt appears, types `exit`,
+reads the `time to prompt:` line, and then removes the sandbox with
+`sudo boxpool rm --force`. Each invocation names its sandboxes
+`gate-<random>-<n>`, stops if a name already exists, removes only the
+sandboxes it created (also on failure), and fails if a session or a removal
+fails. It keeps each run's transcript in a temp dir and prints its path. `--timing` measures
 from the start of `boxpool sh` to the first output of the sandbox's login
 shell. For a new sandbox that includes the create request (rootfs copy and
 resize), the Firecracker boot, the guest agent coming up, and `bash -l`
@@ -101,6 +105,11 @@ the `.wants` link and the binary removed, `systemctl daemon-reload`, and
 | 2 | wiped (downloads artifacts) | 40,595 ms | 407 ms | **41.0 s** |
 | 3 | artifacts cached | 835 ms | 429 ms | 1.3 s |
 
+These install runs used the first version of the script, which typed
+`exit` before the prompt appeared (see [Cold boot](#2-cold-boot-10-runs)).
+The fix does not change how `up` is timed, and the `sh` part is under 0.7 s
+of each total, so the totals stand.
+
 Almost all of a first install is the download. The artifacts take 159 MB on
 disk once unpacked. Download time depends on the network. Here, 36–41 s
 leaves a lot of headroom under 5 minutes.
@@ -111,7 +120,7 @@ leaves a lot of headroom under 5 minutes.
 scripts/bench-gate.sh boot 10
 ```
 
-Each run creates a new sandbox (`gate-1` … `gate-10`) with the defaults
+Each run creates a new sandbox (`gate-<random>-1` … `-10`) with the defaults
 (2 vCPU, 2 GiB, 10 GiB disk), so every boot is a cold create and boot of a
 new microVM. Artifacts were cached and the host page cache was warm, as in
 m1-boot.md. The daemon ran as root, so each sandbox also got its tap device
@@ -120,20 +129,39 @@ and firewall rules.
 Time to prompt, in ms:
 
 ```text
- 1 431
- 2 417
- 3 410
- 4 432
- 5 451
- 6 439
- 7 435
- 8 448
- 9 441
-10 439
+ 1 418
+ 2 421
+ 3 454
+ 4 634
+ 5 437
+ 6 412
+ 7 416
+ 8 432
+ 9 422
+10 434
 ```
 
-Median **437 ms** (the mean of the middle two, 435 and 439), p90 **448 ms**
-(nearest rank: the 9th of 10 sorted values). The target is 2 s.
+Median **427 ms** (the mean of the middle two, 422 and 432), p90 **454 ms**
+(nearest rank: the 9th of 10 sorted values). The target is 2 s. Run 4 is an
+outlier at 634 ms; nearest-rank p90 does not include it.
+
+In every run's transcript, the first guest output after `time to prompt:`
+is the shell prompt, `root@10:~# `, and `exit` comes after it:
+
+```text
+sandbox gate-a6d002-5 (firecracker)
+time to prompt: 437ms
+root@10:~# exit
+logout
+```
+
+These numbers replace an earlier set (437 ms median, 448 ms p90) from the
+first version of the script. That version typed `exit` as soon as the shell
+started, so the timing could have stopped on the guest echoing that input
+rather than on the prompt. It also reused fixed sandbox names and could
+report a time after a failed session. The script now waits for the prompt
+first. The replacement run was on the same box on the same day, built from
+the same code.
 
 That beats the #2 spike on the same box, 1.07 s with the quickstart's boot
 args and 0.57 s with the i8042 probe off
@@ -152,8 +180,8 @@ install and boot timings, and the old-laptop row in m1-boot.md.
 ## Decision
 
 **Proceed to M2.** Criteria 1, 2 and 4 pass, and criterion 2 passes with
-more than 4x headroom. Criterion 3 is not passed. It is deferred to #98 (P1,
-milestone M2), not dropped, for these reasons:
+more than 4x headroom. Criterion 3 is not passed: the gate proceeds to M2
+with it deferred to #98 (P1, milestone M2), not dropped, for these reasons:
 
 - The only blocker is hardware. No code is known to be missing, and nothing
   in M2 (macOS) depends on the old-laptop result.

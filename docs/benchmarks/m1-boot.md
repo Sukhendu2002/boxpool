@@ -6,7 +6,7 @@ with the upstream quickstart kernel and rootfs, and is under 2 s realistic?
 **Status:** measured on the reference Linux box (bare metal) and on
 GitHub-hosted runners (nested VMs, **not reference numbers**). The old-laptop
 row is deferred: no old hardware is available yet. The M1 gate
-([m1-gate.md](m1-gate.md)) passed without it, and #98 tracks it.
+([m1-gate.md](m1-gate.md)) proceeded to M2 with criterion 3 deferred (#98).
 
 ## Method
 
