@@ -240,12 +240,18 @@ func TestExecAndCp(t *testing.T) {
 		if code, out, _ := cli(t, dir, "hi\n", "exec", "box", "cat"); code != 0 || out != "" {
 			t.Errorf("exec cat = %d %q", code, out)
 		}
-		if code, _, errOut := cli(t, dir, "", "exec", "nope", "--", "true"); code != 1 || !strings.Contains(errOut, `sandbox "nope" not found`) {
+		// The command's own codes pass through; 125 collides, as in docker.
+		for _, want := range []int{1, 125} {
+			if code, _, _ := cli(t, dir, "", "exec", "box", "sh", "-c", fmt.Sprintf("exit %d", want)); code != want {
+				t.Errorf("exec of exit %d = %d", want, code)
+			}
+		}
+		if code, _, errOut := cli(t, dir, "", "exec", "nope", "--", "true"); code != execFailed || !strings.Contains(errOut, `sandbox "nope" not found`) {
 			t.Errorf("exec nope = %d %q", code, errOut)
 		}
-		for _, args := range [][]string{{"exec"}, {"exec", "box"}, {"exec", "box", "--"}, {"exec", "-t", "box", "true"}} {
-			if code, _, _ := cli(t, dir, "", args...); code != 2 {
-				t.Errorf("%q = %d, want 2", args, code)
+		for _, args := range [][]string{{"exec"}, {"exec", "box"}, {"exec", "box", "--"}, {"exec", "-t", "box", "true"}, {"exec", "-x", "box", "true"}} {
+			if code, _, _ := cli(t, dir, "", args...); code != execFailed {
+				t.Errorf("%q = %d, want %d", args, code, execFailed)
 			}
 		}
 	})
@@ -286,6 +292,42 @@ func TestExecAndCp(t *testing.T) {
 			t.Errorf("cp into a missing directory = %d %q", code, errOut)
 		}
 	})
+}
+
+func TestExecConnectionLost(t *testing.T) {
+	dir, err := os.MkdirTemp("", "bp") // short: macOS caps socket paths at ~104 bytes
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	kill := startDaemon(t, dir)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := client.New(dir).CreateSandbox(ctx, daemon.CreateRequest{Name: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	// The fake sandbox's agent runs here, so the command can signal us.
+	started := filepath.Join(dir, "started")
+	done := make(chan [2]any, 1)
+	go func() {
+		code, _, errOut := cli(t, dir, "", "exec", "box", "sh", "-c", "touch "+started+"; exec sleep 30")
+		done <- [2]any{code, errOut}
+	}()
+	for _, err := os.Stat(started); err != nil; _, err = os.Stat(started) {
+		if ctx.Err() != nil {
+			t.Fatal("the command did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	kill()
+	select {
+	case r := <-done:
+		if r[0] != execFailed || !strings.Contains(r[1].(string), "connection lost") {
+			t.Errorf("exec after the daemon died = %v %q", r[0], r[1])
+		}
+	case <-ctx.Done():
+		t.Fatal("exec did not exit after the daemon died")
+	}
 }
 
 // tree describes the files under root: names, types, modes, times,

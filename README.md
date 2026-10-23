@@ -76,7 +76,11 @@ unchanged.
 `boxpool exec [-i] [-t] <sandbox> [--] <command...>` runs a command in a
 running sandbox and exits with its exit code. Without `-t` its stdout and
 stderr stay separate and its stdin is empty, unless `-i` forwards yours;
-`-t` runs it on your terminal in raw mode, as `sh` does.
+`-t` runs it on your terminal in raw mode, as `sh` does. As with
+`docker exec`, it exits 125 when `boxpool exec` itself fails (bad
+arguments, no daemon, sandbox missing or stopped, connection lost before
+the command exited), else with the command's code, or 128+n if signal n
+killed it; a command that exits 125 itself looks the same.
 
 `boxpool cp SRC DST` copies a file or directory between this machine and a
 sandbox; exactly one side is `<sandbox>:<absolute path>`. Like `docker cp`,
