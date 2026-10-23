@@ -327,8 +327,8 @@ on Linux runs it.
 
 Both drivers and the store default an unspecified Spec to **2 CPUs,
 2048 MiB memory and 10 GiB disk**. Zero selects a default; negative values
-and byte-conversion overflow are rejected. `boxpool sh` and its resource
-flags are wired in #15; these limits already apply to driver Create calls.
+and byte-conversion overflow are rejected. `boxpool sh --cpu 1 --mem 512m
+--disk 1g` passes those requests through the daemon to the selected driver.
 
 Admission leaves **one logical CPU and max(1024 MiB, 10% of host RAM)** for
 the host. CPU admission uses the daemon's allowed CPU affinity. Memory must
@@ -336,8 +336,8 @@ fit Linux `MemAvailable`, minus the host reserve and every existing
 sandbox's full memory commitment. This conservatively counts resident
 sandbox RAM twice, preserving capacity for stopped or idle sandboxes under
 host memory pressure. The budget is not an idle-CPU measurement and cannot
-prevent other host programs from
-using resources after admission. Run the daemon directly on the Linux host.
+prevent other host programs from using resources after admission. Run the
+daemon directly on the Linux host.
 
 Every created sandbox, including stopped ones, keeps its reservation until
 Remove. Both backends and concurrent processes with the **same state
@@ -351,8 +351,8 @@ Use one state directory per node: independent `BOXPOOL_HOME` directories
 do not coordinate their commitments. Existing Firecracker specs and Docker
 containers are accounted for when upgrading. Initialize the Docker backend
 to import legacy Docker limits before switching a state directory to
-Firecracker; unknown Docker allocations fail admission. Existing Docker settings stay
-unchanged until the sandbox is recreated.
+Firecracker; unknown Docker allocations fail admission. Existing Docker
+settings stay unchanged until the sandbox is recreated.
 
 Firecracker sets the vCPU count and memory in its machine config, then
 boots a private ext4 rootfs grown to the requested GiB with host

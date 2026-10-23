@@ -202,6 +202,7 @@ func TestCreateSandboxInvalid(t *testing.T) {
 	for _, body := range []string{
 		`{"name":"Web"}`, `{"name":"-web"}`, `{"name":"a/b"}`, `{"name":"a b"}`, `{"name":"a.b"}`,
 		`{"name":"` + strings.Repeat("a", 64) + `"}`, `{"cpu":-1}`, `{"mem_mb":-1}`, `not json`,
+		`{"disk_gb":-1}`, `{"cpu":9223372036854775807}`, `{"mem_mb":9223372036854775807}`, `{"disk_gb":9223372036854775807}`,
 	} {
 		if code, _, resp := post(t, srv, body); code != http.StatusBadRequest || !strings.Contains(resp, `"message"`) {
 			t.Errorf("POST %s = %d %s, want 400 with a message", body, code, resp)

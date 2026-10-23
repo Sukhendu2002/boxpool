@@ -260,7 +260,7 @@ func (d *Driver) adopt(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		spec := backend.Spec{Name: sb.Name, CPUs: int((h.NanoCPUs-1)/1_000_000_000 + 1), MemoryMB: int((h.Memory-1)/(1<<20) + 1), DiskGB: 10}
+		spec := backend.Spec{Name: sb.Name, CPUs: int((h.NanoCPUs-1)/1_000_000_000 + 1), MemoryMB: int((h.Memory-1)/(1<<20) + 1), DiskGB: backend.DefaultDiskGB}
 		if spec, err = spec.WithDefaults(); err != nil {
 			return fmt.Errorf("sandbox %s has invalid limits: %w", sb.ID, err)
 		}

@@ -18,6 +18,14 @@ var ErrNotSupported = errors.New("not supported by this backend")
 // may need a filesystem check.
 var ErrUncleanStop = errors.New("sandbox was not stopped cleanly")
 
+// Defaults are shared by backend callers and the daemon/CLI. Memory is in
+// MiB and disk capacity in GiB.
+const (
+	DefaultCPUs     = 2
+	DefaultMemoryMB = 2048
+	DefaultDiskGB   = 10
+)
+
 // Spec describes the sandbox to create.
 type Spec struct {
 	Name     string
@@ -34,13 +42,13 @@ func (s Spec) WithDefaults() (Spec, error) {
 		return s, fmt.Errorf("CPU, memory and disk limits must not be negative")
 	}
 	if s.CPUs == 0 {
-		s.CPUs = 2
+		s.CPUs = DefaultCPUs
 	}
 	if s.MemoryMB == 0 {
-		s.MemoryMB = 2048
+		s.MemoryMB = DefaultMemoryMB
 	}
 	if s.DiskGB == 0 {
-		s.DiskGB = 10
+		s.DiskGB = DefaultDiskGB
 	}
 	// Bound conversions to bytes and Docker's nanocpus without overflow.
 	if int64(s.CPUs) > (1<<63-1)/1_000_000_000 || int64(s.MemoryMB) > (1<<63-1)/(1<<20) || int64(s.DiskGB) > (1<<63-1)/(1<<30) {

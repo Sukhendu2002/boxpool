@@ -3,7 +3,6 @@
 package daemon
 
 import (
-	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -30,9 +29,9 @@ const StoreName = "state.db"
 
 // Defaults for a new sandbox's resources (#13).
 const (
-	DefaultCPUs     = 2
-	DefaultMemoryMB = 2048
-	DefaultDiskGB   = 10
+	DefaultCPUs     = backend.DefaultCPUs
+	DefaultMemoryMB = backend.DefaultMemoryMB
+	DefaultDiskGB   = backend.DefaultDiskGB
 )
 
 // Info describes the daemon and the node it runs on.
@@ -129,8 +128,9 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid sandbox name %q: use 1 to 63 lower-case letters, digits and hyphens, starting with a letter or digit", req.Name))
 		return
 	}
-	if req.CPUs < 0 || req.MemoryMB < 0 || req.DiskGB < 0 {
-		writeError(w, http.StatusBadRequest, errors.New("cpu, mem_mb and disk_gb must not be negative"))
+	spec, err := (backend.Spec{Name: req.Name, CPUs: req.CPUs, MemoryMB: req.MemoryMB, DiskGB: req.DiskGB}).WithDefaults()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -149,12 +149,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	spec := backend.Spec{
-		Name:     req.Name,
-		CPUs:     cmp.Or(req.CPUs, DefaultCPUs),
-		MemoryMB: cmp.Or(req.MemoryMB, DefaultMemoryMB),
-		DiskGB:   cmp.Or(req.DiskGB, DefaultDiskGB),
-	}
+	spec.Name = req.Name
 	sb, err := s.st.GetByName(ctx, req.Name)
 	status := http.StatusOK
 	switch {
