@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -124,6 +125,7 @@ func runDaemon() int {
 }
 
 // daemonVersion returns the running daemon's version, or "" when none answers.
+// Permission failures are reported rather than silently hiding a root daemon.
 func daemonVersion() string {
 	dir, err := preflight.StateDir()
 	if err != nil {
@@ -133,6 +135,9 @@ func daemonVersion() string {
 	defer cancel()
 	info, err := client.New(dir).Info(ctx)
 	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			fmt.Fprintf(os.Stderr, "boxpool version: %v\n", err)
+		}
 		return ""
 	}
 	return info.Version

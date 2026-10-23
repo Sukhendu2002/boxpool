@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/coder/websocket"
 
@@ -30,9 +32,25 @@ func New(stateDir string) *Client {
 	return &Client{hc: &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
-			return d.DialContext(ctx, "unix", sock)
+			conn, err := d.DialContext(ctx, "unix", sock)
+			if err != nil {
+				return nil, socketError(sock, err)
+			}
+			return conn, nil
 		},
 	}}}
+}
+
+// socketError adds actionable context without losing the underlying dial error.
+func socketError(sock string, err error) error {
+	switch {
+	case errors.Is(err, os.ErrPermission):
+		return fmt.Errorf("permission denied accessing daemon socket %s (daemon status is unknown: the socket or a parent directory is inaccessible; use sudo boxpool <command> for a root daemon, or run as the daemon's user): %w", sock, err)
+	case errors.Is(err, os.ErrNotExist), errors.Is(err, syscall.ECONNREFUSED):
+		return fmt.Errorf("cannot reach the daemon at %s (start it with sudo boxpool up on Linux with systemd, or boxpool daemon in the foreground): %w", sock, err)
+	default:
+		return fmt.Errorf("cannot connect to daemon socket %s: %w", sock, err)
+	}
 }
 
 // Health returns nil when the daemon reports itself healthy.

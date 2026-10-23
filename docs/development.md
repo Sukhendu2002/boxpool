@@ -28,14 +28,14 @@ At the Linux console (or in an existing SSH session):
 
 ```sh
 sudo apt update
-sudo apt install -y openssh-server git golang-go docker.io e2fsprogs
+sudo apt install -y openssh-server git golang-go docker.io e2fsprogs iproute2 nftables
 sudo systemctl enable --now ssh docker
 ```
 
 On Fedora, use these instead:
 
 ```sh
-sudo dnf install -y openssh-server git golang moby-engine docker-cli
+sudo dnf install -y openssh-server git golang moby-engine docker-cli e2fsprogs iproute nftables
 sudo systemctl enable --now sshd docker
 ```
 
