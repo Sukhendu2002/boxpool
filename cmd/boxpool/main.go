@@ -26,7 +26,8 @@ Commands:
   daemon    run the node daemon in the foreground
   doctor    check whether this machine can host sandboxes
   version   print the version
-  up        start a pool on this machine (not implemented yet)
+  up        install and start the daemon as a systemd service (Linux, root)
+  down      stop and disable the daemon's service, keeping its state
   join      join an existing pool (not implemented yet)
   sh        open a shell in a new or existing sandbox
   exec      run a command in a sandbox
@@ -63,7 +64,11 @@ func main() {
 		os.Exit(stop(os.Args[2:]))
 	case "rm":
 		os.Exit(rm(os.Args[2:]))
-	case "up", "join":
+	case "up":
+		os.Exit(up(os.Args[2:]))
+	case "down":
+		os.Exit(down(os.Args[2:]))
+	case "join":
 		fmt.Fprintf(os.Stderr, "boxpool %s: not implemented yet\n", os.Args[1])
 		os.Exit(1)
 	case "help", "--help", "-h":
@@ -76,6 +81,14 @@ func main() {
 
 func doctor() int {
 	r := preflight.Run()
+	printReport(r)
+	if !r.Ready() {
+		return 1
+	}
+	return 0
+}
+
+func printReport(r preflight.Report) {
 	fmt.Printf("boxpool doctor: %s/%s\n\n", r.OS, r.Arch)
 	for _, c := range r.Checks {
 		mark := "✗"
@@ -90,10 +103,6 @@ func doctor() int {
 	if r.Warning != "" {
 		fmt.Printf("Warning: %s\n", r.Warning)
 	}
-	if !r.Ready() {
-		return 1
-	}
-	return 0
 }
 
 func runDaemon() int {

@@ -9,19 +9,39 @@ from anywhere, with no per-minute bills.
 
 > Status: early development. Nothing here is usable yet.
 
-## Planned commands
+## Commands
 
 ```sh
-boxpool up            # start a pool on this machine (head node)
-boxpool join <token>  # add another machine to the pool
+boxpool up            # install and start the daemon on this machine
+boxpool down          # stop the daemon, keeping its state
+boxpool join <token>  # add another machine to the pool (planned)
 boxpool sh            # open a shell in a new sandbox
-boxpool ls            # list nodes and sandboxes
+boxpool exec box -- make test        # run a command in a sandbox
+boxpool cp ./src box:/root/          # copy files in or out
+boxpool ls            # list sandboxes (nodes too, once pools exist)
+boxpool stop box      # stop a sandbox
+boxpool rm box        # delete a sandbox
 boxpool doctor        # check whether this machine can host sandboxes
 ```
 
-Only `boxpool doctor`, `boxpool daemon`, `boxpool sh`, `boxpool exec`,
-`boxpool cp`, `boxpool ls`, `boxpool stop`, `boxpool rm` and
-`boxpool version` work today, on one Linux machine.
+Working today, on one Linux machine: `boxpool doctor`, `boxpool daemon`,
+`boxpool up`, `boxpool down`, `boxpool sh`, `boxpool exec`, `boxpool cp`,
+`boxpool ls`, `boxpool stop`, `boxpool rm` and `boxpool version`. `join` is
+not implemented yet.
+
+`sudo boxpool up` installs the node on a Linux machine with systemd: it
+runs doctor's checks and refuses if they fail, copies the running binary
+to `/usr/local/bin/boxpool`, writes `/etc/systemd/system/boxpool.service`
+(`boxpool daemon` as root, restarted on failure), enables and starts it
+and waits until the daemon answers on `/var/lib/boxpool/boxpool.sock`. The
+first start downloads Firecracker and the guest image, about 60 MB.
+Running it again changes nothing unless the binary or the unit changed, in
+which case it restarts the service. `sudo boxpool down` stops and disables
+the service and keeps `/var/lib/boxpool`. Stopping or restarting the
+service stops only the daemon (`KillMode=process`): running Firecracker
+VMs keep running until the daemon starts again, which today kills them
+(#27 will re-adopt them); Docker sandboxes keep running. On macOS, `up`
+and `down` are not supported yet (#22).
 
 `boxpool daemon` runs the node daemon in the foreground. It creates the state
 directory (below), takes `daemon.lock` there so only one daemon runs per state
