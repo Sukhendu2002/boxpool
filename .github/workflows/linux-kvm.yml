@@ -65,9 +65,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          (cd internal/backend/firecracker && sg kvm -c '"$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 15m -test.run "^TestIntegration$"') | tee "$RUNNER_TEMP/fc.log"
+          (cd internal/backend/firecracker && sg kvm -c '"$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 15m -test.run "^TestIntegration$"') 2>&1 | tee "$RUNNER_TEMP/fc.log"
           grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/fc.log"
-          (cd internal/daemon && sg kvm -c '"$RUNNER_TEMP/daemon.test" -test.v -test.count=1 -test.timeout 10m -test.run "^TestIntegrationSh$/^firecracker$"') | tee "$RUNNER_TEMP/daemon.log"
+          (cd internal/daemon && sg kvm -c '"$RUNNER_TEMP/daemon.test" -test.v -test.count=1 -test.timeout 10m -test.run "^TestIntegrationSh$/^firecracker$"') 2>&1 | tee "$RUNNER_TEMP/daemon.log"
           grep -q -- '--- PASS: TestIntegrationSh/firecracker ' "$RUNNER_TEMP/daemon.log"
           ! grep -q -- '--- SKIP' "$RUNNER_TEMP/fc.log" "$RUNNER_TEMP/daemon.log"
       # Root for taps and nftables; the runner also has Docker's FORWARD DROP policy to coexist with.
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -o pipefail
           cd internal/backend/firecracker
-          sudo --preserve-env=BOXPOOL_TEST_HOME "$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 12m -test.run '^TestIntegrationNetwork$' | tee "$RUNNER_TEMP/network.log"
+          sudo --preserve-env=BOXPOOL_TEST_HOME "$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 12m -test.run '^TestIntegrationNetwork$' 2>&1 | tee "$RUNNER_TEMP/network.log"
           grep -q '^--- PASS: TestIntegrationNetwork ' "$RUNNER_TEMP/network.log"
       - name: Require no Firecracker processes or boxpool taps left
         if: always()
