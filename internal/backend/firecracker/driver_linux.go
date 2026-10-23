@@ -25,6 +25,7 @@ import (
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/artifacts"
 	"boxpool.run/boxpool/internal/backend"
+	"boxpool.run/boxpool/internal/resources"
 	"boxpool.run/boxpool/internal/store"
 )
 
@@ -43,6 +44,7 @@ type Driver struct {
 	consoles                    sync.Map     // sandbox ID → chan closed when its console rotator returns
 	store                       *store.Store // network slots; nil without networking
 	netMu                       sync.Mutex   // held while changing tap devices and firewall rules
+	admission                   *resources.Manager
 }
 
 var _ backend.Driver = (*Driver)(nil)
@@ -66,6 +68,13 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths, st *store.
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
+	state, err := filepath.Abs(stateDir)
+	if err == nil {
+		state, err = filepath.EvalSymlinks(state)
+	}
+	if err != nil {
+		return nil, err
+	}
 	// Absolute and without symlinks, because running matches the API socket
 	// path on firecracker's command line: an alias of the state directory
 	// would not see the VMs started through another.
@@ -75,7 +84,7 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths, st *store.
 	if err != nil {
 		return nil, err
 	}
-	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs, store: st}
+	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs, store: st, admission: &resources.Manager{StateDir: state}}
 	if err := killOrphans(ctx, d.root); err != nil || st == nil {
 		return d, err
 	}
@@ -107,35 +116,51 @@ func killOrphans(ctx context.Context, root string) error {
 
 func (d *Driver) Name() string { return "firecracker" }
 
-// Create copies the base rootfs into a new sandbox directory. Spec.Image is
-// ignored (there is one image) and so is Spec.DiskGB (see apiCalls).
+func (d *Driver) lockSandbox(ctx context.Context, id string) (func(), error) {
+	m := d.admission
+	if m == nil {
+		m = &resources.Manager{StateDir: filepath.Dir(d.root)}
+	}
+	return m.LockSandbox(ctx, "firecracker", id)
+}
+
+// Create reserves capacity and grows a private copy of the base rootfs to
+// Spec.DiskGB GiB. Spec.Image is ignored (there is one image).
 func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
 	if err := validID(id); err != nil {
 		return backend.Sandbox{}, err
 	}
-	if spec.CPUs < 1 || spec.MemoryMB < 1 {
-		return backend.Sandbox{}, fmt.Errorf("sandbox %s: need at least 1 CPU and 1 MiB of memory, got %d and %d", id, spec.CPUs, spec.MemoryMB)
+	var err error
+	if spec, err = spec.WithDefaults(); err != nil {
+		return backend.Sandbox{}, err
 	}
 	l := sandboxLayout(d.root, id)
 	// sun_path holds 108 bytes including the terminating NUL.
 	if len(l.vsock) > 107 {
 		return backend.Sandbox{}, fmt.Errorf("sandbox %s: socket path %s is longer than 107 bytes: use a shorter state directory", id, l.vsock)
 	}
-	if err := os.Mkdir(l.dir, 0700); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return backend.Sandbox{}, fmt.Errorf("sandbox %s already exists", id)
-		}
+	if d.admission == nil {
+		return backend.Sandbox{}, fmt.Errorf("resource admission is not initialized")
+	}
+	unlock, err := d.lockSandbox(ctx, id)
+	if err != nil {
+		return backend.Sandbox{}, err
+	}
+	defer unlock()
+	if _, err := d.admission.Create(ctx, "firecracker", id, spec, int64(spec.DiskGB)<<30); err != nil {
 		return backend.Sandbox{}, err
 	}
 	b, _ := json.Marshal(spec)
-	err := copyRootfs(l.rootfs, d.rootfs)
+	err = copyRootfs(l.rootfs, d.rootfs)
+	if err == nil {
+		err = growRootfs(ctx, l.rootfs, int64(spec.DiskGB)<<30)
+	}
 	if err == nil {
 		// Written last: List and Start ignore a directory without it.
 		err = os.WriteFile(l.spec, b, 0600)
 	}
 	if err != nil {
-		os.RemoveAll(l.dir)
-		return backend.Sandbox{}, fmt.Errorf("create sandbox %s: %w", id, err)
+		return backend.Sandbox{}, fmt.Errorf("create sandbox %s: %w", id, errors.Join(err, os.RemoveAll(l.dir)))
 	}
 	return backend.Sandbox{ID: id, Name: spec.Name, State: backend.StateStopped}, nil
 }
@@ -143,6 +168,14 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 // Start boots the sandbox and returns once its agent answers. Starting a
 // running sandbox does nothing.
 func (d *Driver) Start(ctx context.Context, id string) (err error) {
+	if err := validID(id); err != nil {
+		return err
+	}
+	unlock, err := d.lockSandbox(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	l, spec, err := d.load(id)
 	if err != nil {
 		return err
@@ -311,6 +344,16 @@ func poll(ctx context.Context, l layout, timeout time.Duration, what string, try
 // backend.ErrUncleanStop: the sandbox is stopped, but its disk may be
 // inconsistent.
 func (d *Driver) Stop(ctx context.Context, id string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
+	lockCtx, cancel := cleanupContext(ctx)
+	defer cancel()
+	unlock, err := d.lockSandbox(lockCtx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	l, _, err := d.load(id)
 	if err != nil {
 		return err
@@ -386,12 +429,17 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 	if err := validID(id); err != nil {
 		return err
 	}
-	l := sandboxLayout(d.root, id)
-	if err := kill(ctx, l); err != nil {
-		return err
-	}
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
+	unlock, err := d.lockSandbox(cleanup, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	l := sandboxLayout(d.root, id)
+	if err := kill(cleanup, l); err != nil {
+		return err
+	}
 	d.waitConsole(id)
 	if err := d.stopNetwork(cleanup, id); err != nil {
 		return err

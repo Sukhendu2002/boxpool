@@ -22,7 +22,7 @@ ARG IMAGE_REVISION
 COPY --from=golang /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY image/debian.sources /etc/apt/sources.list.d/debian.sources
 RUN apt-get -o APT::Update::Error-Mode=any update \
-    && apt-get install -y --no-install-recommends tini ca-certificates mount \
+    && apt-get install -y --no-install-recommends tini ca-certificates mount procps \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /dev/pts /dev/shm /proc /sys /run/boxpool /tmp /var/tmp /root \
     && chmod 1777 /tmp /var/tmp \

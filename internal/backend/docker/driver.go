@@ -17,6 +17,7 @@ import (
 
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/backend"
+	"boxpool.run/boxpool/internal/resources"
 )
 
 // Timeouts; tests may shorten them.
@@ -29,9 +30,10 @@ var (
 // sandbox directories, so a new Driver sees, and can use, the sandboxes an
 // earlier one created, including running ones.
 type Driver struct {
-	e      *engine
-	root   string // <state dir>/docker, symlinks resolved; the owner label
-	prefix string // of every resource name
+	e         *engine
+	root      string // <state dir>/docker, symlinks resolved; the owner label
+	prefix    string // of every resource name
+	admission *resources.Manager
 }
 
 var _ backend.Driver = (*Driver)(nil)
@@ -53,23 +55,34 @@ func New(ctx context.Context, stateDir string) (*Driver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newDriver(e, filepath.Join(stateDir, "docker"))
+	d, err := newDriver(e, filepath.Join(stateDir, "docker"))
+	if err == nil {
+		err = d.adopt(ctx)
+	}
+	return d, err
 }
 
 func newDriver(e *engine, root string) (*Driver, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
+	state, err := filepath.Abs(filepath.Dir(root))
+	if err == nil {
+		state, err = filepath.EvalSymlinks(state)
+	}
+	if err != nil {
+		return nil, err
+	}
 	// Absolute and without symlinks: it is the owner label, so an alias of
 	// the state directory must not look like another owner.
-	root, err := filepath.Abs(root)
+	root, err = filepath.Abs(root)
 	if err == nil {
 		root, err = filepath.EvalSymlinks(root)
 	}
 	if err != nil {
 		return nil, err
 	}
-	return &Driver{e: e, root: root, prefix: prefix(root)}, nil
+	return &Driver{e: e, root: root, prefix: prefix(root), admission: &resources.Manager{StateDir: state}}, nil
 }
 
 // Probe reports the Docker Engine's version, or why it cannot be used.
@@ -97,8 +110,8 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 	if err := checkID(id); err != nil {
 		return backend.Sandbox{}, err
 	}
-	if spec.CPUs < 1 || spec.MemoryMB < 1 {
-		return backend.Sandbox{}, fmt.Errorf("sandbox %s: need at least 1 CPU and 1 MiB of memory, got %d and %d", id, spec.CPUs, spec.MemoryMB)
+	if spec, err = spec.WithDefaults(); err != nil {
+		return backend.Sandbox{}, err
 	}
 	image := spec.Image
 	if image == "" {
@@ -113,10 +126,16 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 	if len(l.sock) > 107 {
 		return backend.Sandbox{}, fmt.Errorf("sandbox %s: socket path %s is longer than 107 bytes: use a shorter state directory", id, l.sock)
 	}
-	if err := os.Mkdir(l.dir, 0700); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return backend.Sandbox{}, fmt.Errorf("sandbox %s already exists", id)
-		}
+	if d.admission == nil {
+		return backend.Sandbox{}, fmt.Errorf("resource admission is not initialized")
+	}
+	unlock, err := d.admission.LockSandbox(ctx, "docker", id)
+	if err != nil {
+		return backend.Sandbox{}, err
+	}
+	defer unlock()
+	allocation, err := d.admission.Create(ctx, "docker", id, spec, 0)
+	if err != nil {
 		return backend.Sandbox{}, err
 	}
 	name := d.name(id)
@@ -127,10 +146,16 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 		}
 		cleanup, cancel := cleanupContext(ctx)
 		defer cancel()
+		var cleanupErr error
 		for i := len(made) - 1; i >= 0; i-- {
-			err = errors.Join(err, made[i](cleanup))
+			cleanupErr = errors.Join(cleanupErr, made[i](cleanup))
 		}
-		err = errors.Join(err, os.RemoveAll(l.dir))
+		// A resource may still exist after a failed rollback. Retain its
+		// reservation and transport directory until Remove succeeds.
+		if cleanupErr == nil {
+			cleanupErr = os.RemoveAll(l.dir)
+		}
+		err = errors.Join(err, cleanupErr)
 		err = fmt.Errorf("create sandbox %s: %w", id, err)
 	}()
 	// The container's root has no CAP_DAC_OVERRIDE, so it needs the
@@ -167,6 +192,7 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 	}
 	made = append(made, func(ctx context.Context) error { return d.removeContainer(ctx, id) })
 	cfg := newContainerConfig(d.root, id, spec, image, name, l)
+	cfg.HostConfig.CpusetCpus = allocation.CPUSet()
 	if err := d.e.do(ctx, http.MethodPost, "/containers/create", url.Values{"name": {name}}, cfg, nil); err != nil {
 		return backend.Sandbox{}, err
 	}
@@ -201,15 +227,48 @@ func (d *Driver) ensureImage(ctx context.Context, image, repo, tag string) error
 
 // container is the part of GET /containers/{id}/json the driver reads.
 type container struct {
-	ID     string `json:"Id"`
-	Name   string
-	Config struct{ Labels map[string]string }
-	State  struct {
+	ID         string `json:"Id"`
+	Name       string
+	Config     struct{ Labels map[string]string }
+	HostConfig hostConfig
+	State      struct {
 		Status   string
 		Running  bool
 		ExitCode int
 		Error    string
 	}
+}
+
+// adopt accounts for containers created before resource manifests existed.
+// It only records exact-name, ownership-verified containers, leaving Engine
+// settings and running processes untouched.
+func (d *Driver) adopt(ctx context.Context) error {
+	list, err := d.List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sb := range list {
+		c, err := d.inspect(ctx, sb.ID)
+		if err != nil {
+			return err
+		}
+		h := c.HostConfig
+		if h.NanoCPUs < 1 || h.Memory < 1 {
+			return fmt.Errorf("sandbox %s has no CPU or memory limit; remove it before creating more sandboxes", sb.ID)
+		}
+		cpus, err := resources.ParseCPUSet(h.CpusetCpus)
+		if err != nil {
+			return err
+		}
+		spec := backend.Spec{Name: sb.Name, CPUs: int((h.NanoCPUs-1)/1_000_000_000 + 1), MemoryMB: int((h.Memory-1)/(1<<20) + 1), DiskGB: 10}
+		if spec, err = spec.WithDefaults(); err != nil {
+			return fmt.Errorf("sandbox %s has invalid limits: %w", sb.ID, err)
+		}
+		if err := d.admission.Adopt(ctx, "docker", sb.ID, resources.Allocation{Spec: spec, CPUs: cpus}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // errForeign is returned for a resource with a sandbox's name that this
@@ -247,6 +306,14 @@ func (d *Driver) owns(labels map[string]string, id string) bool {
 // does not answer, the container is stopped again: a failed request may
 // still have started it, if only the answer was lost.
 func (d *Driver) Start(ctx context.Context, id string) error {
+	if err := checkID(id); err != nil {
+		return err
+	}
+	unlock, err := d.admission.LockSandbox(ctx, "docker", id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	c, err := d.inspect(ctx, id)
 	if err != nil {
 		return err
@@ -300,6 +367,14 @@ func (d *Driver) waitAgent(ctx context.Context, id, cid string) error {
 // under /root stay; the tmpfs mounts are emptied. Stopping a stopped
 // sandbox does nothing.
 func (d *Driver) Stop(ctx context.Context, id string) error {
+	if err := checkID(id); err != nil {
+		return err
+	}
+	unlock, err := d.admission.LockSandbox(ctx, "docker", id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	c, err := d.inspect(ctx, id)
 	if err != nil {
 		return err
@@ -326,6 +401,14 @@ func (d *Driver) stop(ctx context.Context, cid string, grace time.Duration) erro
 // so Remove can be repeated after a failure; a resource with the sandbox's
 // name that the driver does not own is an error and is kept.
 func (d *Driver) Remove(ctx context.Context, id string) error {
+	if err := checkID(id); err != nil {
+		return err
+	}
+	unlock, err := d.admission.LockSandbox(ctx, "docker", id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := d.removeContainer(ctx, id); err != nil {
 		return fmt.Errorf("remove sandbox %s: %w", id, err)
 	}

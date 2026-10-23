@@ -16,6 +16,7 @@ import (
 
 	"boxpool.run/boxpool/internal/artifacts"
 	"boxpool.run/boxpool/internal/backend"
+	"boxpool.run/boxpool/internal/resources"
 )
 
 func TestCreateListRemove(t *testing.T) {
@@ -23,9 +24,14 @@ func TestCreateListRemove(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "rootfs.ext4")
 	os.WriteFile(base, []byte("ext4"), 0644)
-	d := &Driver{root: filepath.Join(dir, "sandboxes"), rootfs: base}
+	d := &Driver{root: filepath.Join(dir, "sandboxes"), rootfs: base, admission: &resources.Manager{StateDir: dir, Probe: func(string) (resources.Capacity, error) {
+		return resources.Capacity{CPUs: []int{0, 1, 2, 3}, MemoryMB: 8192, AvailableMB: 8192, DiskBytes: 1 << 40}, nil
+	}}}
+	oldResize := resizeFilesystem
+	resizeFilesystem = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { resizeFilesystem = oldResize })
 	os.Mkdir(d.root, 0700)
-	spec := backend.Spec{Name: "web", CPUs: 1, MemoryMB: 256}
+	spec := backend.Spec{Name: "web", CPUs: 1, MemoryMB: 256, DiskGB: 1}
 
 	sb, err := d.Create(ctx, "abc", spec)
 	if err != nil {
@@ -35,8 +41,15 @@ func TestCreateListRemove(t *testing.T) {
 		t.Errorf("Create returned %+v, want %+v", sb, want)
 	}
 	l := sandboxLayout(d.root, "abc")
-	if b, _ := os.ReadFile(l.rootfs); string(b) != "ext4" {
-		t.Errorf("rootfs copy is %q", b)
+	f, _ := os.Open(l.rootfs)
+	b := make([]byte, 4)
+	f.Read(b)
+	f.Close()
+	if string(b) != "ext4" {
+		t.Errorf("rootfs copy starts %q", b)
+	}
+	if fi, err := os.Stat(l.rootfs); err != nil || fi.Size() != 1<<30 {
+		t.Errorf("disk not resized: %v, %v", fi, err)
 	}
 	if fi, err := os.Stat(l.dir); err != nil || fi.Mode().Perm() != 0700 {
 		t.Errorf("sandbox dir: %v %v", fi.Mode(), err)
@@ -53,8 +66,8 @@ func TestCreateListRemove(t *testing.T) {
 			t.Errorf("Create(%q) succeeded", id)
 		}
 	}
-	if _, err := d.Create(ctx, "nocpu", backend.Spec{MemoryMB: 256}); err == nil {
-		t.Error("Create with 0 CPUs succeeded")
+	if _, err := d.Create(ctx, "nocpu", backend.Spec{CPUs: -1}); err == nil {
+		t.Error("Create with negative CPUs succeeded")
 	}
 	// A failed copy leaves no directory behind.
 	d.rootfs = filepath.Join(dir, "missing")
@@ -81,7 +94,9 @@ func TestCreateListRemove(t *testing.T) {
 		t.Errorf("Pause: %v", err)
 	}
 
-	if err := d.Remove(ctx, "abc"); err != nil {
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := d.Remove(canceled, "abc"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(l.dir); !os.IsNotExist(err) {
@@ -175,6 +190,9 @@ func TestNewThroughSymlink(t *testing.T) {
 	}
 	if d.root != root {
 		t.Errorf("root is %s, want %s", d.root, root)
+	}
+	if d.admission.StateDir != dir {
+		t.Errorf("state alias did not share resource accounting: %s", d.admission.StateDir)
 	}
 	assertKilled(t, exited, ol)
 }

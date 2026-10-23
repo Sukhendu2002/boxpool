@@ -10,6 +10,20 @@ import (
 	"boxpool.run/boxpool/internal/backend/docker"
 )
 
+func TestResizeCheck(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	if c := resizeCheck(); c.OK || !c.Required {
+		t.Fatalf("missing tool: %+v", c)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "resize2fs"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if c := resizeCheck(); !c.OK || !c.Required {
+		t.Fatalf("available tool: %+v", c)
+	}
+}
+
 // BOXPOOL_BACKEND=docker picks Docker, even with KVM, when the engine
 // answers, and the report carries the fallback warning. Without an engine
 // it picks nothing.

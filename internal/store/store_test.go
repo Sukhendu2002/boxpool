@@ -100,6 +100,9 @@ func TestRepository(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if db.Spec.CPUs != 2 || db.Spec.MemoryMB != 2048 || db.Spec.DiskGB != 10 {
+		t.Errorf("stored defaults: %+v", db.Spec)
+	}
 	list, err := s.List(ctx)
 	if err != nil || len(list) != 2 || list[0].ID != web.ID || list[1].ID != db.ID {
 		t.Errorf("List() = %+v, %v; want web then db", list, err)

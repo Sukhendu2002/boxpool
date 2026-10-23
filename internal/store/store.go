@@ -139,11 +139,15 @@ func migrate(db *sql.DB) error {
 
 // Create stores sb under a new ID and returns it with ID and CreatedAt set.
 func (s *Store) Create(ctx context.Context, sb Sandbox) (Sandbox, error) {
+	var err error
+	if sb.Spec, err = sb.Spec.WithDefaults(); err != nil {
+		return Sandbox{}, err
+	}
 	id := make([]byte, 6)
 	rand.Read(id)
 	sb.ID = hex.EncodeToString(id)
 	sb.CreatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sandboxes (id, name, backend, image, cpus, memory_mb, disk_gb, state, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sb.ID, sb.Spec.Name, sb.Backend, sb.Spec.Image, sb.Spec.CPUs, sb.Spec.MemoryMB, sb.Spec.DiskGB,

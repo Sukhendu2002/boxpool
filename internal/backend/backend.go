@@ -7,6 +7,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // ErrNotSupported is returned for operations a backend does not implement.
@@ -24,6 +25,28 @@ type Spec struct {
 	CPUs     int
 	MemoryMB int
 	DiskGB   int
+}
+
+// WithDefaults fills unspecified limits. MemoryMB is in MiB and DiskGB in
+// GiB. Negative limits are invalid; zero means the common backend default.
+func (s Spec) WithDefaults() (Spec, error) {
+	if s.CPUs < 0 || s.MemoryMB < 0 || s.DiskGB < 0 {
+		return s, fmt.Errorf("CPU, memory and disk limits must not be negative")
+	}
+	if s.CPUs == 0 {
+		s.CPUs = 2
+	}
+	if s.MemoryMB == 0 {
+		s.MemoryMB = 2048
+	}
+	if s.DiskGB == 0 {
+		s.DiskGB = 10
+	}
+	// Bound conversions to bytes and Docker's nanocpus without overflow.
+	if int64(s.CPUs) > (1<<63-1)/1_000_000_000 || int64(s.MemoryMB) > (1<<63-1)/(1<<20) || int64(s.DiskGB) > (1<<63-1)/(1<<30) {
+		return s, fmt.Errorf("CPU, memory or disk limit is too large")
+	}
+	return s, nil
 }
 
 // State is a sandbox's lifecycle state.

@@ -28,7 +28,7 @@ At the Linux console (or in an existing SSH session):
 
 ```sh
 sudo apt update
-sudo apt install -y openssh-server git golang-go docker.io
+sudo apt install -y openssh-server git golang-go docker.io e2fsprogs
 sudo systemctl enable --now ssh docker
 ```
 
@@ -322,6 +322,76 @@ and limits.
 The agent socket's defence against symlinks is Linux-only and unit-tested
 without an engine (`dial_linux_test.go`); `go test ./internal/backend/docker/`
 on Linux runs it.
+
+### Sandbox resources
+
+Both drivers and the store default an unspecified Spec to **2 CPUs,
+2048 MiB memory and 10 GiB disk**. Zero selects a default; negative values
+and byte-conversion overflow are rejected. `boxpool sh` and its resource
+flags are wired in #15; these limits already apply to driver Create calls.
+
+Admission leaves **one logical CPU and max(1024 MiB, 10% of host RAM)** for
+the host. CPU admission uses the daemon's allowed CPU affinity. Memory must
+fit Linux `MemAvailable`, minus the host reserve and every existing
+sandbox's full memory commitment. This conservatively counts resident
+sandbox RAM twice, preserving capacity for stopped or idle sandboxes under
+host memory pressure. The budget is not an idle-CPU measurement and cannot
+prevent other host programs from
+using resources after admission. Run the daemon directly on the Linux host.
+
+Every created sandbox, including stopped ones, keeps its reservation until
+Remove. Both backends and concurrent processes with the **same state
+directory** share `resources.lock`; private `resources.json` manifests
+survive restarts. A failed cleanup keeps its manifest until Remove succeeds.
+Per-sandbox files in `resource-locks/` serialize lifecycle changes; keep
+those stable lock files even after a sandbox is removed.
+Keep those files with the sandbox state, and inspect leftover resources
+before removing reservations manually. Corrupt manifests fail admission.
+Use one state directory per node: independent `BOXPOOL_HOME` directories
+do not coordinate their commitments. Existing Firecracker specs and Docker
+containers are accounted for when upgrading. Initialize the Docker backend
+to import legacy Docker limits before switching a state directory to
+Firecracker; unknown Docker allocations fail admission. Existing Docker settings stay
+unchanged until the sandbox is recreated.
+
+Firecracker sets the vCPU count and memory in its machine config, then
+boots a private ext4 rootfs grown to the requested GiB with host
+`resize2fs` (`e2fsprogs`). It refuses shrinking below the base image size.
+Disk admission conservatively charges **the entire disk budget of every
+VM against current free space**, including already allocated blocks. This
+protects future sparse growth and reflink copies at the cost of sometimes
+rejecting early. The cached image stays unchanged. `nproc` matches the CPU
+request; `/proc/meminfo` and `free -m` show usable guest RAM, slightly below
+the configured amount because of the guest kernel's reservations.
+Newly built images include `procps` for `free`; the pinned alpha.1 image
+predates that package, so read `/proc/meminfo` until a new image is released.
+
+Docker sets CPU quota, CPU affinity, memory limit and equal memory-plus-swap
+limit (no swap). `nproc` matches new containers' CPU requests. Its memory
+limit is enforced by cgroups: **`free -m` and `/proc/meminfo` still show
+host memory**. This is documented rather than adding `/proc` virtualization.
+On cgroup v2, verify from inside the sandbox:
+
+```sh
+nproc                         # 1 for CPUs: 1
+cat /sys/fs/cgroup/memory.max   # 536870912 for MemoryMB: 512
+cat /sys/fs/cgroup/cpu.max      # quota == period for one CPU
+```
+
+Docker disk size is a **documented limitation**: a plain named volume has
+no portable per-volume quota. `DiskGB` is recorded but is advisory; Docker
+disk growth is neither bounded nor reserved. Monitor the Docker Engine's
+data filesystem. No host mounts or quota configuration are added.
+
+Tests: `go test -race ./internal/resources ./internal/backend/...` covers
+defaults, capacity boundaries, memory pressure, stopped/legacy allocations,
+concurrent creates, restart accounting, rollback and removal. Linux also
+exercises real ext4 growth when e2fsprogs is installed. The existing
+Firecracker integration test requests 1 CPU, 512 MiB and 1 GiB and verifies
+agent-visible CPU, memory, block-device and filesystem sizes. The Docker
+integration test verifies 1 CPU/512 MiB in Engine inspect and from inside
+the memory/CPU cgroups. Both reject an excessive memory request before
+creating resources.
 
 To run it on every `git push`, enable the repo's hooks once:
 

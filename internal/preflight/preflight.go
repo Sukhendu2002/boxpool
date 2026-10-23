@@ -125,7 +125,20 @@ func linuxChecks() ([]Check, string) {
 	if force != nil {
 		checks = append(checks, *force)
 	}
+	if backend == "firecracker" {
+		checks = append(checks, resizeCheck())
+	}
 	return checks, backend
+}
+
+func resizeCheck() Check {
+	c := Check{Name: "resize2fs", Required: true}
+	if path, err := exec.LookPath("resize2fs"); err == nil {
+		c.OK, c.Detail = true, path
+	} else {
+		c.Detail = "missing: install e2fsprogs to size sandbox disks"
+	}
+	return c
 }
 
 // pickBackend returns the backend for a machine with or without usable KVM

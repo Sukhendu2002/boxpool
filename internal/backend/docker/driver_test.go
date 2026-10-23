@@ -139,8 +139,9 @@ func TestCreateRefuses(t *testing.T) {
 	}{
 		{"abc", spec}, // a duplicate
 		{"", spec}, {"..", spec}, {"a/b", spec},
-		{"x", backend.Spec{MemoryMB: 256}},
-		{"x", backend.Spec{CPUs: 1}},
+		{"x", backend.Spec{CPUs: -1}},
+		{"x", backend.Spec{MemoryMB: -1}},
+		{"x", backend.Spec{DiskGB: -1}},
 		{"x", backend.Spec{CPUs: 1, MemoryMB: 1, Image: "debian"}}, // the mutable latest tag
 		{strings.Repeat("x", 64), spec},                            // too long a socket path below a long root
 	} {
@@ -273,8 +274,12 @@ func TestCreateRollback(t *testing.T) {
 			if c.want == errForeign.Error() && f.volumes[d.name("abc")][labelOwner] != "/elsewhere" && f.networks[d.name("abc")].labels[labelOwner] != "/elsewhere" {
 				t.Errorf("the foreign resource is gone: %v %v", f.volumes, f.networks)
 			}
-			if _, err := os.Stat(sandboxLayout(d.root, "abc").dir); !errors.Is(err, fs.ErrNotExist) {
-				t.Errorf("failed Create left its directory: %v", err)
+			_, statErr := os.Stat(sandboxLayout(d.root, "abc").dir)
+			if c.left == 0 && !errors.Is(statErr, fs.ErrNotExist) {
+				t.Errorf("successful rollback left directory: %v", statErr)
+			}
+			if c.left != 0 && statErr != nil {
+				t.Errorf("failed rollback lost reservation: %v", statErr)
 			}
 			// Newest first: the container holds the network and the volume.
 			var order []string

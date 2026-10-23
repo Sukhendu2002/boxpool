@@ -85,6 +85,10 @@ func check(ctx context.Context, socket, version string) error {
 test -t 0
 test -r /proc/net/tcp
 test -r /proc/net/tcp6
+test "$(nproc)" -eq 1
+memory=$(free -m)
+printf '%s\n' "$memory"
+printf '%s\n' "$memory" | awk '/^Mem:/ {found=1; if ($2 < 409 || $2 > 512) exit 1} END {if (!found) exit 1}'
 dev_mounts=0
 while read -r _ target fstype options _; do
     test "$target" = /dev || continue
