@@ -7,6 +7,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/klauspost/compress v1.19.2
 	golang.org/x/sys v0.37.0
+	golang.org/x/term v0.36.0
 	modernc.org/sqlite v1.46.1
 )
 

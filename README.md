@@ -19,7 +19,8 @@ boxpool ls            # list nodes and sandboxes
 boxpool doctor        # check whether this machine can host sandboxes
 ```
 
-Only `boxpool doctor`, `boxpool daemon` and `boxpool version` work today.
+Only `boxpool doctor`, `boxpool daemon`, `boxpool sh` and `boxpool version`
+work today, on one Linux machine.
 
 `boxpool daemon` runs the node daemon in the foreground. It creates the state
 directory (below), takes `daemon.lock` there so only one daemon runs per state
@@ -32,6 +33,22 @@ BOXPOOL_HOME=$(mktemp -d) ./bin/boxpool daemon &
 curl --unix-socket "$BOXPOOL_HOME/boxpool.sock" http://x/v1/health   # {"ok":true}
 curl --unix-socket "$BOXPOOL_HOME/boxpool.sock" http://x/v1/info
 ```
+
+On Linux the daemon opens the backend doctor picks: Firecracker, after
+downloading its pinned artifacts into `artifacts/` in the state directory
+(about 60 MB the first time), or Docker with a warning. Firecracker
+sandboxes get a network only when the daemon runs as root. With no backend,
+the sandbox endpoints answer 503.
+
+`boxpool sh [--name N] [--cpu N] [--mem 2g] [--disk 10g] [--timing]` asks the
+daemon for a sandbox (a new one with a generated name, or the one called
+`N`), starts it if needed and opens `bash -l` in it on your terminal.
+`boxpool sh <name>` attaches to an existing sandbox. Leaving the shell
+(`exit`, Ctrl-D) leaves the sandbox running; `--timing` prints the time to
+the first prompt. The daemon's API for this is `POST /v1/sandboxes`
+(idempotent on `name`), `GET /v1/sandboxes/{name}` and the WebSocket
+`GET /v1/sandboxes/{name}/exec`, which relays the agent's exec protocol
+unchanged.
 
 `boxpool version` also prints the daemon's version when one is running.
 

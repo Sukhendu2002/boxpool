@@ -8,7 +8,7 @@ Use a Linux x86_64 or aarch64 machine for the Linux backends. Start with a
 spare machine on your LAN; use a nested VM for convenience, or cloud hardware
 as a last resort. Windows hosts and automated provisioning are out of scope.
 
-Only `doctor` and `version` work today. `Backend: firecracker` means doctor
+`Backend: firecracker` means doctor
 could open `/dev/kvm` for reading and writing; it does not boot a microVM or
 check for a Firecracker executable. Without KVM, doctor picks `Backend:
 docker`, the fallback, when the Docker Engine API answers on
@@ -234,6 +234,18 @@ It downloads the artifacts once into `~/.cache/boxpool-test` (override with
 `BOXPOOL_TEST_HOME`) and keeps them between runs. Because that directory is
 fixed, a run you interrupt leaves its VM behind, and the next run kills it.
 Without `/dev/kvm` the test skips.
+
+`TestIntegrationSh` runs commands through a real daemon, as `boxpool sh`
+does, on each backend, with a temporary state directory that links to the
+same artifact cache:
+
+```sh
+go test -tags integration -v -run TestIntegrationSh ./internal/daemon/
+```
+
+Its Firecracker case skips without `/dev/kvm`, its Docker case without a
+reachable engine (or fails, with `BOXPOOL_TEST_REQUIRE_DOCKER=1`). Each
+removes its sandbox afterwards.
 
 The networking test (`TestIntegrationNetwork`) needs root, since it creates
 tap devices and firewall rules; without root it skips. Build the test binary

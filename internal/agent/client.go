@@ -66,6 +66,12 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest, stdout, stderr io.Wr
 	if err != nil {
 		return nil, err
 	}
+	return Start(ctx, conn, req, stdout, stderr)
+}
+
+// Start runs an exec session on conn, an open exec WebSocket to an agent or
+// to something that relays one, such as the daemon. The session owns conn.
+func Start(ctx context.Context, conn *websocket.Conn, req ExecRequest, stdout, stderr io.Writer) (*Session, error) {
 	b, err := json.Marshal(req)
 	if err == nil {
 		err = conn.Write(ctx, websocket.MessageText, b)

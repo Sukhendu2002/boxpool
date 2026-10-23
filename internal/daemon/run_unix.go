@@ -21,8 +21,10 @@ import (
 var shutdownTimeout = 5 * time.Second
 
 // Run creates the state directory, takes the daemon lock, opens the sandbox
-// store and serves the API on the socket in dir until ctx is cancelled. Only
-// one daemon may run per state directory.
+// store and the backend named by info.Backend (on Linux: firecracker or
+// docker; any other name serves no backend) and serves the API on the
+// socket in dir until ctx is cancelled. Only one daemon may run per state
+// directory.
 func Run(ctx context.Context, dir string, info Info) error {
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err
@@ -51,6 +53,10 @@ func Run(ctx context.Context, dir string, info Info) error {
 		return err
 	}
 	defer st.Close()
+	d, err := openDriver(ctx, dir, &info, st)
+	if err != nil {
+		return fmt.Errorf("open the %s backend: %w", info.Backend, err)
+	}
 
 	sock := filepath.Join(dir, SocketName)
 	// Holding the lock means any socket file here was left by a crashed daemon.
@@ -68,7 +74,7 @@ func Run(ctx context.Context, dir string, info Info) error {
 		return err
 	}
 
-	srv := &http.Server{Handler: Handler(info)}
+	srv := &http.Server{Handler: Handler(info, st, d)}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(l) }()
 	slog.Info("daemon started", "socket", sock, "version", info.Version, "backend", info.Backend)

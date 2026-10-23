@@ -3,3 +3,5 @@
 package daemon
 
 var ShutdownTimeout = &shutdownTimeout
+
+var OpenDriver = openDriver
