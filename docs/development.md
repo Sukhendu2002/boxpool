@@ -223,6 +223,14 @@ included) to your Linux machine over SSH and runs vet, tests, a build and
 needs `rsync`, Go on `PATH` or in `~/.local/go`, and read/write access to
 `/dev/kvm` for your user.
 
+CI runs the Firecracker integration tests on every PR and push to `main`
+in the `integration` job of the [Linux KVM workflow](../.github/workflows/linux-kvm.yml):
+the driver and `boxpool sh` tests unprivileged, then the networking test as
+root (GitHub's runners have passwordless sudo and Docker's `FORWARD` DROP
+policy). It fails if a test skips or leaves a `firecracker` process or `bp-*`
+tap behind, and uploads the logs on failure. The Docker tests run in the
+[Docker fallback workflow](../.github/workflows/docker.yml).
+
 The Firecracker driver's integration test boots real VMs and is behind a
 build tag. On a machine with `/dev/kvm`:
 
