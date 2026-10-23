@@ -1,0 +1,33 @@
+#!/bin/sh
+# VM-only init. Docker starts tini directly and never runs this setup.
+set -eu
+# The kernel starts init with no PATH (and HOME=/); match the Docker image so
+# the agent can find commands. Keep a caller's PATH for the stubbed init test.
+export PATH="${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}" HOME=/root
+mount -t proc -o nosuid,nodev,noexec proc /proc
+# The pinned kernel mounts devtmpfs before starting init. Verify that contract
+# before remounting: remount alone does not check the existing filesystem type.
+dev_mounted=false
+while read -r _ target fstype _; do
+    [ "$target" = /dev ] || continue
+    [ "$fstype" = devtmpfs ] || { echo 'init: /dev must be devtmpfs' >&2; exit 1; }
+    dev_mounted=true
+done < /proc/mounts
+[ "$dev_mounted" = true ] || { echo 'init: kernel did not mount /dev' >&2; exit 1; }
+mount -t devtmpfs -o remount,nosuid devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+ln -s /proc/self/fd /dev/fd
+ln -s /proc/self/fd/0 /dev/stdin
+ln -s /proc/self/fd/1 /dev/stdout
+ln -s /proc/self/fd/2 /dev/stderr
+mount -t sysfs -o nosuid,nodev,noexec sysfs /sys
+mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
+mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts /dev/pts
+ln -sf pts/ptmx /dev/ptmx
+mkdir -p /run/boxpool
+cd /root
+# tini becomes PID 1, reaps adopted orphans and forwards signals to the agent
+# process group. The agent remains the only service; failure is fail-fast.
+exec /usr/bin/tini -g -- /usr/local/bin/boxpool-agent --listen vsock:1024

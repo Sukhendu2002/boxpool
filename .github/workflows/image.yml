@@ -1,0 +1,170 @@
+name: Guest image
+
+on:
+  pull_request:
+    paths:
+      - 'image/**'
+      - 'cmd/boxpool-agent/**'
+      - 'internal/agent/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.dockerignore'
+      - '.github/workflows/image.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'image/**'
+      - 'cmd/boxpool-agent/**'
+      - 'internal/agent/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.dockerignore'
+      - '.github/workflows/image.yml'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guest-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Select version and validate release source
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        shell: bash
+        run: |
+          if [[ $GITHUB_EVENT_NAME == release ]]; then
+            [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?$ ]]
+            git merge-base --is-ancestor HEAD origin/main
+            version=$RELEASE_TAG
+          else
+            version=0.0.0-dev.${GITHUB_SHA:0:12}
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Validate image scripts and workflows
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck zstd
+          shellcheck image/*.sh image/init
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/image.yml
+          go test ./image/...
+      - name: Build native image and kernel
+        env:
+          IMAGE_VERSION: ${{ steps.version.outputs.value }}
+          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
+        run: image/build.sh "${{ matrix.arch }}"
+      - name: Check exact OCI image without privileges
+        env:
+          IMAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: image/test-oci.sh "boxpool-image:$IMAGE_VERSION-${{ matrix.arch }}" "$IMAGE_VERSION"
+      - name: Grant amd64 runner access to KVM
+        if: matrix.arch == 'amd64'
+        run: |
+          test -c /dev/kvm
+          sudo groupadd -f kvm
+          sudo usermod -aG kvm "$(id -un)"
+          sudo chgrp kvm /dev/kvm
+          sudo chmod 0660 /dev/kvm
+      - name: Boot the built amd64 image and exercise vsock agent
+        if: matrix.arch == 'amd64'
+        env:
+          IMAGE_VERSION: ${{ steps.version.outputs.value }}
+          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
+        run: |
+          # Expand exported variables in the child shell started by sg.
+          # shellcheck disable=SC2016
+          sg kvm -c 'image/smoke.sh "$OUTPUT_DIR/current" "$IMAGE_VERSION"'
+      - name: Record artifact sizes and checksums
+        env:
+          ARCH: ${{ matrix.arch }}
+          IMAGE_VERSION: ${{ steps.version.outputs.value }}
+          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
+        shell: bash
+        run: |
+          cd "$OUTPUT_DIR/current"
+          sha256sum -c "SHA256SUMS-$ARCH"
+          sha256sum -c "oci-$ARCH.tar.sha256"
+          {
+            echo "### $IMAGE_VERSION / $ARCH"
+            echo "Compressed rootfs: $(stat -c %s "rootfs-$ARCH.ext4.zst") bytes"
+            echo '```text'
+            cat "SHA256SUMS-$ARCH"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-image-${{ matrix.arch }}
+          path: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}/current/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: guest-image-*
+          path: artifacts
+          merge-multiple: true
+      - name: Publish the tested images and release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.event.release.tag_name }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          mkdir release
+          registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/boxpool-image
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for arch in amd64 arm64; do
+            sha256sum -c "SHA256SUMS-$arch"
+            sha256sum -c "oci-$arch.tar.sha256"
+            grep -Fx "version=$VERSION" "image-$arch.txt"
+            docker load -i "oci-$arch.tar"
+            image=boxpool-image:$VERSION-$arch
+            test "$(docker image inspect -f '{{.Architecture}}' "$image")" = "$arch"
+            docker tag "$image" "$registry:$VERSION-$arch"
+            docker push "$registry:$VERSION-$arch"
+            cp "SHA256SUMS-$arch" release/
+            while read -r checksum file; do
+              test -n "$checksum"
+              cp "$file" release/
+            done < "SHA256SUMS-$arch"
+          done
+          docker buildx imagetools create --tag "$registry:$VERSION" \
+            "$registry:$VERSION-amd64" "$registry:$VERSION-arm64"
+          cat SHA256SUMS-amd64 SHA256SUMS-arm64 > release/SHA256SUMS
+          gh release upload "$VERSION" release/*
