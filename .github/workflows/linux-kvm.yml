@@ -38,3 +38,61 @@ jobs:
           sg kvm -c 'id && ./bin/boxpool doctor' | tee "$RUNNER_TEMP/boxpool-doctor.log"
           grep -Eq '✓ /dev/kvm[[:space:]]+present and accessible' "$RUNNER_TEMP/boxpool-doctor.log"
           grep -Fxq 'Backend: firecracker' "$RUNNER_TEMP/boxpool-doctor.log"
+
+  integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      # Short: sandbox sockets live under it and unix socket paths are limited.
+      BOXPOOL_TEST_HOME: /tmp/boxpool-it
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Grant the runner KVM group access
+        run: |
+          sudo groupadd -f kvm
+          sudo usermod -aG kvm "$(id -un)"
+          sudo chgrp kvm /dev/kvm
+          sudo chmod 0660 /dev/kvm
+      - name: Build the integration tests
+        run: |
+          go test -c -tags integration -o "$RUNNER_TEMP/fc.test" ./internal/backend/firecracker
+          go test -c -tags integration -o "$RUNNER_TEMP/daemon.test" ./internal/daemon
+      # Unprivileged first: it fetches and prepares the artifacts the root run reuses.
+      - name: Firecracker driver and boxpool sh, unprivileged
+        shell: bash
+        run: |
+          set -o pipefail
+          (cd internal/backend/firecracker && sg kvm -c '"$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 15m -test.run "^TestIntegration$"') 2>&1 | tee "$RUNNER_TEMP/fc.log"
+          grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/fc.log"
+          (cd internal/daemon && sg kvm -c '"$RUNNER_TEMP/daemon.test" -test.v -test.count=1 -test.timeout 10m -test.run "^TestIntegrationSh$/^firecracker$"') 2>&1 | tee "$RUNNER_TEMP/daemon.log"
+          grep -q -- '--- PASS: TestIntegrationSh/firecracker ' "$RUNNER_TEMP/daemon.log"
+          ! grep -q -- '--- SKIP' "$RUNNER_TEMP/fc.log" "$RUNNER_TEMP/daemon.log"
+      # Root for taps and nftables; the runner also has Docker's FORWARD DROP policy to coexist with.
+      - name: Firecracker networking, as root
+        shell: bash
+        run: |
+          set -o pipefail
+          cd internal/backend/firecracker
+          sudo --preserve-env=BOXPOOL_TEST_HOME "$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 12m -test.run '^TestIntegrationNetwork$' 2>&1 | tee "$RUNNER_TEMP/network.log"
+          grep -q '^--- PASS: TestIntegrationNetwork ' "$RUNNER_TEMP/network.log"
+      - name: Require no Firecracker processes or boxpool taps left
+        if: always()
+        shell: bash
+        run: |
+          if pgrep -a firecracker; then exit 1; fi
+          if ip -br link | grep '^bp-'; then exit 1; fi
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          cp "$RUNNER_TEMP"/*.log "$RUNNER_TEMP/logs/" 2>/dev/null || true
+          sudo find "$BOXPOOL_TEST_HOME" -name '*.log*' -exec cp --parents {} "$RUNNER_TEMP/logs/" \; || true
+          sudo chown -R "$(id -u)" "$RUNNER_TEMP/logs"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: firecracker-integration-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/logs
