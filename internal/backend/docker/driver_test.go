@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -55,6 +56,9 @@ func TestLifecycle(t *testing.T) {
 	}
 	if err := d.Start(ctx, "abc"); err != nil {
 		t.Errorf("second Start: %v", err)
+	}
+	if cid := f.containers[name].id; f.count("POST /containers/"+cid+"/start") != 1 || f.count("POST /containers/"+cid+"/stop") != 0 {
+		t.Errorf("second Start sent %q", f.requests)
 	}
 	c := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, "abc") })
 	defer c.CloseIdleConnections()
@@ -183,43 +187,107 @@ func TestCreateExisting(t *testing.T) {
 }
 
 func TestCreateRollback(t *testing.T) {
-	for _, c := range []struct {
-		name  string
-		setup func(f *fakeEngine, cancel context.CancelFunc)
-	}{
-		{"pull fails", func(f *fakeEngine, _ context.CancelFunc) { f.pullable = nil }},
-		{"volume fails", func(f *fakeEngine, _ context.CancelFunc) { f.fail["POST /volumes/create"] = 500 }},
-		{"network fails", func(f *fakeEngine, _ context.CancelFunc) { f.fail["POST /networks/create"] = 500 }},
-		{"container fails", func(f *fakeEngine, _ context.CancelFunc) { f.fail["POST /containers/create"] = 500 }},
-		{"cancelled during container create", func(f *fakeEngine, cancel context.CancelFunc) {
-			// The caller gives up once the engine has the container: the
-			// cleanup must still remove it, its network and its volume.
+	// cancelAt cancels the caller once the engine has handled req, before
+	// the answer goes out.
+	cancelAt := func(req string) func(*fakeEngine, string, context.CancelFunc) {
+		return func(f *fakeEngine, _ string, cancel context.CancelFunc) {
 			f.hook = func(method, path string) {
-				if method+" "+path == "POST /containers/create" {
+				if method+" "+path == req {
 					cancel()
 					time.Sleep(50 * time.Millisecond)
 				}
 			}
-		}},
+		}
+	}
+	lose := func(req string) func(*fakeEngine, string, context.CancelFunc) {
+		return func(f *fakeEngine, _ string, _ context.CancelFunc) { f.lose[req] = true }
+	}
+	foreign := map[string]string{labelOwner: "/elsewhere", labelSandbox: "abc"}
+	for _, c := range []struct {
+		name  string
+		setup func(f *fakeEngine, name string, cancel context.CancelFunc)
+		want  string // in the error, besides the failure itself
+		left  int    // resources the rollback must keep
+	}{
+		{name: "pull fails", setup: func(f *fakeEngine, _ string, _ context.CancelFunc) { f.pullable = nil }},
+		{name: "volume fails", setup: func(f *fakeEngine, _ string, _ context.CancelFunc) { f.fail["POST /volumes/create"] = 500 }},
+		{name: "network fails", setup: func(f *fakeEngine, _ string, _ context.CancelFunc) { f.fail["POST /networks/create"] = 500 }},
+		{name: "container fails", setup: func(f *fakeEngine, _ string, _ context.CancelFunc) { f.fail["POST /containers/create"] = 500 }},
+		// The engine makes the resource but the caller gives up, or the
+		// answer is lost: the cleanup must still remove it and the rest.
+		{name: "cancelled during volume create", setup: cancelAt("POST /volumes/create")},
+		{name: "cancelled during network create", setup: cancelAt("POST /networks/create")},
+		{name: "cancelled during container create", setup: cancelAt("POST /containers/create")},
+		{name: "volume answer lost", setup: lose("POST /volumes/create")},
+		{name: "network answer lost", setup: lose("POST /networks/create")},
+		{name: "container answer lost", setup: lose("POST /containers/create")},
+		// What the cleanup cannot remove stays, and the error says so.
+		{name: "volume cleanup fails", setup: func(f *fakeEngine, name string, _ context.CancelFunc) {
+			f.lose["POST /volumes/create"] = true
+			f.fail["DELETE /volumes/"+name] = 500
+		}, want: "injected failure", left: 1},
+		{name: "network cleanup fails", setup: func(f *fakeEngine, name string, _ context.CancelFunc) {
+			f.lose["POST /networks/create"] = true
+			f.fail["DELETE /networks/net"+name] = 500
+		}, want: "injected failure", left: 1},
+		// Another's resource that appears after the check is never removed.
+		{name: "foreign volume appears", setup: func(f *fakeEngine, name string, _ context.CancelFunc) {
+			f.fail["POST /volumes/create"] = 500
+			f.hook = func(method, path string) {
+				if method+" "+path == "GET /volumes/"+name {
+					f.mu.Lock()
+					f.volumes[name] = foreign
+					f.mu.Unlock()
+				}
+			}
+		}, want: errForeign.Error(), left: 1},
+		{name: "foreign network appears", setup: func(f *fakeEngine, name string, _ context.CancelFunc) {
+			f.hook = func(method, path string) {
+				if method+" "+path == "GET /networks/"+name {
+					f.mu.Lock()
+					f.networks[name] = fakeNetwork{id: "n1", labels: foreign}
+					f.mu.Unlock()
+				}
+			}
+		}, want: errForeign.Error(), left: 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			f := newFakeEngine(t)
 			d := f.driver(context.Background(), f.serve())
-			c.setup(f, cancel)
-			if _, err := d.Create(ctx, "abc", spec); err == nil {
+			c.setup(f, d.name("abc"), cancel)
+			_, err := d.Create(ctx, "abc", spec)
+			if err == nil {
 				t.Fatal("Create succeeded")
-			} else {
-				t.Log(err)
+			}
+			t.Log(err)
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error does not say %q", c.want)
 			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			if len(f.containers)+len(f.networks)+len(f.volumes) != 0 {
-				t.Errorf("failed Create left %v %v %v", f.containers, f.networks, f.volumes)
+			if n := len(f.containers) + len(f.networks) + len(f.volumes); n != c.left {
+				t.Errorf("failed Create left %v %v %v, want %d", f.containers, f.networks, f.volumes, c.left)
+			}
+			if c.want == errForeign.Error() && f.volumes[d.name("abc")][labelOwner] != "/elsewhere" && f.networks[d.name("abc")].labels[labelOwner] != "/elsewhere" {
+				t.Errorf("the foreign resource is gone: %v %v", f.volumes, f.networks)
 			}
 			if _, err := os.Stat(sandboxLayout(d.root, "abc").dir); !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("failed Create left its directory: %v", err)
+			}
+			// Newest first: the container holds the network and the volume.
+			var order []string
+			for _, r := range f.requests {
+				if kind, ok := strings.CutPrefix(r, "DELETE /"); ok {
+					order = append(order, strings.SplitN(kind, "/", 2)[0])
+				}
+			}
+			if !slices.IsSortedFunc(order, func(a, b string) int {
+				rank := map[string]int{"containers": 0, "networks": 1, "volumes": 2}
+				return rank[a] - rank[b]
+			}) {
+				t.Errorf("cleanup deleted in the order %q", order)
 			}
 		})
 	}
@@ -303,29 +371,72 @@ func TestStateDirsIndependent(t *testing.T) {
 func TestStartFailure(t *testing.T) {
 	defer func(old time.Duration) { agentTimeout = old }(agentTimeout)
 	agentTimeout = 300 * time.Millisecond
-	ctx := context.Background()
+	// atStart runs fn once the engine has started the container, before
+	// the answer goes out.
+	atStart := func(fn func(f *fakeEngine, name string, cancel context.CancelFunc)) func(*fakeEngine, string, string, context.CancelFunc) {
+		return func(f *fakeEngine, name, cid string, cancel context.CancelFunc) {
+			f.hook = func(method, path string) {
+				if method+" "+path == "POST /containers/"+cid+"/start" {
+					fn(f, name, cancel)
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}
+	}
 	for _, c := range []struct {
-		name string
-		set  func(f *fakeEngine, cid string)
-		want string
+		name    string
+		set     func(f *fakeEngine, name, cid string, cancel context.CancelFunc)
+		want    string
+		running bool // the sandbox's container after the failed Start
 	}{
-		{"exits", func(f *fakeEngine, _ string) { f.exitOnStart = true }, "exited with status 127"},
-		{"no agent", func(f *fakeEngine, _ string) { f.noAgent = true }, "waiting for the guest agent"},
-		{"engine refuses", func(f *fakeEngine, cid string) { f.fail["POST /containers/"+cid+"/start"] = 500 }, "injected failure"},
+		{name: "exits", set: func(f *fakeEngine, _, _ string, _ context.CancelFunc) { f.exitOnStart = true }, want: "exited with status 127"},
+		{name: "no agent", set: func(f *fakeEngine, _, _ string, _ context.CancelFunc) { f.noAgent = true }, want: "waiting for the guest agent"},
+		{name: "engine refuses", set: func(f *fakeEngine, _, cid string, _ context.CancelFunc) {
+			f.fail["POST /containers/"+cid+"/start"] = 500
+		}, want: "injected failure"},
+		// The engine starts the container, but the caller gives up or the
+		// answer is lost: the container must not be left running.
+		{name: "cancelled once started", set: atStart(func(_ *fakeEngine, _ string, cancel context.CancelFunc) { cancel() }), want: "context canceled"},
+		{name: "start answer lost", set: func(f *fakeEngine, _, cid string, _ context.CancelFunc) {
+			f.lose["POST /containers/"+cid+"/start"] = true
+		}, want: "EOF"},
+		{name: "stop after a lost answer fails", set: func(f *fakeEngine, _, cid string, _ context.CancelFunc) {
+			f.lose["POST /containers/"+cid+"/start"] = true
+			f.fail["POST /containers/"+cid+"/stop"] = 500
+		}, want: "injected failure", running: true},
+		// Meanwhile the name went to another's container: only the one
+		// Start inspected, by ID, is stopped.
+		{name: "name reused", set: atStart(func(f *fakeEngine, name string, cancel context.CancelFunc) {
+			cancel()
+			f.mu.Lock()
+			f.containers["renamed"] = f.containers[name]
+			f.containers[name] = &fakeContainer{id: "foreign", running: true}
+			f.mu.Unlock()
+		}), want: "context canceled"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			f := newFakeEngine(t)
 			d := f.driver(ctx, f.serve())
 			if _, err := d.Create(ctx, "abc", spec); err != nil {
 				t.Fatal(err)
 			}
-			c.set(f, f.containers[d.name("abc")].id)
+			name := d.name("abc")
+			cid := f.containers[name].id
+			c.set(f, name, cid, cancel)
 			err := d.Start(ctx, "abc")
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("Start: %v, want %q", err, c.want)
 			}
-			if f.containers[d.name("abc")].running {
-				t.Error("failed Start left the container running")
+			t.Log(err)
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if _, own := f.container(cid); own.running != c.running {
+				t.Errorf("after the failed Start the container runs: %v, want %v", own.running, c.running)
+			}
+			if other := f.containers[name]; other.id == "foreign" && (!other.running || slices.Contains(f.requests, "POST /containers/foreign/stop")) {
+				t.Error("the failed Start touched another's container")
 			}
 		})
 	}

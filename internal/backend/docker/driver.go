@@ -151,18 +151,20 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 			return backend.Sandbox{}, err
 		}
 	}
+	// Each undo step goes in before its request: even a failed request may
+	// have created the resource, if only the answer was lost. The steps
+	// check the name and labels, so they never remove another's resource.
+	made = append(made, func(ctx context.Context) error { return d.removeVolume(ctx, id) })
 	if err := d.e.do(ctx, http.MethodPost, "/volumes/create", nil, map[string]any{"Name": name, "Labels": labels(d.root, id)}, nil); err != nil {
 		return backend.Sandbox{}, err
 	}
-	made = append(made, func(ctx context.Context) error { return d.removeVolume(ctx, id) })
+	made = append(made, func(ctx context.Context) error { return d.removeNetwork(ctx, id) })
 	err = d.e.do(ctx, http.MethodPost, "/networks/create", nil, map[string]any{
 		"Name": name, "Driver": "bridge", "Labels": labels(d.root, id), "CheckDuplicate": true,
 	}, nil)
 	if err != nil {
 		return backend.Sandbox{}, err
 	}
-	made = append(made, func(ctx context.Context) error { return d.removeNetwork(ctx, id) })
-	// Even a failed request may have created it, if only the answer was lost.
 	made = append(made, func(ctx context.Context) error { return d.removeContainer(ctx, id) })
 	cfg := newContainerConfig(d.root, id, spec, image, name, l)
 	if err := d.e.do(ctx, http.MethodPost, "/containers/create", url.Values{"name": {name}}, cfg, nil); err != nil {
@@ -241,8 +243,9 @@ func (d *Driver) owns(labels map[string]string, id string) bool {
 }
 
 // Start starts the container and returns once its agent answers. Starting
-// a running sandbox does nothing. If the agent does not answer, the
-// container is stopped again.
+// a running sandbox does nothing. If the start request fails or the agent
+// does not answer, the container is stopped again: a failed request may
+// still have started it, if only the answer was lost.
 func (d *Driver) Start(ctx context.Context, id string) error {
 	c, err := d.inspect(ctx, id)
 	if err != nil {
@@ -251,11 +254,16 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	if c.State.Running {
 		return nil
 	}
+	// By ID, which the inspect checked the owner of: the name could be
+	// another container's by now.
 	err = d.e.do(ctx, http.MethodPost, "/containers/"+c.ID+"/start", nil, nil, nil)
-	if err != nil && !statusIs(err, http.StatusNotModified) {
-		return fmt.Errorf("start sandbox %s: %w", id, err)
+	if statusIs(err, http.StatusNotModified) {
+		err = nil
 	}
-	if err = d.waitAgent(ctx, id, c.ID); err != nil {
+	if err == nil {
+		err = d.waitAgent(ctx, id, c.ID)
+	}
+	if err != nil {
 		cleanup, cancel := cleanupContext(ctx)
 		defer cancel()
 		err = errors.Join(err, d.stop(cleanup, c.ID, 0))
@@ -439,7 +447,7 @@ func (d *Driver) Dial(ctx context.Context, id string) (net.Conn, error) {
 	if err := checkID(id); err != nil {
 		return nil, err
 	}
-	return (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", sandboxLayout(d.root, id).sock)
+	return dialSocket(ctx, sandboxLayout(d.root, id).sock)
 }
 
 func (d *Driver) agent(id string) *agent.Client {

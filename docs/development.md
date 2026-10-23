@@ -280,7 +280,8 @@ go test -tags integration -v -run TestIntegration ./internal/backend/docker/
 It creates two sandboxes in a fresh temporary state directory and checks the
 hardening as the engine reports it and from inside, the agent socket's
 permissions, that the two cannot connect to each other (with listener
-controls that can be reached), persistence across Stop and Start, discovery
+controls that can be reached), that a guest swapping its agent socket for
+a symlink to the other's cannot redirect the daemon, persistence across Stop and Start, discovery
 by a new driver, and that failed and duplicate creates leave nothing. It
 touches only resources labelled with that state directory and fails if any
 are left. Without a reachable engine it skips; set
@@ -298,6 +299,10 @@ product: it runs microVMs and [needs KVM on Linux](https://docs.docker.com/ai/sa
 so it is no fallback for hosts without it. This backend uses ordinary
 Docker Engine containers; `internal/backend/docker` documents its hardening
 and limits.
+
+The agent socket's defence against symlinks is Linux-only and unit-tested
+without an engine (`dial_linux_test.go`); `go test ./internal/backend/docker/`
+on Linux runs it.
 
 To run it on every `git push`, enable the repo's hooks once:
 

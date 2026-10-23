@@ -52,6 +52,12 @@
 // directory lets it create it. The 0700 sandbox directory keeps every other
 // host user out.
 //
+// The guest owns everything in the agent directory, so the daemon never
+// follows what is there: Dial opens agent.sock with O_PATH|O_NOFOLLOW,
+// refuses anything but a socket (a symlink to another sandbox's socket,
+// say) and connects through /proc/self/fd to the inode it opened, so a
+// later swap cannot redirect it. That needs /proc on the host.
+//
 // # Limits
 //
 //   - Linux hosts only, rootful Docker only. Rootless Docker, Podman and

@@ -325,6 +325,25 @@ func TestIntegration(t *testing.T) {
 	}
 	a.run(ctx, "true") // a survived all of that
 
+	// a's guest swaps its agent socket for a symlink to b's. A plain dial
+	// of the path, with the daemon's permissions, reaches b's agent; Dial
+	// must refuse. Start below puts a's socket back.
+	a.run(ctx, `rm /run/boxpool/agent.sock && ln -s "$1" /run/boxpool/agent.sock`, sandboxLayout(d.root, b.id).sock)
+	plain := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return (&net.Dialer{}).DialContext(ctx, "unix", l.sock) })
+	if _, err := plain.Version(ctx); err != nil {
+		t.Errorf("control: plain dial through a's symlink: %v", err)
+	} else {
+		t.Log("control: a plain dial through a's symlink reaches b's agent")
+	}
+	plain.CloseIdleConnections()
+	viaDial := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, a.id) })
+	if _, err := viaDial.Version(ctx); err == nil || !strings.Contains(err.Error(), "not a unix socket") {
+		t.Errorf("Dial through a's symlink to b's socket: %v, want a refusal", err)
+	} else {
+		t.Logf("Dial through a's symlink: %v", err)
+	}
+	b.run(ctx, "true")
+
 	// Stop keeps /root and empties the tmpfs mounts; Start brings the agent
 	// back on the same socket path.
 	for i := 0; i < 2; i++ {

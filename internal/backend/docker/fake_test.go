@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,7 @@ type fakeEngine struct {
 	networks    map[string]fakeNetwork       // name → network
 	containers  map[string]*fakeContainer    // name → container
 	fail        map[string]int               // "METHOD /path" → status to answer with
+	lose        map[string]bool              // "METHOD /path" → handle it, then drop the connection unanswered
 	hook        func(method, path string)    // called before each request is handled
 	requests    []string
 	noAgent     bool // started containers serve no agent
@@ -58,6 +60,7 @@ func newFakeEngine(t *testing.T) *fakeEngine {
 		networks:   map[string]fakeNetwork{},
 		containers: map[string]*fakeContainer{},
 		fail:       map[string]int{},
+		lose:       map[string]bool{},
 	}
 }
 
@@ -124,6 +127,16 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.requests = append(f.requests, r.Method+" "+path)
+	if f.lose[r.Method+" "+path] {
+		conn := w.(http.Hijacker)
+		defer func() {
+			c, _, err := conn.Hijack()
+			if err == nil {
+				c.Close()
+			}
+		}()
+		w = httptest.NewRecorder()
+	}
 	if status, ok := f.fail[r.Method+" "+path]; ok {
 		errorf(w, status, "injected failure")
 		return
