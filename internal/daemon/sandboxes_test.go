@@ -98,7 +98,16 @@ func newAPI(t *testing.T) (*httptest.Server, *fakeDriver) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	d := &fakeDriver{sock: filepath.Join(tmp, "agent.sock"), spec: map[string]backend.Spec{}, up: map[string]bool{}}
+	d := newFakeDriver(t, tmp)
+	srv := httptest.NewServer(Handler(Info{}, st, d))
+	t.Cleanup(srv.Close)
+	return srv, d
+}
+
+// newFakeDriver returns a fake driver whose agent listens in dir.
+func newFakeDriver(t *testing.T, dir string) *fakeDriver {
+	t.Helper()
+	d := &fakeDriver{sock: filepath.Join(dir, "agent.sock"), spec: map[string]backend.Spec{}, up: map[string]bool{}}
 	l, err := agent.Listen("unix:" + d.sock)
 	if err != nil {
 		t.Fatal(err)
@@ -107,9 +116,7 @@ func newAPI(t *testing.T) (*httptest.Server, *fakeDriver) {
 	served := make(chan error, 1)
 	go func() { served <- agent.Serve(ctx, l, "test") }()
 	t.Cleanup(func() { cancel(); <-served })
-	srv := httptest.NewServer(Handler(Info{}, st, d))
-	t.Cleanup(srv.Close)
-	return srv, d
+	return d
 }
 
 func post(t *testing.T, srv *httptest.Server, body string) (int, Sandbox, string) {
@@ -352,4 +359,73 @@ type writes chan string
 func (w writes) Write(p []byte) (int, error) {
 	w <- string(p)
 	return len(p), nil
+}
+
+// TestRunEndsExecSessions checks that Run closes exec sessions, whose
+// hijacked connections http.Server.Shutdown ignores, before it returns.
+func TestRunEndsExecSessions(t *testing.T) {
+	tmp, err := os.MkdirTemp("", "bp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmp) })
+	d := newFakeDriver(t, tmp)
+	defer func(f func(context.Context, string, *Info, *store.Store) (Driver, error)) { openBackend = f }(openBackend)
+	openBackend = func(context.Context, string, *Info, *store.Store) (Driver, error) { return d, nil }
+	dir := filepath.Join(tmp, "state")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, dir, Info{Backend: "fake"}) }()
+
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, SocketName))
+	}}}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		resp, err := hc.Post("http://daemon/v1/sandboxes", "application/json", strings.NewReader(`{"name":"web"}`))
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusCreated {
+				break
+			}
+			t.Fatalf("POST = %d", resp.StatusCode)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(err)
+		}
+	}
+	wctx, wcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer wcancel()
+	conn, _, err := websocket.Dial(wctx, "ws://daemon/v1/sandboxes/web/exec", &websocket.DialOptions{HTTPClient: hc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	out := make(writes, 16)
+	s, err := agent.Start(wctx, conn, agent.ExecRequest{Argv: []string{"sh", "-c", "echo started; exec sleep 30"}}, out, out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-out
+	ended := make(chan error, 1)
+	go func() { _, err := s.Wait(); ended <- err }()
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run() = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	// Run returned, so the daemon has closed the session's connection.
+	select {
+	case err := <-ended:
+		if err == nil {
+			t.Error("session ended without an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("exec session still open after Run returned")
+	}
 }

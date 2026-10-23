@@ -11,14 +11,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
 	"boxpool.run/boxpool/internal/store"
 )
 
-// shutdownTimeout is how long Run waits for in-flight requests on shutdown.
+// shutdownTimeout is how long Run waits for in-flight requests on shutdown,
+// and then again for exec sessions to close.
 var shutdownTimeout = 5 * time.Second
+
+// openBackend is openDriver; tests replace it with a fake.
+var openBackend = openDriver
 
 // Run creates the state directory, takes the daemon lock, opens the sandbox
 // store and the backend named by info.Backend (on Linux: firecracker or
@@ -53,7 +58,7 @@ func Run(ctx context.Context, dir string, info Info) error {
 		return err
 	}
 	defer st.Close()
-	d, err := openDriver(ctx, dir, &info, st)
+	d, err := openBackend(ctx, dir, &info, st)
 	if err != nil {
 		return fmt.Errorf("open the %s backend: %w", info.Backend, err)
 	}
@@ -74,7 +79,29 @@ func Run(ctx context.Context, dir string, info Info) error {
 		return err
 	}
 
-	srv := &http.Server{Handler: Handler(info, st, d)}
+	// Shutdown ignores hijacked connections, so exec sessions would outlive
+	// Run: every request runs under sessions, which is cancelled after
+	// Shutdown, and Run waits for all handlers before it closes the store.
+	sessions, endSessions := context.WithCancel(context.Background())
+	defer endSessions()
+	var mu sync.Mutex
+	var active sync.WaitGroup
+	h := Handler(info, st, d)
+	srv := &http.Server{
+		BaseContext: func(net.Listener) context.Context { return sessions },
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			if sessions.Err() != nil { // after a forced Close
+				mu.Unlock()
+				writeError(w, http.StatusServiceUnavailable, errors.New("the daemon is shutting down"))
+				return
+			}
+			active.Add(1)
+			mu.Unlock()
+			defer active.Done()
+			h.ServeHTTP(w, r)
+		}),
+	}
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(l) }()
 	slog.Info("daemon started", "socket", sock, "version", info.Version, "backend", info.Backend)
@@ -93,6 +120,18 @@ func Run(ctx context.Context, dir string, info Info) error {
 		srv.Close() // drop connections that did not finish in time
 	}
 	<-served
+	mu.Lock()
+	endSessions() // each exec relay closes both its WebSockets
+	mu.Unlock()
+	idle := make(chan struct{})
+	go func() { active.Wait(); close(idle) }()
+	select {
+	case <-idle:
+	case <-time.After(shutdownTimeout):
+		if err == nil {
+			err = errors.New("requests still running after shutdown")
+		}
+	}
 	slog.Info("daemon stopped")
 	return err
 }
