@@ -26,6 +26,10 @@ func NewClient(dial func(ctx context.Context) (net.Conn, error)) *Client {
 	}}}
 }
 
+// CloseIdleConnections closes connections kept open for reuse, which
+// otherwise stay open to the agent for as long as the process runs.
+func (c *Client) CloseIdleConnections() { c.hc.CloseIdleConnections() }
+
 // Version returns the agent's protocol and build version.
 func (c *Client) Version(ctx context.Context) (Version, error) {
 	var v Version

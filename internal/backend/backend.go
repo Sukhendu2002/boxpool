@@ -4,7 +4,18 @@
 // and Apple's Virtualization framework (macOS on Apple silicon).
 package backend
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNotSupported is returned for operations a backend does not implement.
+var ErrNotSupported = errors.New("not supported by this backend")
+
+// ErrUncleanStop is wrapped by Stop's error when the sandbox is stopped but
+// the guest's shutdown did not complete, so its disk may be inconsistent and
+// may need a filesystem check.
+var ErrUncleanStop = errors.New("sandbox was not stopped cleanly")
 
 // Spec describes the sandbox to create.
 type Spec struct {
@@ -31,10 +42,12 @@ type Sandbox struct {
 	State State
 }
 
-// Driver is implemented by each backend.
+// Driver is implemented by each backend. The caller picks the ID, so the
+// store and the backend name a sandbox the same way; it must be usable as a
+// file name.
 type Driver interface {
 	Name() string
-	Create(ctx context.Context, spec Spec) (Sandbox, error)
+	Create(ctx context.Context, id string, spec Spec) (Sandbox, error)
 	Start(ctx context.Context, id string) error
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string) error

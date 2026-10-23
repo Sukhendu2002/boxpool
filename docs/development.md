@@ -219,6 +219,18 @@ included) to your Linux machine over SSH and runs vet, tests, a build and
 needs `rsync`, Go on `PATH` or in `~/.local/go`, and read/write access to
 `/dev/kvm` for your user.
 
+The Firecracker driver's integration test boots real VMs and is behind a
+build tag. On a machine with `/dev/kvm`:
+
+```sh
+go test -tags integration -v ./internal/backend/firecracker/...
+```
+
+It downloads the artifacts once into `~/.cache/boxpool-test` (override with
+`BOXPOOL_TEST_HOME`) and keeps them between runs. Because that directory is
+fixed, a run you interrupt leaves its VM behind, and the next run kills it.
+Without `/dev/kvm` the test skips.
+
 To run it on every `git push`, enable the repo's hooks once:
 
 ```sh
