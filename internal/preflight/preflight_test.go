@@ -153,3 +153,31 @@ func TestReady(t *testing.T) {
 		})
 	}
 }
+
+func TestPickBackend(t *testing.T) {
+	for _, c := range []struct {
+		force       string
+		kvm, docker bool
+		want        string
+		check       bool // a BOXPOOL_BACKEND check is returned
+		ok          bool // and it passes
+	}{
+		{"", true, true, "firecracker", false, false},
+		{"", true, false, "firecracker", false, false},
+		{"", false, true, "docker", false, false},
+		{"", false, false, "none", false, false},
+		{"docker", true, true, "docker", true, true},
+		{"docker", true, false, "none", true, false},
+		{"firecracker", false, true, "none", true, false},
+		{"firecracker", true, false, "firecracker", true, true},
+		{"gvisor", true, true, "none", true, false},
+	} {
+		got, check := pickBackend(c.force, c.kvm, c.docker)
+		if got != c.want || (check != nil) != c.check || check != nil && (check.OK != c.ok || !check.Required) {
+			t.Errorf("pickBackend(%q, kvm %v, docker %v) = %q, %+v; want %q", c.force, c.kvm, c.docker, got, check, c.want)
+		}
+		if r := (Report{Backend: got, Checks: []Check{{Required: true, OK: c.ok || check == nil}}}); r.Ready() != (c.want != "none") {
+			t.Errorf("BOXPOOL_BACKEND=%q kvm %v docker %v: Ready %v", c.force, c.kvm, c.docker, r.Ready())
+		}
+	}
+}

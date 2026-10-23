@@ -72,6 +72,9 @@ func Run(ctx context.Context, dir string, info Info) error {
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(l) }()
 	slog.Info("daemon started", "socket", sock, "version", info.Version, "backend", info.Backend)
+	if info.Warning != "" {
+		slog.Warn(info.Warning, "backend", info.Backend)
+	}
 
 	select {
 	case err := <-served:

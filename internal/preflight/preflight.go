@@ -2,6 +2,7 @@
 package preflight
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,6 +10,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
+
+	"boxpool.run/boxpool/internal/backend/docker"
 )
 
 // Check is the result of one preflight check.
@@ -21,10 +25,13 @@ type Check struct {
 }
 
 // Report is the outcome of all checks plus the backend Boxpool would use.
+// Warning is set when that backend is a fallback with weaker isolation;
+// everything that picks it or creates sandboxes on it must show it.
 type Report struct {
 	OS      string
 	Arch    string
 	Backend string
+	Warning string
 	Checks  []Check
 }
 
@@ -52,6 +59,9 @@ func Run() Report {
 	case "linux":
 		r.Checks, r.Backend = linuxChecks()
 		r.Checks = append(r.Checks, diskCheck())
+		if r.Backend == "docker" {
+			r.Warning = docker.Warning
+		}
 	case "darwin":
 		r.Checks, r.Backend = darwinChecks()
 		r.Checks = append(r.Checks, diskCheck())
@@ -101,22 +111,44 @@ func linuxChecks() ([]Check, string) {
 		checks = append(checks, virt)
 	}
 
-	docker := Check{Name: "docker (fallback)"}
-	if _, err := exec.LookPath("docker"); err == nil {
-		docker.OK, docker.Detail = true, "found"
+	dockerCheck := Check{Name: "docker engine (fallback)"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if v, err := docker.Probe(ctx); err == nil {
+		dockerCheck.OK, dockerCheck.Detail = true, v
 	} else {
-		docker.Detail = "not found"
+		dockerCheck.Detail = err.Error()
 	}
-	checks = append(checks, docker)
+	checks = append(checks, dockerCheck)
 
-	switch {
-	case kvm.OK:
-		return checks, "firecracker"
-	case docker.OK:
-		return checks, "docker (weaker isolation)"
-	default:
-		return checks, "none"
+	backend, force := pickBackend(os.Getenv("BOXPOOL_BACKEND"), kvm.OK, dockerCheck.OK)
+	if force != nil {
+		checks = append(checks, *force)
 	}
+	return checks, backend
+}
+
+// pickBackend returns the backend for a machine with or without usable KVM
+// and Docker: Firecracker when KVM works, else Docker. BOXPOOL_BACKEND
+// (force), if set, names the backend to use instead, and the returned check
+// says whether it can.
+func pickBackend(force string, kvm, docker bool) (string, *Check) {
+	switch {
+	case force == "":
+	case force == "firecracker" && kvm, force == "docker" && docker:
+		return force, &Check{Name: "BOXPOOL_BACKEND", OK: true, Required: true, Detail: "forced to " + force}
+	case force == "firecracker" || force == "docker":
+		return "none", &Check{Name: "BOXPOOL_BACKEND", Required: true, Detail: force + " is forced but not usable here"}
+	default:
+		return "none", &Check{Name: "BOXPOOL_BACKEND", Required: true, Detail: fmt.Sprintf("unknown backend %q: want firecracker or docker", force)}
+	}
+	switch {
+	case kvm:
+		return "firecracker", nil
+	case docker:
+		return "docker", nil
+	}
+	return "none", nil
 }
 
 func darwinChecks() ([]Check, string) {

@@ -19,7 +19,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestInfo(t *testing.T) {
-	want := Info{Version: "1.2.3", OS: "linux", Arch: "amd64", StateDir: "/state", Backend: "firecracker"}
+	want := Info{Version: "1.2.3", OS: "linux", Arch: "amd64", StateDir: "/state", Backend: "docker", Warning: "fallback"}
 	rec := httptest.NewRecorder()
 	Handler(want).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/info", nil))
 	var got Info
