@@ -5,8 +5,8 @@ with the upstream quickstart kernel and rootfs, and is under 2 s realistic?
 
 **Status:** measured on the reference Linux box (bare metal) and on
 GitHub-hosted runners (nested VMs, **not reference numbers**). The old-laptop
-row is deferred: no old hardware is available yet. The M1 gate (#19) still
-requires it.
+row is deferred: no old hardware is available yet. The M1 gate
+([m1-gate.md](m1-gate.md)) proceeded to M2 with criterion 3 deferred (#98).
 
 ## Method
 
@@ -108,7 +108,7 @@ landed on a different physical CPU model.
 | Nested, AMD EPYC 7763 (run 3) | guide + i8042 off | 31 / 34 | 45 / 49 | **1470 / 1516** | 592 / 634 | 486 / 520 |
 | **Reference: Intel Core i5-1235U laptop, bare metal** | guide | 34 / 37 | 53 / 56 | **1073 / 1097** | 709 / 714 | 662 / 663 |
 | **Reference: Intel Core i5-1235U laptop, bare metal** | guide + i8042 off | 33 / 35 | 52 / 54 | **571 / 602** | 201 / 206 | 155 / 157 |
-| Oldest supported laptop (KVM: unknown) | both | deferred to #19 | | | | |
+| Oldest supported laptop (KVM: unknown) | both | deferred to #98 | | | | |
 
 Medians of 10 values are the mean of the middle two, rounded here to the
 nearest ms. Run 1 predates the i8042 configuration. Runs 2 and 3 are two
@@ -118,7 +118,7 @@ The reference box ran on 2026-10-22: Intel Core i5-1235U (12 threads),
 19.2 GiB, NVMe, Ubuntu 24.04.3, host kernel `7.0.0-28-generic`,
 `systemd-detect-virt`: `none`, on AC power.
 
-Hardware to record when the old-laptop row is filled in (#19): CPU model, cores,
+Hardware to record when the old-laptop row is filled in (#98): CPU model, cores,
 memory, disk, distribution and host kernel (all printed by the script), and
 whether `/dev/kvm` exists at all.
 
@@ -194,6 +194,6 @@ The nested GitHub runners were 1.5–2.6x slower to the prompt (1.15–1.47 s
 with the probe off), mostly in the kernel and systemd. Use them to check that
 boot works, not for timing.
 
-Deferred to the M1 gate (#19): whether an old laptop has usable KVM at all,
+Deferred to #98: whether an old laptop has usable KVM at all,
 and how fast it boots. That is the risk the old-laptop row was meant to
 retire.
