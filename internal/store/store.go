@@ -223,3 +223,88 @@ func scan(row interface{ Scan(...any) error }) (Sandbox, error) {
 	sb.CreatedAt, err = time.Parse(timeFormat, created)
 	return sb, err
 }
+
+// ErrNoSlots is returned by NetSlot when every slot is taken.
+var ErrNoSlots = errors.New("no free network slots")
+
+// NetSlot returns the network slot of the sandbox with the given ID,
+// allocating the lowest free one below n if it has none. The ID need not be
+// a stored sandbox's: the backend owns slots, and frees them on remove.
+func (s *Store) NetSlot(ctx context.Context, sandboxID string, n int) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var slot int
+	err = tx.QueryRowContext(ctx, `SELECT slot FROM net_slots WHERE sandbox_id = ?`, sandboxID).Scan(&slot)
+	if err == nil {
+		return slot, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT slot FROM net_slots ORDER BY slot`)
+	if err != nil {
+		return 0, err
+	}
+	var used []int
+	for rows.Next() {
+		if err := rows.Scan(&slot); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		used = append(used, slot)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if slot, err = freeSlot(used, n); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO net_slots (slot, sandbox_id) VALUES (?, ?)`, slot, sandboxID); err != nil {
+		return 0, err
+	}
+	return slot, tx.Commit()
+}
+
+// freeSlot returns the lowest slot below n that is not in used, which is
+// sorted.
+func freeSlot(used []int, n int) (int, error) {
+	for i, u := range used {
+		if u != i {
+			return i, nil
+		}
+	}
+	if len(used) >= n {
+		return 0, fmt.Errorf("%w: all %d are taken", ErrNoSlots, n)
+	}
+	return len(used), nil
+}
+
+// FreeNetSlot frees the network slot of the sandbox with the given ID, if it
+// has one.
+func (s *Store) FreeNetSlot(ctx context.Context, sandboxID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM net_slots WHERE sandbox_id = ?`, sandboxID)
+	return err
+}
+
+// NetSlots returns every allocated slot by sandbox ID.
+func (s *Store) NetSlots(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT sandbox_id, slot FROM net_slots`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	slots := map[string]int{}
+	for rows.Next() {
+		var id string
+		var slot int
+		if err := rows.Scan(&id, &slot); err != nil {
+			return nil, err
+		}
+		slots[id] = slot
+	}
+	return slots, rows.Err()
+}

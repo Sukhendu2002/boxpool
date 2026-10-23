@@ -1,8 +1,7 @@
 // Package firecracker is the Firecracker backend for Linux with KVM. Each
 // sandbox is one firecracker process, configured through its API socket,
 // that boots the pinned kernel from the sandbox's own copy of the guest
-// rootfs and has a vsock device for the guest agent. There is no network
-// interface yet.
+// rootfs and has a vsock device for the guest agent.
 //
 // A sandbox's files live in <state dir>/sandboxes/<id>/:
 //
@@ -19,6 +18,41 @@
 // create device nodes, join cgroups and drop to another uid, and boxpool's
 // daemon and tests run unprivileged in v1. Firecracker's built-in seccomp
 // filters stay on.
+//
+// # Network
+//
+// A Driver made with a store gives every running sandbox outbound IPv4 and
+// nothing else; without one, sandboxes have no network interface. It needs
+// root, ip and nft.
+//
+// Each sandbox has a slot in the store and the /30 at that slot in
+// 10.200.0.0/16: the host's end of its tap device bp-<hash of the ID> is
+// the gateway, the guest the next address, set with the kernel's ip= boot
+// argument. Start creates the tap and Stop and Remove delete it; Remove
+// frees the slot. Its /etc/resolv.conf is rewritten on every boot with the
+// host's upstream nameservers that the host routes out of its outbound
+// interface (from /run/systemd/resolve/resolv.conf when systemd-resolved
+// runs, since its 127.0.0.53 stub is the host's), or else 1.1.1.1 and
+// 8.8.8.8. So DNS never needs a host service.
+//
+// The nftables table inet boxpool (see ruleset) masquerades sandbox
+// traffic out of the outbound interface, forwards only that and its
+// replies, and drops packets from taps to the host itself (127.0.0.1-bound
+// services are unreachable anyway; this covers its LAN, Docker and VPN
+// addresses), to other taps and with a source address not routed through
+// their tap. IPv6 from taps is dropped. Start enables IPv4 forwarding if it
+// is off, and leaves it on. A drop in any table is final, but an accept is
+// not: if an iptables FORWARD chain has policy DROP, as Docker and ufw set
+// it, two accepts tagged boxpool for bp-* go into DOCKER-USER (which Docker
+// leaves to users) or else at the top of FORWARD. The table and those
+// accepts are installed before a tap is created and removed with the last
+// tap, so a tap is never forwarded without the drops.
+//
+// Limits: the outbound interface is looked up at each Start, so a sandbox
+// keeps the old one if the host's default route moves; other firewalls that
+// drop forwarded traffic (firewalld, a final DROP rule under an ACCEPT
+// policy) are not handled; two daemons on one host would race over the
+// table. New deletes every bp-* tap, since it has killed every VM.
 //
 // The driver is built only on Linux; elsewhere this package is empty.
 package firecracker

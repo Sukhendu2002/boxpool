@@ -25,6 +25,7 @@ import (
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/artifacts"
 	"boxpool.run/boxpool/internal/backend"
+	"boxpool.run/boxpool/internal/store"
 )
 
 // Timeouts; tests may shorten them.
@@ -39,14 +40,24 @@ var (
 type Driver struct {
 	root                        string // <state dir>/sandboxes, symlinks resolved
 	firecracker, kernel, rootfs string
-	consoles                    sync.Map // sandbox ID → chan closed when its console rotator returns
+	consoles                    sync.Map     // sandbox ID → chan closed when its console rotator returns
+	store                       *store.Store // network slots; nil without networking
+	netMu                       sync.Mutex   // held while changing tap devices and firewall rules
 }
 
 var _ backend.Driver = (*Driver)(nil)
 
 // New unpacks the fetched artifacts, creates the sandboxes directory in
 // stateDir and kills firecracker processes left behind by an earlier daemon.
-func New(ctx context.Context, stateDir string, paths artifacts.Paths) (*Driver, error) {
+// With a store, sandboxes get a network (see the package doc), which needs
+// root; the tap devices and firewall rules of the killed VMs are removed.
+// Without one, sandboxes have no network interface.
+func New(ctx context.Context, stateDir string, paths artifacts.Paths, st *store.Store) (*Driver, error) {
+	if st != nil {
+		if err := checkNetwork(); err != nil {
+			return nil, err
+		}
+	}
 	fc, rootfs, err := prepare(paths)
 	if err != nil {
 		return nil, err
@@ -64,8 +75,11 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths) (*Driver, 
 	if err != nil {
 		return nil, err
 	}
-	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs}
-	return d, killOrphans(ctx, d.root)
+	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs, store: st}
+	if err := killOrphans(ctx, d.root); err != nil || st == nil {
+		return d, err
+	}
+	return d, d.sweepNetwork(ctx)
 }
 
 // killOrphans kills every sandbox's firecracker process: whoever started it
@@ -128,7 +142,7 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 
 // Start boots the sandbox and returns once its agent answers. Starting a
 // running sandbox does nothing.
-func (d *Driver) Start(ctx context.Context, id string) error {
+func (d *Driver) Start(ctx context.Context, id string) (err error) {
 	l, spec, err := d.load(id)
 	if err != nil {
 		return err
@@ -143,6 +157,17 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	// Firecracker opens its log without creating it.
 	if err := os.WriteFile(l.log, nil, 0600); err != nil {
 		return err
+	}
+	var n *nic
+	if d.store != nil {
+		defer func() {
+			if err != nil {
+				d.stopNetwork(context.WithoutCancel(ctx), id)
+			}
+		}()
+		if n, err = d.startNetwork(ctx, id); err != nil {
+			return err
+		}
 	}
 	// O_APPEND, so rotateConsole can truncate it under firecracker.
 	console, err := os.OpenFile(l.console, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0600)
@@ -169,7 +194,7 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	}()
 	err = os.WriteFile(l.pid, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0600)
 	if err == nil {
-		err = d.boot(ctx, l, spec)
+		err = d.boot(ctx, l, spec, n)
 	}
 	if err != nil {
 		cmd.Process.Kill()
@@ -181,7 +206,7 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	return nil
 }
 
-func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec) error {
+func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic) error {
 	api := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", l.api)
@@ -198,17 +223,30 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec) error {
 	if err != nil {
 		return err
 	}
-	for _, c := range apiCalls(spec, d.kernel, l) {
+	for _, c := range apiCalls(spec, d.kernel, l, n) {
 		if err := put(ctx, api, c); err != nil {
 			return err
 		}
 	}
 	ag := d.agent(l)
 	defer ag.CloseIdleConnections()
-	return poll(ctx, l, agentTimeout, "the guest agent", func(ctx context.Context) error {
+	err = poll(ctx, l, agentTimeout, "the guest agent", func(ctx context.Context) error {
 		_, err := ag.Version(ctx)
 		return err
 	})
+	if err != nil || n == nil {
+		return err
+	}
+	// Written on every boot: the host's resolvers may have changed.
+	var out bytes.Buffer
+	s, err := ag.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", `printf %s "$1" > /etc/resolv.conf`, "sh", n.resolvConf()}}, &out, &out)
+	if err != nil {
+		return err
+	}
+	if code, err := s.Wait(); err != nil || code != 0 {
+		return fmt.Errorf("write the guest's /etc/resolv.conf: exit status %d, %v: %s", code, err, bytes.TrimSpace(out.Bytes()))
+	}
+	return nil
 }
 
 func put(ctx context.Context, c *http.Client, call apiCall) error {
@@ -281,6 +319,9 @@ func (d *Driver) Stop(ctx context.Context, id string) error {
 	if err := removeRuntimeFiles(l); err != nil {
 		return err
 	}
+	if err := d.stopNetwork(ctx, id); err != nil {
+		return err
+	}
 	return unclean
 }
 
@@ -321,7 +362,8 @@ func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
 	return waitExit(ctx, l, stopTimeout)
 }
 
-// Remove kills the sandbox if it runs and deletes its directory.
+// Remove kills the sandbox if it runs, deletes its tap device and directory
+// and frees its network slot.
 func (d *Driver) Remove(ctx context.Context, id string) error {
 	if err := validID(id); err != nil {
 		return err
@@ -331,6 +373,14 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 		return err
 	}
 	d.waitConsole(id)
+	if err := d.stopNetwork(ctx, id); err != nil {
+		return err
+	}
+	if d.store != nil {
+		if err := d.store.FreeNetSlot(ctx, id); err != nil {
+			return err
+		}
+	}
 	return os.RemoveAll(l.dir)
 }
 

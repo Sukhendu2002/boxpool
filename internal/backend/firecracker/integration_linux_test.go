@@ -47,7 +47,7 @@ func TestIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := New(ctx, home, paths)
+	d, err := New(ctx, home, paths, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

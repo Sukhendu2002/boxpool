@@ -231,6 +231,20 @@ It downloads the artifacts once into `~/.cache/boxpool-test` (override with
 fixed, a run you interrupt leaves its VM behind, and the next run kills it.
 Without `/dev/kvm` the test skips.
 
+The networking test (`TestIntegrationNetwork`) needs root, since it creates
+tap devices and firewall rules; without root it skips. Build the test binary
+as yourself and run only it with `sudo`, pointing it at your artifact cache:
+
+```sh
+go test -c -tags integration -o /tmp/fc-it.test ./internal/backend/firecracker
+sudo env BOXPOOL_TEST_HOME="$HOME/.cache/boxpool-test" /tmp/fc-it.test -test.v -test.run TestIntegrationNetwork
+```
+
+Add `BOXPOOL_TEST_APT=1` to also install `curl` and `ping` in a sandbox from
+the image's Debian mirror and check HTTPS and ICMP. When it ends, `ip -br link`
+shows no `bp-*` device, `sudo nft list table inet boxpool` fails and
+`sudo iptables -S | grep boxpool` prints nothing.
+
 To run it on every `git push`, enable the repo's hooks once:
 
 ```sh
