@@ -119,9 +119,10 @@ On Linux the daemon opens the backend doctor picks: Firecracker, after
 downloading its pinned artifacts into `artifacts/` in the state directory
 (about 60 MB the first time), or Docker with a warning. Firecracker
 sandboxes get a network only when the daemon runs as root. With no backend,
-the sandbox endpoints answer 503. On macOS, sandboxes always get outbound
-NAT; [docs/security.md](docs/security.md) covers how each backend isolates
-them.
+the sandbox endpoints answer 503. On macOS 26 and later, sandboxes get
+outbound NAT, each on a network of its own; on older macOS they have no
+network. [docs/security.md](docs/security.md) covers how each backend
+isolates them.
 
 `boxpool sh [--name N] [--cpu N] [--mem 2g] [--disk 10g] [--timing]` asks the
 daemon for a sandbox (a new one with a generated name, or the one called

@@ -23,7 +23,7 @@ func TestVMConfig(t *testing.T) {
 		defaults, _ := spec.WithDefaults()
 		want := vmConfig{
 			CPUs: uint(defaults.CPUs), MemoryBytes: uint64(defaults.MemoryMB) << 20,
-			Kernel: "/artifacts/vmlinux-arm64", CommandLine: "console=hvc0 panic=1 root=/dev/vda rw init=/sbin/init ip=dhcp",
+			Kernel: "/artifacts/vmlinux-arm64", CommandLine: "console=hvc0 panic=1 root=/dev/vda rw init=/sbin/init",
 			Disk: filepath.Join(l.dir, "rootfs.ext4"), Console: filepath.Join(l.dir, "console.log"),
 			MAC: macAddress("abc"),
 		}

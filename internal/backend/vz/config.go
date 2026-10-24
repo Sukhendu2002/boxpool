@@ -14,10 +14,11 @@ import (
 // reboot or panic (panic=1) stops the VM, as the framework cannot reboot one.
 const bootArgs = "console=hvc0 panic=1 root=/dev/vda rw init=/sbin/init"
 
-// netBootArg configures eth0 from the framework's NAT by DHCP with the
+// netBootArg configures eth0 from its vmnet network's NAT by DHCP with the
 // kernel's IP autoconfiguration (CONFIG_IP_PNP_DHCP), as the image has no
 // DHCP client. The kernel records the DHCP server's nameserver in
-// /proc/net/pnp, which Start copies to /etc/resolv.conf.
+// /proc/net/pnp, which Start copies to /etc/resolv.conf. Only for a VM with a
+// network device: without one, the kernel waits about 12 seconds for it.
 const netBootArg = " ip=dhcp"
 
 // agentPort is the vsock port boxpool-agent listens on.
@@ -63,7 +64,7 @@ func newVMConfig(spec backend.Spec, kernel string, l layout, lim limits) (vmConf
 		CPUs:        uint(spec.CPUs),
 		MemoryBytes: uint64(spec.MemoryMB) << 20,
 		Kernel:      kernel,
-		CommandLine: bootArgs + netBootArg,
+		CommandLine: bootArgs,
 		Disk:        l.rootfs,
 		Console:     l.console,
 		MAC:         macAddress(filepath.Base(l.dir)), // the directory is named after the sandbox ID

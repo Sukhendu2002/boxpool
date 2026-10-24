@@ -29,7 +29,7 @@ func openDriver(ctx context.Context, dir string, info *Info, st *store.Store) (D
 	}
 	slog.Info("artifacts ready", "took", time.Since(start).Round(time.Millisecond))
 	if !vz.IsolatedNetworks() {
-		info.Warning = vz.SharedNetworkWarning
+		info.Warning = vz.NoNetworkWarning
 	}
 	return vz.New(ctx, dir, paths)
 }

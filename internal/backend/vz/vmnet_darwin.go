@@ -8,7 +8,7 @@ package vz
 #import <Virtualization/Virtualization.h>
 #import <vmnet/vmnet.h>
 
-// An SDK older than macOS 26's builds a binary that always shares the NAT.
+// An SDK older than macOS 26's builds a binary whose sandboxes have no network.
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
 #define HAVE_VMNET_NETWORK 1
 #endif
@@ -67,62 +67,82 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 	"unsafe"
 
 	virt "github.com/Code-Hex/vz/v3"
 )
 
-// SharedNetworkWarning is the daemon's warning when sandboxes share the
-// framework's NAT (see doc.go).
-const SharedNetworkWarning = "sandboxes share one NAT network before macOS 26: root in one can send packets to another (see docs/security.md)"
+// NoNetworkWarning is the daemon's warning when sandboxes start without a
+// network because isolated ones are unavailable (see doc.go).
+const NoNetworkWarning = "sandboxes have no network: networking needs macOS 26 or later for isolated sandbox networks (see docs/security.md)"
 
-// IsolatedNetworks reports whether each VM gets a network of its own, which
-// needs macOS 26 and a binary built with its SDK.
+// IsolatedNetworks reports whether each VM can get a network of its own,
+// which needs macOS 26 and a binary built with its SDK.
 func IsolatedNetworks() bool { return C.haveNetworks() == 1 }
 
-// networks are the process's idle vmnet networks. A network holds its /24
-// for as long as it exists and a process can hold only 32
-// (192.168.64.0/24 to 192.168.95.0/24), so networks are reused once their
-// VM has stopped instead of waiting for the framework's objects to be
-// garbage collected.
+// maxNetworks is how many vmnet networks a process can hold: each holds a
+// /24 for as long as it exists.
+const maxNetworks = 32
+
+// quarantine is how long a removed sandbox's network waits before a new
+// sandbox may take it: late replies to the removed sandbox's address expire
+// first. A variable so tests can shorten it.
+var quarantine = 2 * time.Minute
+
+var errTooManyNetworks = errors.New("at most 32 sandboxes can have networking at once on macOS, and a removed sandbox's network is reusable 2 minutes after removal; remove one or wait")
+
+// networks are the process's vmnet networks. A network a VM has used keeps
+// its /24 until the process exits, even once released, so networks are
+// never released: a removed sandbox's network waits in idle, oldest first,
+// for a new sandbox.
 var networks struct {
 	sync.Mutex
-	idle []unsafe.Pointer
+	held int
+	idle []idleNetwork
 }
 
-// takeNetwork returns an idle vmnet network or a new one, or nil before
-// macOS 26.
+type idleNetwork struct {
+	net     unsafe.Pointer
+	removed time.Time
+}
+
+// takeNetwork returns an idle network whose quarantine is over, or a new
+// one; it fails before macOS 26.
 func takeNetwork() (unsafe.Pointer, error) {
 	networks.Lock()
 	defer networks.Unlock()
-	if n := len(networks.idle); n > 0 {
-		net := networks.idle[n-1]
-		networks.idle = networks.idle[:n-1]
+	if len(networks.idle) > 0 && time.Since(networks.idle[0].removed) >= quarantine {
+		net := networks.idle[0].net
+		networks.idle = networks.idle[1:]
 		return net, nil
+	}
+	if networks.held >= maxNetworks {
+		return nil, errTooManyNetworks
 	}
 	var status C.int
 	net := C.newNetwork(&status)
-	if net == nil && status != 0 {
-		return nil, fmt.Errorf("create a vmnet network: status %d (at most 32 sandboxes can run at once)", status)
+	if net == nil {
+		return nil, fmt.Errorf("create a vmnet network: status %d: %w", status, errTooManyNetworks)
 	}
+	networks.held++
 	return net, nil
 }
 
-// putNetwork makes a network whose VM has stopped, or never started,
-// available to another VM.
+// putNetwork hands a removed sandbox's network to a new sandbox once its
+// quarantine is over.
 func putNetwork(net unsafe.Pointer) {
-	if net == nil {
-		return
-	}
 	networks.Lock()
-	networks.idle = append(networks.idle, net)
+	networks.idle = append(networks.idle, idleNetwork{net, time.Now()})
 	networks.Unlock()
 }
 
 // attachNetwork moves nic onto the vmnet network.
 // shortcut: reads the Objective-C object from vz's unexported pointer field
 // (the attach checks its class), as the vz fork does not wrap
-// VZVmnetNetworkDeviceAttachment; use its wrapper once it has one.
+// VZVmnetNetworkDeviceAttachment; use its wrapper once it has one. A change
+// to the fork's layout would crash here before the class check, so do not
+// change the fork without rerunning the vz integration suite.
 func attachNetwork(nic *virt.VirtioNetworkDeviceConfiguration, net unsafe.Pointer) error {
 	obj := **(**unsafe.Pointer)(unsafe.Pointer(nic))
 	if C.attach(obj, net) == 0 {
