@@ -25,3 +25,6 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+// shortcut: patched fork of vz v3 for the observer goroutine leak (upstream fix is v4 only, needs Go 1.25); drop this replace when boxpool moves to vz v4
+replace github.com/Code-Hex/vz/v3 => github.com/Sukhendu2002/vz/v3 v3.7.1-boxpool.1
