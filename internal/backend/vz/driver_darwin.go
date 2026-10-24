@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	virt "github.com/Code-Hex/vz/v3"
 	"golang.org/x/sys/unix"
@@ -43,6 +44,8 @@ type Driver struct {
 	machines             sync.Map     // sandbox ID → *machine, while its VM may run
 	lifetime             sync.RWMutex // Start holds a reader before taking a sandbox lock
 	closed               bool         // protected by lifetime
+	isolated             bool         // sandboxes get networks of their own; without them, no network
+	networks             sync.Map     // sandbox ID → its vmnet network, from its first Start until Remove
 }
 
 var _ backend.Driver = (*Driver)(nil)
@@ -84,6 +87,7 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths) (*Driver, 
 			maxMemory: virt.VirtualMachineConfigurationMaximumAllowedMemorySize(),
 		},
 		admission: &resources.Manager{StateDir: stateDir},
+		isolated:  IsolatedNetworks(),
 	}, nil
 }
 
@@ -193,7 +197,14 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	if err := os.WriteFile(l.console, nil, 0600); err != nil {
 		return err
 	}
-	m, err := startVM(cfg)
+	var network unsafe.Pointer
+	if d.isolated {
+		if network, err = d.network(id); err != nil {
+			return fmt.Errorf("start sandbox %s: %w", id, err)
+		}
+		cfg.CommandLine += netBootArg
+	}
+	m, err := startVM(cfg, network)
 	if err != nil {
 		return fmt.Errorf("start sandbox %s: %w", id, err)
 	}
@@ -215,8 +226,32 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	return nil
 }
 
-// startVM builds the framework's objects for cfg and starts the VM.
-func startVM(cfg vmConfig) (*machine, error) {
+// network returns the sandbox's vmnet network, taking one on its first
+// Start. A sandbox keeps its network, and so its subnet and address, until
+// Remove: handing a stopped sandbox's network to another would let that one
+// take over its address and receive traffic meant for it.
+func (d *Driver) network(id string) (unsafe.Pointer, error) {
+	if v, ok := d.networks.Load(id); ok {
+		return v.(unsafe.Pointer), nil
+	}
+	network, err := takeNetwork()
+	if err != nil {
+		return nil, err
+	}
+	d.networks.Store(id, network)
+	return network, nil
+}
+
+// releaseNetwork returns a removed sandbox's vmnet network, if it has one.
+func (d *Driver) releaseNetwork(id string) {
+	if v, ok := d.networks.LoadAndDelete(id); ok {
+		putNetwork(v.(unsafe.Pointer))
+	}
+}
+
+// startVM builds the framework's objects for cfg and starts the VM, with a
+// network device on network unless it is nil.
+func startVM(cfg vmConfig, network unsafe.Pointer) (*machine, error) {
 	boot, err := virt.NewLinuxBootLoader(cfg.Kernel, virt.WithCommandLine(cfg.CommandLine))
 	if err != nil {
 		return nil, err
@@ -263,6 +298,19 @@ func startVM(cfg vmConfig) (*machine, error) {
 		return nil, err
 	}
 	c.SetSocketDevicesVirtualMachineConfiguration([]virt.SocketDeviceConfiguration{vsock})
+	// A vmnet network of its own keeps the VM from reaching other sandboxes
+	// (see doc.go). The framework's shared NAT would not, so without one the
+	// VM has no network device.
+	if network != nil {
+		nic, err := natNIC(cfg.MAC)
+		if err != nil {
+			return nil, err
+		}
+		if err := attachNetwork(nic, network); err != nil {
+			return nil, err
+		}
+		c.SetNetworkDevicesVirtualMachineConfiguration([]*virt.VirtioNetworkDeviceConfiguration{nic})
+	}
 	if _, err := c.Validate(); err != nil {
 		return nil, entitlementHint(err)
 	}
@@ -289,6 +337,29 @@ func startVM(cfg vmConfig) (*machine, error) {
 		}
 	}()
 	return m, nil
+}
+
+// natNIC is a virtio network device on the framework's NAT, for
+// attachNetwork to move onto a vmnet network.
+func natNIC(mac string) (*virt.VirtioNetworkDeviceConfiguration, error) {
+	hw, err := net.ParseMAC(mac)
+	if err != nil {
+		return nil, err
+	}
+	nat, err := virt.NewNATNetworkDeviceAttachment()
+	if err != nil {
+		return nil, fmt.Errorf("NAT network attachment: %w", err)
+	}
+	nic, err := virt.NewVirtioNetworkDeviceConfiguration(nat)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := virt.NewMACAddress(hw)
+	if err != nil {
+		return nil, err
+	}
+	nic.SetMACAddress(addr)
+	return nic, nil
 }
 
 // entitlementHint explains the framework's error for a binary that was not
@@ -321,8 +392,21 @@ func (d *Driver) boot(ctx context.Context, m *machine) error {
 	// The disk image is Spec.DiskGB GiB but the file system is the base
 	// image's size until it is grown, online, so the host needs no
 	// e2fsprogs. Every boot: a no-op once grown.
-	return run(ctx, ag, growFS)
+	if err := run(ctx, ag, growFS); err != nil {
+		return err
+	}
+	if !d.isolated {
+		return nil
+	}
+	if err := run(ctx, ag, writeResolvConf); err != nil {
+		return fmt.Errorf("the guest got no nameserver by DHCP from the NAT: %w", err)
+	}
+	return nil
 }
+
+// writeResolvConf points the guest's resolver at the nameserver the NAT's
+// DHCP server gave the kernel. Every boot: the NAT's subnet can change.
+const writeResolvConf = `grep '^nameserver ' /proc/net/pnp > /etc/resolv.conf`
 
 // growFS grows the guest's root file system to fill /dev/vda with the
 // EXT4_IOC_RESIZE_FS ioctl. resize2fs cannot: it opens the device, which
@@ -471,11 +555,18 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 		<-m.console
 		d.machines.CompareAndDelete(id, m)
 	}
-	return os.RemoveAll(sandboxLayout(d.root, id).dir)
+	// Only a sandbox that is really gone gives up its network: one still
+	// listed must keep its address.
+	if err := os.RemoveAll(sandboxLayout(d.root, id).dir); err != nil {
+		return err
+	}
+	d.releaseNetwork(id)
+	return nil
 }
 
 // Close stops every running sandbox, cleanly if it can, for a daemon that
-// is exiting: its VMs would end with the process anyway, without a sync.
+// is exiting: its VMs would end with the process anyway, without a sync. It
+// returns every stopped sandbox's network.
 func (d *Driver) Close() error {
 	// A waiting writer blocks new Starts; active Starts finish before the sweep.
 	d.lifetime.Lock()
@@ -497,6 +588,12 @@ func (d *Driver) Close() error {
 		return true
 	})
 	wg.Wait()
+	d.networks.Range(func(key, _ any) bool {
+		if d.running(key.(string)) == nil {
+			d.releaseNetwork(key.(string))
+		}
+		return true
+	})
 	return errors.Join(errs...)
 }
 

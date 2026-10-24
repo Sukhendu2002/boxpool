@@ -44,7 +44,9 @@ online through `EXT4_IOC_RESIZE_FS`, invoked with the pinned image's Perl.
 The kernel prevents opening a mounted block device for writing, so the
 image's `resize2fs` cannot perform this growth.
 
-Sandboxes have no network until #21. Pause/resume (#29) and notarized
+On macOS 26 and later each sandbox gets outbound IPv4 through NAT on a
+network of its own, which needs the macOS 26 SDK (Command Line Tools 26 or
+later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause/resume (#29) and notarized
 releases (#24) are separate work. Stop syncs and freezes the guest rootfs,
 then triggers sysrq power-off; guest programs get no exit signal first
 (#91). If that fails, Stop requests a framework shutdown, then forces it,

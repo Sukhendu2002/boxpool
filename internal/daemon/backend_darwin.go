@@ -28,6 +28,8 @@ func openDriver(ctx context.Context, dir string, info *Info, st *store.Store) (D
 		return nil, fmt.Errorf("fetch artifacts: %w", err)
 	}
 	slog.Info("artifacts ready", "took", time.Since(start).Round(time.Millisecond))
-	info.Warning = "sandboxes have no network: macOS networking is not implemented yet (#21)"
+	if !vz.IsolatedNetworks() {
+		info.Warning = vz.NoNetworkWarning
+	}
 	return vz.New(ctx, dir, paths)
 }
