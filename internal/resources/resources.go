@@ -1,5 +1,5 @@
 // Package resources admits sandbox allocations without overcommitting the
-// node. Both backends share the same state directory and allocation lock.
+// node. All backends share the same state directory and allocation lock.
 package resources
 
 import (
@@ -42,8 +42,10 @@ type Manager struct {
 
 const manifest = "resources.json"
 
+// directory is where kind keeps its sandboxes. The VM backends share
+// sandboxes/, so allocations reads it once, as "firecracker".
 func directory(kind string) string {
-	if kind == "firecracker" {
+	if kind == "firecracker" || kind == "vz" {
 		return "sandboxes"
 	}
 	return "docker"

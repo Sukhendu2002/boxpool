@@ -205,7 +205,7 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 			return err
 		}
 	}
-	// O_APPEND, so rotateConsole can truncate it under firecracker.
+	// O_APPEND, so backend.RotateConsole can truncate it under firecracker.
 	console, err := os.OpenFile(l.console, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|os.O_APPEND, 0600)
 	if err != nil {
 		return err
@@ -493,9 +493,6 @@ func (d *Driver) Dial(ctx context.Context, id string) (net.Conn, error) {
 	return dialAgent(ctx, sandboxLayout(d.root, id).vsock)
 }
 
-// consoleMax is the size at which boundConsole rotates a console log.
-const consoleMax = 1 << 20
-
 // boundConsole rotates the console log at path once a second until exited
 // is closed, which bounds it and its one rotated copy to about 2 MiB.
 // shortcut: a guest writing faster than the serial port allows overshoots by
@@ -509,41 +506,11 @@ func boundConsole(path string, exited <-chan struct{}) {
 		case <-exited:
 			return
 		case <-t.C:
-			if err := rotateConsole(path); err != nil {
+			if err := backend.RotateConsole(path); err != nil {
 				slog.Warn("rotating console log", "path", path, "err", err)
 			}
 		}
 	}
-}
-
-// rotateConsole copies path to path.1, replacing it, and empties path once
-// path is larger than consoleMax. Firecracker writes path with O_APPEND, so
-// it carries on at the new end.
-func rotateConsole(path string) error {
-	fi, err := os.Stat(path)
-	if errors.Is(err, fs.ErrNotExist) || err == nil && fi.Size() <= consoleMax {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	src, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	dst, err := os.OpenFile(path+".1", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(dst, src)
-	if cerr := dst.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Truncate(path, 0)
 }
 
 // waitConsole waits for the console rotator of a sandbox whose firecracker

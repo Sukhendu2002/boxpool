@@ -1,14 +1,18 @@
-//go:build !linux
+//go:build !linux && (!darwin || !cgo)
 
 package daemon
 
 import (
 	"context"
+	"fmt"
 
 	"boxpool.run/boxpool/internal/store"
 )
 
-// openDriver returns nil: the only backends so far need Linux.
+// openDriver reports a missing cgo build when macOS selected virtualization.
 func openDriver(ctx context.Context, dir string, info *Info, st *store.Store) (Driver, error) {
+	if info.Backend == "virtualization framework" {
+		return nil, fmt.Errorf("the Virtualization framework backend requires a macOS build with CGO_ENABLED=1")
+	}
 	return nil, nil
 }

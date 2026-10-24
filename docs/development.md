@@ -1,4 +1,70 @@
-# Linux and KVM development setup
+# Development setup
+
+## macOS on Apple silicon
+
+Use macOS 14+ with Xcode Command Line Tools (`xcode-select --install`) and
+Go 1.24+. The Virtualization framework driver uses cgo. Intel Macs are
+unsupported. Build and ad-hoc sign the daemon with the virtualization
+entitlement; no Developer ID is needed for local development:
+
+```sh
+go build -o bin/boxpool ./cmd/boxpool
+scripts/dev-sign.sh bin/boxpool
+export BOXPOOL_HOME="$(mktemp -d /tmp/boxpool-dev.XXXXXX)"
+bin/boxpool doctor
+bin/boxpool daemon
+```
+
+In another terminal, set `BOXPOOL_HOME` to the same path, then run:
+
+```sh
+bin/boxpool sh --timing --cpu 1 --mem 512m --disk 1g
+uname -m                          # aarch64
+echo kept > /root/stop-test
+exit
+```
+
+The first daemon start fetches the pinned arm64 kernel and rootfs (about
+45 MB); subsequent starts reuse them. `sh --timing` prints time to prompt.
+APFS is required: each sandbox gets a copy-on-write `clonefile` disk.
+The daemon uses the same CPU, memory and disk admission as Linux; macOS
+available memory comes from `kern.memorystatus_level`. Guest ext4 grows
+online through `EXT4_IOC_RESIZE_FS`, invoked with the pinned image's Perl.
+The kernel prevents opening a mounted block device for writing, so the
+image's `resize2fs` cannot perform this growth.
+
+Sandboxes have no network until #21. Pause/resume (#29) and notarized
+releases (#24) are separate work. Stop syncs and freezes the guest rootfs,
+then triggers sysrq power-off; guest programs get no exit signal first
+(#91). If that fails, Stop requests a framework shutdown, then forces it,
+reporting `backend.ErrUncleanStop`. Ctrl-C the daemon to stop its VMs;
+their disks remain for the next start. The framework's VM helpers also end
+when the daemon process exits. Check for leftovers after exit:
+
+```sh
+ps -axo pid,comm | grep '[c]om.apple.Virtualization.VirtualMachine'
+```
+
+Unit tests need no signing. The integration test needs a signed test
+binary and real virtualization, so it runs locally rather than in CI:
+
+```sh
+go vet ./...
+go test -race ./...
+go test -c -tags integration -o /tmp/vz.test ./internal/backend/vz
+scripts/dev-sign.sh /tmp/vz.test
+/tmp/vz.test -test.v -test.timeout 5m
+```
+
+It checks arm64 exec, resource sizes, bounded console output, persistence,
+clean and forced stops, driver Close, and removal. Install `e2fsprogs`
+(`brew install e2fsprogs`) to also check the stopped disk with `e2fsck -fn`.
+Artifacts are cached in `~/Library/Caches/boxpool-test`, or
+`BOXPOOL_TEST_HOME` when set. Boot times include waiting for the agent and
+growing ext4. CI builds and runs unit tests with cgo on macOS; Linux and
+Windows do not compile the framework binding.
+
+## Linux and KVM
 
 For building the shared guest kernel/rootfs/OCI image, required tools,
 Firecracker/vsock smoke checks and release publication, see the
