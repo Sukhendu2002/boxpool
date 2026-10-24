@@ -25,7 +25,28 @@
 // Stop freezes the guest's disk through the agent and powers the guest off
 // with sysrq, falling back to the framework's stop request and then a
 // forced stop (backend.ErrUncleanStop). Pause and Resume are not supported
-// yet (#29), and sandboxes have no network interface (#21).
+// yet (#29).
+//
+// # Network
+//
+// Every VM has a virtio network device with a MAC address derived from its
+// sandbox ID and gets outbound IPv4 through NAT, with no root needed. The
+// guest configures eth0 by DHCP with the kernel's ip=dhcp, and every Start
+// copies the nameserver the DHCP server gave the kernel, the NAT's DNS
+// proxy, from /proc/net/pnp to /etc/resolv.conf.
+//
+// On macOS 26 and later each running VM has a vmnet shared network of its
+// own (VZVmnetNetworkDeviceAttachment), on its own /24 of 192.168.64.0/19,
+// and macOS forwards no packets between those networks, so sandboxes
+// cannot reach each other. A process can hold at most 32 such networks, so
+// at most 32 sandboxes run at once; a stopped VM's network is reused.
+// Before macOS 26 (or when built with an older SDK) all VMs share the
+// framework's NAT (VZNATNetworkDeviceAttachment) on one /24. It does not
+// forward frames between VMs, but macOS routes between them, so root in one
+// sandbox can add a route through the gateway and send packets to another
+// (replies are lost). Either way a guest can reach the Mac's own services
+// that listen on the gateway's or the Mac's other addresses. See
+// docs/security.md.
 //
 // Creating a VM needs the com.apple.security.virtualization entitlement, so
 // the daemon binary must be signed with it: scripts/dev-sign.sh ad-hoc signs

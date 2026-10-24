@@ -263,6 +263,27 @@ func startVM(cfg vmConfig) (*machine, error) {
 		return nil, err
 	}
 	c.SetSocketDevicesVirtualMachineConfiguration([]virt.SocketDeviceConfiguration{vsock})
+	network, err := takeNetwork()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if !started {
+			putNetwork(network)
+		}
+	}()
+	nic, err := natNIC(cfg.MAC)
+	if err != nil {
+		return nil, err
+	}
+	// A vmnet network of its own keeps the VM from reaching other sandboxes
+	// (see doc.go); before macOS 26 it shares the framework's NAT.
+	if network != nil {
+		if err := attachNetwork(nic, network); err != nil {
+			return nil, err
+		}
+	}
+	c.SetNetworkDevicesVirtualMachineConfiguration([]*virt.VirtioNetworkDeviceConfiguration{nic})
 	if _, err := c.Validate(); err != nil {
 		return nil, entitlementHint(err)
 	}
@@ -284,11 +305,35 @@ func startVM(cfg vmConfig) (*machine, error) {
 		for s := range vm.StateChangedNotify() {
 			if s == virt.VirtualMachineStateStopped || s == virt.VirtualMachineStateError {
 				close(m.stopped)
+				putNetwork(network)
 				return
 			}
 		}
 	}()
 	return m, nil
+}
+
+// natNIC is a virtio network device on the framework's NAT, which needs no
+// entitlement beyond virtualization.
+func natNIC(mac string) (*virt.VirtioNetworkDeviceConfiguration, error) {
+	hw, err := net.ParseMAC(mac)
+	if err != nil {
+		return nil, err
+	}
+	nat, err := virt.NewNATNetworkDeviceAttachment()
+	if err != nil {
+		return nil, fmt.Errorf("NAT network attachment: %w", err)
+	}
+	nic, err := virt.NewVirtioNetworkDeviceConfiguration(nat)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := virt.NewMACAddress(hw)
+	if err != nil {
+		return nil, err
+	}
+	nic.SetMACAddress(addr)
+	return nic, nil
 }
 
 // entitlementHint explains the framework's error for a binary that was not
@@ -321,8 +366,18 @@ func (d *Driver) boot(ctx context.Context, m *machine) error {
 	// The disk image is Spec.DiskGB GiB but the file system is the base
 	// image's size until it is grown, online, so the host needs no
 	// e2fsprogs. Every boot: a no-op once grown.
-	return run(ctx, ag, growFS)
+	if err := run(ctx, ag, growFS); err != nil {
+		return err
+	}
+	if err := run(ctx, ag, writeResolvConf); err != nil {
+		return fmt.Errorf("the guest got no nameserver by DHCP from the NAT: %w", err)
+	}
+	return nil
 }
+
+// writeResolvConf points the guest's resolver at the nameserver the NAT's
+// DHCP server gave the kernel. Every boot: the NAT's subnet can change.
+const writeResolvConf = `grep '^nameserver ' /proc/net/pnp > /etc/resolv.conf`
 
 // growFS grows the guest's root file system to fill /dev/vda with the
 // EXT4_IOC_RESIZE_FS ioctl. resize2fs cannot: it opens the device, which

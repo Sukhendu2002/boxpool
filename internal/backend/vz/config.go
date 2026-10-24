@@ -1,7 +1,9 @@
 package vz
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"net"
 	"path/filepath"
 
 	"boxpool.run/boxpool/internal/backend"
@@ -11,6 +13,12 @@ import (
 // is a virtio console (hvc0), not a UART, and has no i8042 to skip. A guest
 // reboot or panic (panic=1) stops the VM, as the framework cannot reboot one.
 const bootArgs = "console=hvc0 panic=1 root=/dev/vda rw init=/sbin/init"
+
+// netBootArg configures eth0 from the framework's NAT by DHCP with the
+// kernel's IP autoconfiguration (CONFIG_IP_PNP_DHCP), as the image has no
+// DHCP client. The kernel records the DHCP server's nameserver in
+// /proc/net/pnp, which Start copies to /etc/resolv.conf.
+const netBootArg = " ip=dhcp"
 
 // agentPort is the vsock port boxpool-agent listens on.
 const agentPort = 1024
@@ -41,6 +49,7 @@ type vmConfig struct {
 	CommandLine string
 	Disk        string // the sandbox's rootfs, a read-write virtio block device
 	Console     string // the virtio console's output, appended to
+	MAC         string // the virtio network device's MAC address
 }
 
 // newVMConfig describes the VM for a sandbox created with spec. Create has
@@ -54,9 +63,10 @@ func newVMConfig(spec backend.Spec, kernel string, l layout, lim limits) (vmConf
 		CPUs:        uint(spec.CPUs),
 		MemoryBytes: uint64(spec.MemoryMB) << 20,
 		Kernel:      kernel,
-		CommandLine: bootArgs,
+		CommandLine: bootArgs + netBootArg,
 		Disk:        l.rootfs,
 		Console:     l.console,
+		MAC:         macAddress(filepath.Base(l.dir)), // the directory is named after the sandbox ID
 	}
 	if c.CPUs < lim.minCPUs || c.CPUs > lim.maxCPUs {
 		return vmConfig{}, fmt.Errorf("%d CPUs is outside the Virtualization framework's %d to %d", c.CPUs, lim.minCPUs, lim.maxCPUs)
@@ -65,4 +75,13 @@ func newVMConfig(spec backend.Spec, kernel string, l layout, lim limits) (vmConf
 		return vmConfig{}, fmt.Errorf("%d MiB of memory is outside the Virtualization framework's %d to %d MiB", spec.MemoryMB, lim.minMemory>>20, lim.maxMemory>>20)
 	}
 	return c, nil
+}
+
+// macAddress is a sandbox's MAC address, derived from its ID: stable across
+// boots, so the NAT's DHCP server hands out the same lease, and distinct per
+// sandbox. It is locally administered and unicast.
+func macAddress(id string) string {
+	h := sha256.Sum256([]byte(id))
+	h[0] = h[0]&^0x01 | 0x02
+	return net.HardwareAddr(h[:6]).String()
 }
