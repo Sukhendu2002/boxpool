@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"boxpool.run/boxpool/internal/backend"
 	"boxpool.run/boxpool/internal/resources"
@@ -113,5 +114,73 @@ func TestEntitlementHint(t *testing.T) {
 	err := errors.New("missing com.apple.security.virtualization entitlement")
 	if got := entitlementHint(err); !errors.Is(got, err) || !strings.Contains(got.Error(), "scripts/dev-sign.sh") {
 		t.Errorf("missing signing advice: %v", got)
+	}
+}
+
+func TestRemoveKeepsNetworkWhenDeleteFails(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	base := filepath.Join(dir, "base.ext4")
+	if err := os.WriteFile(base, []byte("base"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	d := &Driver{root: filepath.Join(dir, "sandboxes"), rootfs: base, limits: testLimits, admission: &resources.Manager{
+		StateDir: dir, Probe: func(string) (resources.Capacity, error) {
+			return resources.Capacity{CPUs: []int{0, 1, 2, 3}, MemoryMB: 8192, AvailableMB: 8192, DiskBytes: 1 << 40}, nil
+		},
+	}}
+	if _, err := d.Create(ctx, "abc", backend.Spec{Name: "web", CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+		t.Fatal(err)
+	}
+	var fake byte
+	net := unsafe.Pointer(&fake)
+	d.networks.Store("abc", net)
+	idle := func() (n int) {
+		networks.Lock()
+		defer networks.Unlock()
+		for _, i := range networks.idle {
+			if i.net == net {
+				n++
+			}
+		}
+		return n
+	}
+	t.Cleanup(func() {
+		networks.Lock()
+		defer networks.Unlock()
+		kept := networks.idle[:0]
+		for _, i := range networks.idle {
+			if i.net != net {
+				kept = append(kept, i)
+			}
+		}
+		networks.idle = kept
+	})
+
+	sandbox := sandboxLayout(d.root, "abc").dir
+	if err := os.Chmod(sandbox, 0500); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Remove(ctx, "abc"); err == nil {
+		t.Fatal("Remove succeeded although the sandbox directory could not be deleted")
+	}
+	if v, ok := d.networks.Load("abc"); !ok || v.(unsafe.Pointer) != net {
+		t.Error("a sandbox that failed to be removed lost its network")
+	}
+	if n := idle(); n != 0 {
+		t.Errorf("network pooled %d times after a failed Remove", n)
+	}
+
+	if err := os.Chmod(sandbox, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Remove(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.networks.Load("abc"); ok {
+		t.Error("a removed sandbox kept its network")
+	}
+	if n := idle(); n != 1 {
+		t.Errorf("network pooled %d times after Remove, want 1", n)
 	}
 }

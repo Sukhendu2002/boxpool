@@ -555,8 +555,13 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 		<-m.console
 		d.machines.CompareAndDelete(id, m)
 	}
+	// Only a sandbox that is really gone gives up its network: one still
+	// listed must keep its address.
+	if err := os.RemoveAll(sandboxLayout(d.root, id).dir); err != nil {
+		return err
+	}
 	d.releaseNetwork(id)
-	return os.RemoveAll(sandboxLayout(d.root, id).dir)
+	return nil
 }
 
 // Close stops every running sandbox, cleanly if it can, for a daemon that
