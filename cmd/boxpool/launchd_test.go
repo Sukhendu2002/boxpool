@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -68,6 +69,8 @@ func TestAgentSteps(t *testing.T) {
 		// The plist is booted out with it, so the new one starts fresh.
 		{"plist and binary changed", agentFacts{loaded: true, pid: 42, plistStale: true, staleExe: true}, bootout + install + bootstrap},
 		{"binary changed", agentFacts{loaded: true, pid: 42, staleExe: true}, kickstart},
+		// kickstart would start the loaded program again.
+		{"other program loaded", agentFacts{loaded: true, pid: 42, staleExe: true, wrongProgram: true}, bootout + bootstrap},
 		// It exited cleanly, or crashed and waits for its throttle.
 		{"loaded, not running", agentFacts{loaded: true}, kickstart},
 		{"after down", agentFacts{plistStale: true}, install + bootstrap},
@@ -110,7 +113,7 @@ func TestParseService(t *testing.T) {
 }
 `
 	s, err := parseService(running)
-	if want := (service{state: "running", pid: 63736, lastExit: "(never exited)"}); err != nil || s != want {
+	if want := (service{state: "running", pid: 63736, lastExit: "(never exited)", program: "/Users/me/Library/Application Support/boxpool/bin/boxpool"}); err != nil || s != want {
 		t.Errorf("parseService(running) = %+v, %v; want %+v", s, err, want)
 	}
 	waiting := "gui/501/x = {\n\tstate = spawn scheduled\n\tlast exit code = 1\n}\n"
@@ -122,6 +125,24 @@ func TestParseService(t *testing.T) {
 			t.Errorf("parseService(%q) = %+v, want an error", bad, s)
 		}
 	}
+}
+
+func TestLockAgent(t *testing.T) {
+	a := testAgent
+	a.lock = filepath.Join(t.TempDir(), "locks", agentLabel+".lock")
+	unlock, err := lockAgent(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockAgent(a); err == nil || !strings.Contains(err.Error(), "another boxpool up or down is running") {
+		t.Errorf("second lockAgent = %v; want it refused", err)
+	}
+	unlock()
+	unlock, err = lockAgent(a)
+	if err != nil {
+		t.Fatalf("lockAgent after unlock: %v", err)
+	}
+	unlock()
 }
 
 func TestParseDisabled(t *testing.T) {

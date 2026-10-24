@@ -295,8 +295,18 @@ func waitHealthy(c *client.Client, timeout time.Duration, failed func() error) e
 // installFile atomically replaces path with data and mode, unless it
 // already has them, and reports whether it changed anything.
 func installFile(path string, data []byte, mode os.FileMode) (bool, error) {
+	return installChecked(path, data, mode, nil)
+}
+
+// installChecked is installFile that first runs check, if not nil, on the
+// new file before it replaces path, or on path when it is up to date. When
+// check fails, path is left as it was.
+func installChecked(path string, data []byte, mode os.FileMode, check func(string) error) (bool, error) {
 	if old, err := os.ReadFile(path); err == nil && bytes.Equal(old, data) {
 		if fi, err := os.Stat(path); err == nil && fi.Mode() == mode {
+			if check != nil {
+				return false, check(path)
+			}
 			return false, nil
 		}
 	}
@@ -315,6 +325,11 @@ func installFile(path string, data []byte, mode os.FileMode) (bool, error) {
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
+	}
+	if err == nil && check != nil {
+		if err := check(f.Name()); err != nil {
+			return false, err
+		}
 	}
 	if err == nil {
 		err = os.Rename(f.Name(), path)

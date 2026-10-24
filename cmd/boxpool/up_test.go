@@ -46,6 +46,40 @@ func TestInstallFile(t *testing.T) {
 	}
 }
 
+func TestInstallChecked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "boxpool")
+	if _, err := installFile(path, []byte("good"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	var checked []string
+	bad := errors.New("bad signature")
+	check := func(p string) error {
+		b, _ := os.ReadFile(p)
+		checked = append(checked, string(b))
+		if string(b) != "good" {
+			return bad
+		}
+		return nil
+	}
+	if changed, err := installChecked(path, []byte("evil"), 0755, check); !errors.Is(err, bad) || changed {
+		t.Fatalf("installChecked(failing check) = %v, %v; want %v", changed, err, bad)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "good" {
+		t.Errorf("a failed check replaced the file with %q", got)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+		t.Errorf("temporary files left: %v", entries)
+	}
+	// An up-to-date file is checked too: an older version may have
+	// installed it unchecked.
+	if changed, err := installChecked(path, []byte("good"), 0755, check); err != nil || changed {
+		t.Errorf("installChecked(up to date) = %v, %v", changed, err)
+	}
+	if want := []string{"evil", "good"}; strings.Join(checked, ",") != strings.Join(want, ",") {
+		t.Errorf("checked %q; want %q", checked, want)
+	}
+}
+
 func TestUpSteps(t *testing.T) {
 	const (
 		enable  = "enable --no-reload boxpool; "

@@ -31,6 +31,10 @@ const SocketName = "boxpool.sock"
 // StoreName is the sandbox database's file name inside the state directory.
 const StoreName = "state.db"
 
+// LockName is the daemon lock's file name inside the state directory; the
+// running daemon holds it open.
+const LockName = "daemon.lock"
+
 // Defaults for a new sandbox's resources (#13).
 const (
 	DefaultCPUs     = backend.DefaultCPUs

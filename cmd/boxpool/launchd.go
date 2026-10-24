@@ -13,11 +13,16 @@ import (
 	"time"
 
 	"boxpool.run/boxpool/internal/client"
+	"boxpool.run/boxpool/internal/daemon"
 	"boxpool.run/boxpool/internal/preflight"
 )
 
 // agentLabel is the launchd label of the daemon's launch agent on macOS.
 const agentLabel = "run.boxpool.daemon"
+
+// exitTimeOut is the plist's ExitTimeOut: how long launchd lets the daemon
+// stop before it sends SIGKILL.
+const exitTimeOut = 60 * time.Second
 
 // launchAgent is where boxpool up installs the daemon on macOS, as the
 // user: a launch agent in the gui/<uid> domain, which launchd starts at
@@ -28,6 +33,7 @@ type launchAgent struct {
 	bin   string // the installed binary
 	log   string // the daemon's stdout and stderr
 	home  string // BOXPOOL_HOME for the daemon, or "" for the default
+	lock  string // serialises up and down
 }
 
 // userAgent returns the launch agent for this user. A BOXPOOL_HOME set at
@@ -50,6 +56,8 @@ func userAgent() (launchAgent, error) {
 		plist: filepath.Join(home, "Library", "LaunchAgents", agentLabel+".plist"),
 		bin:   filepath.Join(dir, "bin", "boxpool"),
 		log:   filepath.Join(home, "Library", "Logs", "boxpool", "daemon.log"),
+		// Not in dir: the label and plist are the same for every BOXPOOL_HOME.
+		lock: filepath.Join(home, "Library", "Application Support", "boxpool", agentLabel+".lock"),
 	}
 	if os.Getenv("BOXPOOL_HOME") != "" {
 		a.home = dir
@@ -103,7 +111,7 @@ func agentPlist(a launchAgent) []byte {
 		<false/>
 	</dict>
 	<key>ExitTimeOut</key>
-	<integer>60</integer>
+	<integer>` + strconv.Itoa(int(exitTimeOut.Seconds())) + `</integer>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>StandardOutPath</key>
@@ -124,6 +132,8 @@ type agentFacts struct {
 	pid        int  // its running process, or 0
 	plistStale bool // the plist on disk is not the one up writes
 	staleExe   bool // pid runs, but not the installed binary
+	// launchd has another program path loaded, e.g. from an earlier plist
+	wrongProgram bool
 }
 
 // agentSteps returns the launchctl commands that bring the agent up from
@@ -136,13 +146,14 @@ func agentSteps(f agentFacts, a launchAgent) [][]string {
 	if f.disabled { // bootstrap fails on a disabled label
 		steps = append(steps, []string{"enable", a.target()})
 	}
-	if f.loaded && f.plistStale {
+	reload := f.plistStale || f.wrongProgram
+	if f.loaded && reload {
 		steps = append(steps, []string{"bootout", a.target()})
 	}
 	if f.plistStale {
 		steps = append(steps, []string{"install"})
 	}
-	if !f.loaded || f.plistStale {
+	if !f.loaded || reload {
 		return append(steps, []string{"bootstrap", a.domain(), a.plist}) // RunAtLoad starts it
 	}
 	if f.pid == 0 || f.staleExe {
@@ -156,6 +167,7 @@ type service struct {
 	state    string // running, spawn scheduled, not running, ...
 	pid      int
 	lastExit string // "(never exited)" until the first exit
+	program  string // the loaded program path
 }
 
 // parseService reads launchctl print's top-level "key = value" lines.
@@ -172,6 +184,8 @@ func parseService(out string) (service, error) {
 			s.state = value
 		case key == "last exit code":
 			s.lastExit = value
+		case key == "program":
+			s.program = value
 		case key == "pid":
 			pid, err := strconv.Atoi(value)
 			if err != nil || pid <= 0 {
@@ -237,6 +251,7 @@ func observeAgent(a launchAgent) (agentFacts, error) {
 		return agentFacts{}, err
 	}
 	f.loaded, f.pid = loaded, s.pid
+	f.wrongProgram = loaded && s.program != a.bin
 	old, err := os.ReadFile(a.plist)
 	f.plistStale = err != nil || string(old) != string(agentPlist(a))
 	if f.pid != 0 {
@@ -259,24 +274,26 @@ func hasVirtualization(entitlements []byte) bool {
 // installAgent installs bin (the bytes of the binary at exe) and the plist
 // for a, then starts or restarts the agent as its observed state needs.
 func installAgent(a launchAgent, exe string, bin []byte) error {
-	ent, err := exec.Command("codesign", "-d", "--entitlements", "-", "--xml", exe).Output()
-	if err != nil || !hasVirtualization(ent) {
-		return fmt.Errorf("%s is not signed with the com.apple.security.virtualization entitlement, which the daemon needs to run VMs; sign it first: scripts/dev-sign.sh %s", exe, exe)
-	}
 	for _, dir := range []string{filepath.Dir(a.bin), filepath.Dir(a.log), filepath.Dir(a.plist)} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return err
 		}
 	}
-	changed, err := installFile(a.bin, bin, 0755)
+	// Checked on the staged copy, so a bad binary never replaces a good one.
+	changed, err := installChecked(a.bin, bin, 0755, func(path string) error {
+		ent, err := exec.Command("codesign", "-d", "--entitlements", "-", "--xml", path).Output()
+		if err != nil || !hasVirtualization(ent) {
+			return fmt.Errorf("%s is not signed with the com.apple.security.virtualization entitlement, which the daemon needs to run VMs; sign it first: scripts/dev-sign.sh %s", exe, exe)
+		}
+		if out, err := exec.Command("codesign", "-v", "--strict", path).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s has an invalid signature (codesign -v: %v: %s); sign it again: scripts/dev-sign.sh %s", exe, err, strings.TrimSpace(string(out)), exe)
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
 	report(changed, a.bin)
-	// A copy keeps the embedded signature; check it survived.
-	if out, err := exec.Command("codesign", "-v", a.bin).CombinedOutput(); err != nil {
-		return fmt.Errorf("codesign -v %s: %v: %s", a.bin, err, strings.TrimSpace(string(out)))
-	}
 	f, err := observeAgent(a)
 	if err != nil {
 		return err
@@ -292,6 +309,11 @@ func installAgent(a launchAgent, exe string, bin []byte) error {
 				return err
 			}
 			report(true, a.plist)
+			continue
+		case "bootout":
+			if err := bootout(a, f.pid); err != nil {
+				return err
+			}
 			continue
 		case "kickstart":
 			fmt.Println("restarting " + a.label)
@@ -326,15 +348,89 @@ func agentFailed(a launchAgent) error {
 	return nil
 }
 
+// checkServing returns an error unless the agent's daemon is the one that
+// holds the state directory's lock: a daemon run by hand on the same state
+// directory answers health checks while the agent fails to start.
+func checkServing(a launchAgent) error {
+	s, ok, err := printService(a)
+	if err != nil {
+		return err
+	}
+	lock := filepath.Join(filepath.Dir(filepath.Dir(a.bin)), daemon.LockName)
+	out, _ := exec.Command("lsof", "-t", lock).Output() // exits 1 for no match
+	var others []string
+	for _, pid := range strings.Fields(string(out)) {
+		if pid != strconv.Itoa(s.pid) {
+			others = append(others, pid)
+		}
+	}
+	switch {
+	case len(others) > 0:
+		return fmt.Errorf("another boxpool daemon (pid %s), not the launch agent %s, is running with state directory %s; stop it, then run boxpool up again", strings.Join(others, ", "), a.label, filepath.Dir(lock))
+	case !ok || s.state != "running" || !listsPID(string(out), s.pid):
+		return fmt.Errorf("the launch agent %s is not the daemon serving %s (state %q, pid %d, last exit code %s)", a.label, filepath.Dir(lock), s.state, s.pid, s.lastExit)
+	}
+	return nil
+}
+
+// upAgent is boxpool up after preflight: it installs and starts the agent,
+// then waits until its daemon, and no other, serves the state directory.
+func upAgent(a launchAgent, exe string, bin []byte) error {
+	unlock, err := lockAgent(a)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := installAgent(a, exe, bin); err != nil {
+		return err
+	}
+	fmt.Println("waiting for the daemon; its first start downloads the guest image (about 45 MB)")
+	err = waitHealthy(client.New(filepath.Dir(filepath.Dir(a.bin))), upTimeout, func() error { return agentFailed(a) })
+	if err == nil {
+		err = checkServing(a)
+	}
+	if err != nil {
+		return fmt.Errorf("%w; see %s", err, a.log)
+	}
+	return nil
+}
+
+// bootout boots the agent out and waits until launchd no longer has it and
+// its daemon, pid (0 for none), has exited: launchctl bootout can return
+// while the daemon still stops its VMs, and bootstrap fails until then.
+func bootout(a launchAgent, pid int) error {
+	if err := launchctl("bootout", a.target()); err != nil {
+		return err
+	}
+	timeout := exitTimeOut + 15*time.Second // launchd sends SIGKILL at exitTimeOut
+	for deadline := time.Now().Add(timeout); ; time.Sleep(200 * time.Millisecond) {
+		_, loaded, err := printService(a)
+		if err != nil {
+			return err
+		}
+		if !loaded && !alive(pid) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s did not stop within %v of launchctl bootout (pid %d, still loaded: %v)", a.label, timeout, pid, loaded)
+		}
+	}
+}
+
 // stopAgent boots the agent out, which stops the daemon and its VMs, and
 // removes its plist so that the next login does not start it again.
 // Removing it rather than launchctl disable leaves no override for up to
 // undo: up writes the plist again.
 func stopAgent(a launchAgent) error {
-	if _, loaded, err := printService(a); err != nil {
+	unlock, err := lockAgent(a)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if s, loaded, err := printService(a); err != nil {
 		return err
 	} else if loaded {
-		if err := launchctl("bootout", a.target()); err != nil {
+		if err := bootout(a, s.pid); err != nil {
 			return err
 		}
 	}
@@ -386,17 +482,11 @@ func upLaunchd(args []string) int {
 		fmt.Fprintf(os.Stderr, "boxpool up: read this binary: %v\n", err)
 		return 1
 	}
-	if err := installAgent(a, exe, bin); err != nil {
+	if err := upAgent(a, exe, bin); err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
 		return 1
 	}
-	dir := filepath.Dir(filepath.Dir(a.bin))
-	fmt.Println("waiting for the daemon; its first start downloads the guest image (about 45 MB)")
-	if err := waitHealthy(client.New(dir), upTimeout, func() error { return agentFailed(a) }); err != nil {
-		fmt.Fprintf(os.Stderr, "boxpool up: %v; see %s\n", err, a.log)
-		return 1
-	}
-	return printRunning(dir, start)
+	return printRunning(filepath.Dir(filepath.Dir(a.bin)), start)
 }
 
 func downLaunchd(args []string) int {
