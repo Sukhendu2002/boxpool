@@ -44,7 +44,7 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	if fi.Mode().Perm()&0022 != 0 {
 		return fmt.Errorf("state directory %s is writable by group or others (mode %v): run chmod go-w on it", dir, fi.Mode().Perm())
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, "daemon.lock"), os.O_RDWR|os.O_CREATE, 0600)
+	lock, err := os.OpenFile(filepath.Join(dir, LockName), os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return err
 	}
@@ -55,6 +55,7 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 		}
 		return fmt.Errorf("lock %s: %w", lock.Name(), err)
 	}
+	info.PID = os.Getpid()
 	st, err := store.Open(filepath.Join(dir, StoreName))
 	if err != nil {
 		return err

@@ -31,6 +31,10 @@ const SocketName = "boxpool.sock"
 // StoreName is the sandbox database's file name inside the state directory.
 const StoreName = "state.db"
 
+// LockName is the daemon lock's file name inside the state directory; the
+// running daemon holds it open.
+const LockName = "daemon.lock"
+
 // Defaults for a new sandbox's resources (#13).
 const (
 	DefaultCPUs     = backend.DefaultCPUs
@@ -45,6 +49,8 @@ type Info struct {
 	Arch     string `json:"arch"`
 	StateDir string `json:"state_dir"`
 	Backend  string `json:"backend"`
+	// PID is the serving daemon's process ID; Run sets it.
+	PID int `json:"pid"`
 	// Warning, if set, is about the backend, e.g. that it is a fallback with
 	// weaker isolation. Commands that create sandboxes print it.
 	Warning string `json:"warning,omitempty"`

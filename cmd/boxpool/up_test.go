@@ -46,6 +46,40 @@ func TestInstallFile(t *testing.T) {
 	}
 }
 
+func TestInstallChecked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "boxpool")
+	if _, err := installFile(path, []byte("good"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	var checked []string
+	bad := errors.New("bad signature")
+	check := func(p string) error {
+		b, _ := os.ReadFile(p)
+		checked = append(checked, string(b))
+		if string(b) != "good" {
+			return bad
+		}
+		return nil
+	}
+	if changed, err := installChecked(path, []byte("evil"), 0755, check); !errors.Is(err, bad) || changed {
+		t.Fatalf("installChecked(failing check) = %v, %v; want %v", changed, err, bad)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "good" {
+		t.Errorf("a failed check replaced the file with %q", got)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+		t.Errorf("temporary files left: %v", entries)
+	}
+	// An up-to-date file is checked too: an older version may have
+	// installed it unchecked.
+	if changed, err := installChecked(path, []byte("good"), 0755, check); err != nil || changed {
+		t.Errorf("installChecked(up to date) = %v, %v", changed, err)
+	}
+	if want := []string{"evil", "good"}; strings.Join(checked, ",") != strings.Join(want, ",") {
+		t.Errorf("checked %q; want %q", checked, want)
+	}
+}
+
 func TestUpSteps(t *testing.T) {
 	const (
 		enable  = "enable --no-reload boxpool; "
@@ -88,13 +122,13 @@ func TestUpSteps(t *testing.T) {
 }
 
 func TestUpDownRefused(t *testing.T) {
-	if os.Geteuid() == 0 && runtime.GOOS == "linux" {
+	if runtime.GOOS == "darwin" {
+		t.Skip("as a user on macOS, up and down manage the real launch agent")
+	}
+	if os.Geteuid() == 0 {
 		t.Skip("as root on Linux, up would install the service")
 	}
 	want := "must run as root"
-	if runtime.GOOS == "darwin" {
-		want = "not supported on macOS yet (#22)"
-	}
 	for _, cmd := range []string{"up", "down"} {
 		if code, _, errOut := cli(t, t.TempDir(), "", cmd); code != 1 || !strings.Contains(errOut, want) {
 			t.Errorf("boxpool %s = %d %q, want %q", cmd, code, errOut, want)
