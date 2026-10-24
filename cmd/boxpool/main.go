@@ -27,8 +27,9 @@ Commands:
   daemon    run the node daemon in the foreground
   doctor    check whether this machine can host sandboxes
   version   print the version
-  up        install and start the daemon as a systemd service (Linux, root)
-  down      stop and disable the daemon's service, keeping its state
+  up        install and start the daemon: a systemd service on Linux (as
+            root), a launch agent on macOS (as you)
+  down      stop the daemon's service or launch agent, keeping its state
   join      join an existing pool (not implemented yet)
   sh        open a shell in a new or existing sandbox
   exec      run a command in a sandbox

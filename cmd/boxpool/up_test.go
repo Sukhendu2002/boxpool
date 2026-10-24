@@ -88,13 +88,13 @@ func TestUpSteps(t *testing.T) {
 }
 
 func TestUpDownRefused(t *testing.T) {
-	if os.Geteuid() == 0 && runtime.GOOS == "linux" {
+	if runtime.GOOS == "darwin" {
+		t.Skip("as a user on macOS, up and down manage the real launch agent")
+	}
+	if os.Geteuid() == 0 {
 		t.Skip("as root on Linux, up would install the service")
 	}
 	want := "must run as root"
-	if runtime.GOOS == "darwin" {
-		want = "not supported on macOS yet (#22)"
-	}
 	for _, cmd := range []string{"up", "down"} {
 		if code, _, errOut := cli(t, t.TempDir(), "", cmd); code != 1 || !strings.Contains(errOut, want) {
 			t.Errorf("boxpool %s = %d %q, want %q", cmd, code, errOut, want)

@@ -10,18 +10,29 @@ entitlement; no Developer ID is needed for local development:
 ```sh
 go build -o bin/boxpool ./cmd/boxpool
 scripts/dev-sign.sh bin/boxpool
-export BOXPOOL_HOME="$(mktemp -d /tmp/boxpool-dev.XXXXXX)"
-bin/boxpool doctor
-bin/boxpool daemon
-```
-
-In another terminal, set `BOXPOOL_HOME` to the same path, then run:
-
-```sh
+bin/boxpool up                    # as yourself, not with sudo
+launchctl print gui/$(id -u)/run.boxpool.daemon | grep -E '^\s(state|pid) ='
 bin/boxpool sh --timing --cpu 1 --mem 512m --disk 1g
 uname -m                          # aarch64
 echo kept > /root/stop-test
 exit
+bin/boxpool down
+```
+
+`up` installs the binary in `~/Library/Application Support/boxpool/bin`
+and runs it as the launch agent `run.boxpool.daemon`, logging to
+`~/Library/Logs/boxpool/daemon.log`. Rebuild, sign and run `up` again to
+restart it on the new binary; with nothing changed it keeps the running
+daemon. `down` stops it and removes its plist and keeps the state.
+
+To run the daemon in the foreground instead, against a scratch state
+directory, use `bin/boxpool daemon` and set the same `BOXPOOL_HOME` in the
+terminal you run `sh` from:
+
+```sh
+export BOXPOOL_HOME="$(mktemp -d /tmp/boxpool-dev.XXXXXX)"
+bin/boxpool doctor
+bin/boxpool daemon
 ```
 
 The first daemon start fetches the pinned arm64 kernel and rootfs (about
@@ -37,9 +48,11 @@ Sandboxes have no network until #21. Pause/resume (#29) and notarized
 releases (#24) are separate work. Stop syncs and freezes the guest rootfs,
 then triggers sysrq power-off; guest programs get no exit signal first
 (#91). If that fails, Stop requests a framework shutdown, then forces it,
-reporting `backend.ErrUncleanStop`. Ctrl-C the daemon to stop its VMs;
-their disks remain for the next start. The framework's VM helpers also end
-when the daemon process exits. Check for leftovers after exit:
+reporting `backend.ErrUncleanStop`. `boxpool down` or Ctrl-C on a
+foreground daemon stops its VMs; their disks remain for the next start.
+The agent's plist gives that shutdown 60 seconds (`ExitTimeOut`) before
+launchd kills the daemon. The framework's VM helpers also end when the
+daemon process exits. Check for leftovers after exit:
 
 ```sh
 ps -axo pid,comm | grep '[c]om.apple.Virtualization.VirtualMachine'
@@ -54,7 +67,15 @@ go test -race ./...
 go test -c -tags integration -o /tmp/vz.test ./internal/backend/vz
 scripts/dev-sign.sh /tmp/vz.test
 /tmp/vz.test -test.v -test.timeout 5m
+go test -tags integration -run TestLaunchAgent -v ./cmd/boxpool
 ```
+
+`TestLaunchAgent` runs the launchd half of `up` and `down` with the label
+`run.boxpool.daemon.test` and a temporary state directory, so it needs no
+free-disk check and leaves your agent alone. It builds and signs its own
+binaries, refuses an unsigned one, checks that a second `up` keeps the
+daemon's PID, that a new binary or plist restarts it, that a VM runs under
+it, and that `down` stops it, removes the plist and leaves no VM helper.
 
 It checks arm64 exec, resource sizes, bounded console output, persistence,
 clean and forced stops, driver Close, and removal. Install `e2fsprogs`

@@ -87,8 +87,21 @@ which case it restarts the service. `sudo boxpool down` stops and disables
 the service and keeps `/var/lib/boxpool`. Stopping or restarting the
 service stops only the daemon (`KillMode=process`): running Firecracker
 VMs keep running until the daemon starts again, which today kills them
-(#27 will re-adopt them); Docker sandboxes keep running. On macOS, `up`
-and `down` are not supported yet (#22).
+(#27 will re-adopt them); Docker sandboxes keep running.
+
+On macOS, run `boxpool up` as yourself, not with sudo: the daemon runs as
+your user. Build and sign it first (see
+[macOS on Apple silicon](docs/development.md#macos-on-apple-silicon)); `up`
+refuses a binary without the virtualization entitlement. It runs doctor's
+checks, copies the binary to `bin/boxpool` in the state directory, writes
+the launch agent `~/Library/LaunchAgents/run.boxpool.daemon.plist`
+(restarted if it fails, logging to `~/Library/Logs/boxpool/daemon.log`),
+starts it in your login session and waits until the daemon answers. A
+`BOXPOOL_HOME` set when you run `up` is written into the agent. launchd
+starts the agent again at every login. Running `up` again changes nothing
+unless the binary or the plist changed, in which case it restarts the
+daemon. `boxpool down` stops the agent, which stops its VMs, and removes
+the plist; the state directory and the installed binary are kept.
 
 `boxpool daemon` runs the node daemon in the foreground. It creates the state
 directory (below), takes `daemon.lock` there so only one daemon runs per state

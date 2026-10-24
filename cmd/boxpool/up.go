@@ -58,8 +58,6 @@ WantedBy=multi-user.target
 // systemdOnly returns false after printing why cmd cannot run here.
 func systemdOnly(cmd string) bool {
 	switch {
-	case runtime.GOOS == "darwin":
-		fmt.Fprintf(os.Stderr, "boxpool %s: not supported on macOS yet (#22); run boxpool daemon instead\n", cmd)
 	case runtime.GOOS != "linux":
 		fmt.Fprintf(os.Stderr, "boxpool %s: not supported on %s\n", cmd, runtime.GOOS)
 	case os.Geteuid() != 0:
@@ -71,6 +69,9 @@ func systemdOnly(cmd string) bool {
 }
 
 func up(args []string) int {
+	if runtime.GOOS == "darwin" {
+		return upLaunchd(args)
+	}
 	if len(args) != 0 {
 		fmt.Fprint(os.Stderr, "Usage: boxpool up\n\nInstalls this binary as "+installPath+" and runs it as the systemd\nservice boxpool, then waits until the daemon is healthy. Needs root.\n")
 		return 2
@@ -85,14 +86,7 @@ func up(args []string) int {
 		return 1
 	}
 	start := time.Now()
-	exe, err := os.Executable()
-	if err == nil {
-		exe, err = filepath.EvalSymlinks(exe)
-	}
-	var bin []byte
-	if err == nil {
-		bin, err = os.ReadFile(exe)
-	}
+	_, bin, err := self()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool up: read this binary: %v\n", err)
 		return 1
@@ -106,13 +100,6 @@ func up(args []string) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
 		return 1
-	}
-	report := func(changed bool, path string) {
-		if changed {
-			fmt.Printf("installed %s\n", path)
-		} else {
-			fmt.Printf("%s is up to date\n", path)
-		}
 	}
 	report(binChanged, installPath)
 	report(unitChanged, unitPath)
@@ -143,22 +130,11 @@ func up(args []string) int {
 		return 1
 	}
 	fmt.Println("waiting for the daemon; its first start downloads Firecracker and the guest image (about 60 MB)")
-	if err := waitHealthy(client.New(dir), upTimeout); err != nil {
+	if err := waitHealthy(client.New(dir), upTimeout, systemdFailed); err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool up: %v; see: journalctl -u boxpool\n", err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	info, err := client.New(dir).Info(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
-		return 1
-	}
-	fmt.Printf("boxpool %s is running (backend %s, state in %s) after %v\n", info.Version, info.Backend, info.StateDir, time.Since(start).Round(100*time.Millisecond))
-	if info.Warning != "" {
-		fmt.Fprintf(os.Stderr, "warning: %s\n", info.Warning)
-	}
-	return 0
+	return printRunning(dir, start)
 }
 
 // upFacts is the systemd state boxpool up observed after installing its
@@ -255,6 +231,9 @@ func upSteps(f upFacts) ([][]string, error) {
 }
 
 func down(args []string) int {
+	if runtime.GOOS == "darwin" {
+		return downLaunchd(args)
+	}
 	if len(args) != 0 {
 		fmt.Fprint(os.Stderr, "Usage: boxpool down\n\nStops and disables the boxpool service. The state directory and the\ninstalled binary are kept. Needs root.\n")
 		return 2
@@ -280,9 +259,17 @@ func systemctl(args ...string) error {
 	return nil
 }
 
+// systemdFailed returns an error once Restart= has given up on the service.
+func systemdFailed() error {
+	if exec.Command("systemctl", "is-failed", "--quiet", "boxpool").Run() == nil {
+		return errors.New("boxpool.service failed")
+	}
+	return nil
+}
+
 // waitHealthy polls the daemon until it answers, printing progress, or
-// fails once timeout has passed or systemd gave up on the service.
-func waitHealthy(c *client.Client, timeout time.Duration) error {
+// fails once timeout has passed or failed returns an error.
+func waitHealthy(c *client.Client, timeout time.Duration, failed func() error) error {
 	start := time.Now()
 	for next := 15 * time.Second; ; time.Sleep(500 * time.Millisecond) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -295,9 +282,8 @@ func waitHealthy(c *client.Client, timeout time.Duration) error {
 		if waited > timeout {
 			return fmt.Errorf("the daemon is not healthy after %v: %w", timeout, err)
 		}
-		// is-failed succeeds once Restart= has given up.
-		if exec.Command("systemctl", "is-failed", "--quiet", "boxpool").Run() == nil {
-			return errors.New("boxpool.service failed")
+		if err := failed(); err != nil {
+			return err
 		}
 		if waited > next {
 			fmt.Printf("  still waiting (%v)\n", waited.Round(time.Second))
