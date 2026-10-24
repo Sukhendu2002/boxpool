@@ -137,7 +137,7 @@ func TestLaunchAgent(t *testing.T) {
 	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(a.bin), ".*")); len(left) != 0 {
 		t.Errorf("staged copies left: %v", left)
 	}
-	t.Log("modified signed binary refused; installed binary and pid kept")
+	t.Log("modified signed binary: refused")
 
 	// A second up or down while one runs is refused, and changes nothing.
 	unlock, err := lockAgent(a)
@@ -170,7 +170,7 @@ func TestLaunchAgent(t *testing.T) {
 	if loaded != (statErr == nil) {
 		t.Errorf("after a concurrent up and down: loaded %v, plist %v", loaded, statErr)
 	}
-	t.Logf("concurrent up and down: serialised (loaded %v)", loaded)
+	t.Logf("concurrent up and down: loaded %v, plist %v", loaded, statErr == nil)
 	pid = up(exe, bin)
 
 	// Leaves a running VM for the binary upgrade below.

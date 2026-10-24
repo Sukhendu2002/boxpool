@@ -321,6 +321,17 @@ func installAgent(a launchAgent, exe string, bin []byte) error {
 		if err := launchctl(s...); err != nil {
 			return err
 		}
+		if s[0] == "kickstart" {
+			// It returns while the old daemon still stops its VMs; until
+			// launchd starts the new one, the service looks exited.
+			err := waitAgent(a, "restart", func(svc service, _ bool) bool {
+				failed := svc.lastExit != "" && svc.lastExit != "0" && svc.lastExit != "(never exited)"
+				return !alive(f.pid) && (svc.pid != 0 && svc.pid != f.pid || failed)
+			})
+			if err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -402,17 +413,23 @@ func bootout(a launchAgent, pid int) error {
 	if err := launchctl("bootout", a.target()); err != nil {
 		return err
 	}
-	timeout := exitTimeOut + 15*time.Second // launchd sends SIGKILL at exitTimeOut
+	return waitAgent(a, "stop", func(_ service, loaded bool) bool { return !loaded && !alive(pid) })
+}
+
+// waitAgent polls launchctl print until done returns true, for longer than
+// launchd lets the daemon stop before it sends SIGKILL.
+func waitAgent(a launchAgent, what string, done func(s service, loaded bool) bool) error {
+	timeout := exitTimeOut + 15*time.Second
 	for deadline := time.Now().Add(timeout); ; time.Sleep(200 * time.Millisecond) {
-		_, loaded, err := printService(a)
+		s, loaded, err := printService(a)
 		if err != nil {
 			return err
 		}
-		if !loaded && !alive(pid) {
+		if done(s, loaded) {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("%s did not stop within %v of launchctl bootout (pid %d, still loaded: %v)", a.label, timeout, pid, loaded)
+			return fmt.Errorf("%s did not %s within %v (loaded %v, state %q, pid %d)", a.label, what, timeout, loaded, s.state, s.pid)
 		}
 	}
 }
