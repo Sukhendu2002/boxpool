@@ -49,6 +49,8 @@ type Info struct {
 	Arch     string `json:"arch"`
 	StateDir string `json:"state_dir"`
 	Backend  string `json:"backend"`
+	// PID is the serving daemon's process ID; Run sets it.
+	PID int `json:"pid"`
 	// Warning, if set, is about the backend, e.g. that it is a fallback with
 	// weaker isolation. Commands that create sandboxes print it.
 	Warning string `json:"warning,omitempty"`

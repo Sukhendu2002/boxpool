@@ -359,29 +359,39 @@ func agentFailed(a launchAgent) error {
 	return nil
 }
 
-// checkServing returns an error unless the agent's daemon is the one that
-// holds the state directory's lock: a daemon run by hand on the same state
-// directory answers health checks while the agent fails to start.
-func checkServing(a launchAgent) error {
-	s, ok, err := printService(a)
+// checkServing returns an error unless info, from the daemon serving the
+// state directory, is from the agent's daemon s: a daemon run by hand on
+// the same state directory answers health checks while the agent fails to
+// start.
+func checkServing(a launchAgent, s service, loaded bool, info daemon.Info) error {
+	dir := filepath.Dir(filepath.Dir(a.bin))
+	switch {
+	case info.PID != s.pid:
+		pid := strconv.Itoa(info.PID)
+		if info.PID == 0 {
+			// Only a daemon older than the binary just installed omits it.
+			pid = "unknown, an older boxpool"
+		}
+		return fmt.Errorf("another boxpool daemon (pid %s), not the launch agent %s, is running with state directory %s; stop it, then run boxpool up again", pid, a.label, dir)
+	case !loaded || s.state != "running":
+		return fmt.Errorf("the launch agent %s is not the daemon serving %s (state %q, pid %d, last exit code %s)", a.label, dir, s.state, s.pid, s.lastExit)
+	}
+	return nil
+}
+
+// serving asks launchd and the daemon for checkServing's facts.
+func serving(a launchAgent, c *client.Client) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info, err := c.Info(ctx)
 	if err != nil {
 		return err
 	}
-	lock := filepath.Join(filepath.Dir(filepath.Dir(a.bin)), daemon.LockName)
-	out, _ := exec.Command("lsof", "-t", lock).Output() // exits 1 for no match
-	var others []string
-	for _, pid := range strings.Fields(string(out)) {
-		if pid != strconv.Itoa(s.pid) {
-			others = append(others, pid)
-		}
+	s, loaded, err := printService(a)
+	if err != nil {
+		return err
 	}
-	switch {
-	case len(others) > 0:
-		return fmt.Errorf("another boxpool daemon (pid %s), not the launch agent %s, is running with state directory %s; stop it, then run boxpool up again", strings.Join(others, ", "), a.label, filepath.Dir(lock))
-	case !ok || s.state != "running" || !listsPID(string(out), s.pid):
-		return fmt.Errorf("the launch agent %s is not the daemon serving %s (state %q, pid %d, last exit code %s)", a.label, filepath.Dir(lock), s.state, s.pid, s.lastExit)
-	}
-	return nil
+	return checkServing(a, s, loaded, info)
 }
 
 // upAgent is boxpool up after preflight: it installs and starts the agent,
@@ -396,9 +406,10 @@ func upAgent(a launchAgent, exe string, bin []byte) error {
 		return err
 	}
 	fmt.Println("waiting for the daemon; its first start downloads the guest image (about 45 MB)")
-	err = waitHealthy(client.New(filepath.Dir(filepath.Dir(a.bin))), upTimeout, func() error { return agentFailed(a) })
+	c := client.New(filepath.Dir(filepath.Dir(a.bin)))
+	err = waitHealthy(c, upTimeout, func() error { return agentFailed(a) })
 	if err == nil {
-		err = checkServing(a)
+		err = serving(a, c)
 	}
 	if err != nil {
 		return fmt.Errorf("%w; see %s", err, a.log)

@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"boxpool.run/boxpool/internal/daemon"
 )
 
 var testAgent = launchAgent{
@@ -168,6 +170,28 @@ func TestListsPID(t *testing.T) {
 	}{{"42\n", true}, {"7\n42\n", true}, {"420\n", false}, {"", false}} {
 		if got := listsPID(c.out, 42); got != c.want {
 			t.Errorf("listsPID(%q, 42) = %v", c.out, got)
+		}
+	}
+}
+
+func TestCheckServing(t *testing.T) {
+	a := testAgent
+	running := service{state: "running", pid: 42}
+	for _, c := range []struct {
+		name   string
+		s      service
+		loaded bool
+		pid    int
+		want   string
+	}{
+		{"agent serving", running, true, 42, ""},
+		{"foreground daemon", service{state: "spawn scheduled", lastExit: "1"}, true, 7, "another boxpool daemon (pid 7)"},
+		{"older daemon", running, true, 0, "pid unknown"},
+		{"agent not loaded", service{}, false, 0, "is not the daemon serving"},
+	} {
+		err := checkServing(a, c.s, c.loaded, daemon.Info{PID: c.pid})
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%s: checkServing = %v; want %q", c.name, err, c.want)
 		}
 	}
 }

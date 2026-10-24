@@ -113,6 +113,18 @@ func TestLaunchAgent(t *testing.T) {
 		t.Logf("no-op up: pid %d kept", again)
 	}
 
+	// A process with the lock file open but not locked, such as a backup
+	// tool, is not another daemon.
+	held, err := os.Open(filepath.Join(home, daemon.LockName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again := up(exe, bin); again != pid {
+		t.Errorf("a no-op up with the lock file open elsewhere restarted the daemon: pid %d, then %d", pid, again)
+	}
+	held.Close()
+	t.Log("no-op up with the lock file open read-only: ok")
+
 	// A signed binary modified afterwards still has its entitlements, but
 	// must not replace the installed one.
 	good, err := os.ReadFile(a.bin)

@@ -67,6 +67,7 @@ func TestRun(t *testing.T) {
 	// A backend this daemon does not know serves none, without fetching anything.
 	want := daemon.Info{Version: "test", OS: "linux", Arch: "amd64", StateDir: dir, Backend: "none"}
 	stop := start(t, dir, want)
+	want.PID = os.Getpid() // the daemon runs in this process
 
 	got, err := client.New(dir).Info(context.Background())
 	if err != nil || got != want {

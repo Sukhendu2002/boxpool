@@ -55,6 +55,7 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 		}
 		return fmt.Errorf("lock %s: %w", lock.Name(), err)
 	}
+	info.PID = os.Getpid()
 	st, err := store.Open(filepath.Join(dir, StoreName))
 	if err != nil {
 		return err
