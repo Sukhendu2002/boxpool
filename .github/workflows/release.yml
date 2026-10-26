@@ -60,7 +60,7 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "dist/boxpool-linux-$arch" ./cmd/boxpool
             file "dist/boxpool-linux-$arch" | grep "statically linked"
           done
-          test "$(dist/boxpool-linux-amd64 version)" = "$VERSION"
+          dist/boxpool-linux-amd64 version | grep -Fx "boxpool $VERSION"
       - uses: actions/upload-artifact@v4
         with:
           name: release-linux
@@ -124,7 +124,7 @@ jobs:
             codesign --verify --strict --verbose=2 "$exe"
             codesign -d --entitlements - "$exe" 2>/dev/null | grep com.apple.security.virtualization
           done
-          test "$("$BIN" version)" = "$VERSION"
+          "$BIN" version | grep -Fx "boxpool $VERSION"
       - name: Notarize
         if: github.event_name == 'push'
         env:
