@@ -4,6 +4,7 @@ set -euo pipefail
 [[ $# == 2 ]] || { echo 'usage: image/test-oci.sh <image> <expected-version>' >&2; exit 1; }
 image=$1 version=$2
 [[ $(docker run --rm "$image" cat /etc/boxpool-image) == "$version" ]]
+docker run --rm --network none "$image" sh -ec 'claude --version; codex --version; gemini --version'
 cid=$(docker run -d --network none "$image")
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 for ((i=0; i<50; i++)); do
@@ -24,4 +25,4 @@ docker exec "$cid" sh -ec '
 docker stop --timeout 5 "$cid" >/dev/null
 [[ $(docker inspect -f '{{.State.ExitCode}}' "$cid") == 0 ]]
 docker logs "$cid" 2>&1 | grep -F 'agent stopped'
-echo 'OCI version, unprivileged unix socket, orphan reaping and SIGTERM forwarding: OK'
+echo 'OCI version, agent CLIs, unprivileged unix socket, orphan reaping and SIGTERM forwarding: OK'
