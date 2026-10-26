@@ -72,6 +72,8 @@ jobs:
     # The macOS 26 SDK is what gives sandboxes a network.
     runs-on: macos-26
     timeout-minutes: 45
+    # No VM test here: hosted Macs report "Virtualization is not available on
+    # this hardware", so the vz integration test runs locally before tagging.
     env:
       VERSION: ${{ needs.version.outputs.value }}
       BIN: dist/boxpool-darwin-arm64
@@ -86,7 +88,6 @@ jobs:
         run: |
           xcrun --show-sdk-version
           CGO_ENABLED=1 GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$BIN" ./cmd/boxpool
-          go test -c -tags integration -o "$RUNNER_TEMP/vz.test" ./internal/backend/vz
       - name: Import the Developer ID certificate
         if: github.event_name == 'push'
         env:
@@ -119,11 +120,9 @@ jobs:
           else
             sign=(--sign -)
           fi
-          for exe in "$BIN" "$RUNNER_TEMP/vz.test"; do
-            codesign --force "${sign[@]}" --options runtime --timestamp --entitlements scripts/vz.entitlements "$exe"
-            codesign --verify --strict --verbose=2 "$exe"
-            codesign -d --entitlements - "$exe" 2>/dev/null | grep com.apple.security.virtualization
-          done
+          codesign --force "${sign[@]}" --options runtime --timestamp --entitlements scripts/vz.entitlements "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+          codesign -d --entitlements - "$BIN" 2>/dev/null | grep com.apple.security.virtualization
           "$BIN" version | grep -Fx "boxpool $VERSION"
       - name: Notarize
         if: github.event_name == 'push'
@@ -144,16 +143,6 @@ jobs:
           fi
           # A bare binary cannot be stapled; Gatekeeper fetches the ticket online.
           spctl -a -vv -t install "$BIN" 2>&1 | grep "source=Notarized Developer ID"
-      - name: Run the VM lifecycle integration test with the signed build
-        env:
-          BOXPOOL_TEST_HOME: ${{ runner.temp }}/bp-it
-        shell: bash
-        run: |
-          set -o pipefail
-          cd internal/backend/vz
-          "$RUNNER_TEMP/vz.test" -test.v -test.count=1 -test.timeout 15m -test.run '^TestIntegration$' 2>&1 | tee "$RUNNER_TEMP/vz.log"
-          grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/vz.log"
-          ! grep -q -- '--- SKIP' "$RUNNER_TEMP/vz.log"
       - name: Remove the signing keychain
         if: always() && env.KEYCHAIN != ''
         run: security delete-keychain "$KEYCHAIN"

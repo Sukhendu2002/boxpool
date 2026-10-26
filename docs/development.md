@@ -93,9 +93,10 @@ Pushing a `vX.Y.Z` tag (or `vX.Y.Z-suffix`, published as a pre-release) on a
 It builds static `boxpool-linux-amd64` and `boxpool-linux-arm64`, and
 `boxpool-darwin-arm64` with the macOS 26 SDK. It signs the Mac binary with the
 Developer ID, the hardened runtime and `scripts/vz.entitlements`, then has
-Apple notarize it. Next it runs the VM lifecycle integration test with a test
-binary signed the same way. Last, it uploads all three binaries and
-`checksums.txt` to the GitHub release.
+Apple notarize it. Last, it uploads all three binaries and `checksums.txt`
+to the GitHub release. GitHub's hosted Macs cannot run VMs ("Virtualization
+is not available on this hardware"), so run the integration tests above on
+your Mac before tagging.
 
 A tag push alone creates the release with the workflow's token, which does
 not trigger the [guest image workflow](../.github/workflows/image.yml). To
