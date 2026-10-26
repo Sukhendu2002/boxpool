@@ -1,7 +1,8 @@
 # Base guest image
 
 Issue #8: one Debian slim userland for Firecracker, Apple Virtualization
-(`vz`) and Docker. No systemd, coding agents or desktop packages. The VM
+(`vz`) and Docker. No systemd or desktop packages. Claude Code, Codex and
+Gemini CLI are preinstalled (issue #23, see [Coding agents](#coding-agents)). The VM
 rootfs is the **same Dockerfile userland stage** as the OCI image, including
 the same statically linked `boxpool-agent` and `/etc/boxpool-image` version.
 
@@ -92,7 +93,7 @@ Each selected generation contains:
 - `vmlinux-arm64`: **uncompressed arm64 `arch/arm64/boot/Image`, with its
   EFI/PE header**, despite the shared artifact name. It is not an ELF file.
   Use it for Firecracker aarch64 and Apple silicon `VZLinuxBootLoader`.
-- `rootfs-<arch>.ext4.zst`: compressed 512 MiB writable ext4 filesystem,
+- `rootfs-<arch>.ext4.zst`: compressed 2 GiB writable ext4 filesystem,
   including uid/gid, permissions, symlinks and hardlinks. No partition table
   and no initramfs; attach as the first virtio block disk (`/dev/vda`).
 - `kernel-config-<arch>`, `kernel-<arch>.txt`, `image-<arch>.txt`: resolved
@@ -160,6 +161,25 @@ virtio socket and virtio serial console (`console=hvc0`), with
 `root=/dev/vda rw init=/sbin/init`. All boot-critical drivers are built in,
 so no initial RAM disk is needed. The driver itself is outside this issue.
 
+## Coding agents
+
+[`versions.txt`](versions.txt) pins Node.js and the three agent CLIs. The
+build downloads the official Node.js tarball for the target and checks its
+SHA-256 from that file, then runs `npm install -g` with the exact CLI
+versions. npm checks each package against the registry's integrity hash and
+picks the native binary for the target CPU. The CLIs' own dependencies come
+from their published manifests, not a checked-in lockfile.
+
+To bump, edit `versions.txt` (for Node, copy the two `linux-x64` and
+`linux-arm64` `.tar.xz` lines from `https://nodejs.org/dist/v<version>/SHASUMS256.txt`),
+rebuild, and check the size: the agents are about 1 GiB unpacked, inside the
+2 GiB rootfs. VM sandboxes using this image need at least `--disk 2g`;
+the default 10 GiB disk still leaves room for work. The agents are not
+logged in; the vault does that (M7).
+
+See [the size and boot measurements](../docs/benchmarks/m2-agents.md),
+including the proposed slim variant for workloads that do not need agents.
+
 ## Init and container behavior
 
 The VM kernel automatically mounts devtmpfs at `/dev` before running
@@ -209,6 +229,7 @@ mounts (including exactly one devtmpfs at `/dev` with `nosuid`), writable
 directories, metadata and PID 1 orphan reaping. It also
 pipes input through `/dev/stdin` and `/dev/fd/0` and checks writes through
 `/dev/stdout` and `/dev/stderr` reach their respective redirected streams.
+It runs `claude --version`, `codex --version` and `gemini --version` in the guest.
 Success prints `GET /v1/version: protocol=1 agent=v0.1.0` and the smoke result.
 Failure prints console/Firecracker tails. Boot/probe/shutdown are bounded;
 the VM and temporary disk are removed on exit, keeping downloaded caches.

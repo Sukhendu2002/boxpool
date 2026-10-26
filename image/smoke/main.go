@@ -112,6 +112,9 @@ test "$(stat -c %a /var/tmp)" = 1777
 test "$(stat -c %u /root)" = 0
 test "$(readlink /bin)" = usr/bin
 test "$(cat /etc/boxpool-image)" = "$EXPECTED_VERSION"
+claude --version
+codex --version
+gemini --version
 touch /tmp/image-smoke /var/tmp/image-smoke /run/boxpool/image-smoke
 rm /tmp/image-smoke /var/tmp/image-smoke /run/boxpool/image-smoke
 sh -c 'sleep 0.2 </dev/null >/dev/null 2>&1 & echo $! > /tmp/image-orphan.pid'
@@ -130,6 +133,6 @@ echo image-smoke-ok
 	if _, err := c.Ports(ctx); err != nil {
 		return fmt.Errorf("guest /proc TCP discovery: %w", err)
 	}
-	fmt.Println("guest exec, PTY, device links, mounts, metadata, writable directories, orphan reaping and port discovery: OK")
+	fmt.Println("guest exec, PTY, agent CLIs, device links, mounts, metadata, writable directories, orphan reaping and port discovery: OK")
 	return nil
 }
