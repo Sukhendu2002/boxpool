@@ -46,8 +46,7 @@ image's `resize2fs` cannot perform this growth.
 
 On macOS 26 and later each sandbox gets outbound IPv4 through NAT on a
 network of its own, which needs the macOS 26 SDK (Command Line Tools 26 or
-later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause/resume (#29) and notarized
-releases (#24) are separate work. Stop syncs and freezes the guest rootfs,
+later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause/resume (#29) is separate work. Stop syncs and freezes the guest rootfs,
 then triggers sysrq power-off; guest programs get no exit signal first
 (#91). If that fails, Stop requests a framework shutdown, then forces it,
 reporting `backend.ErrUncleanStop`. `boxpool down` or Ctrl-C on a
@@ -86,6 +85,45 @@ Artifacts are cached in `~/Library/Caches/boxpool-test`, or
 `BOXPOOL_TEST_HOME` when set. Boot times include waiting for the agent and
 growing ext4. CI builds and runs unit tests with cgo on macOS; Linux and
 Windows do not compile the framework binding.
+
+## Releases
+
+Pushing a `vX.Y.Z` tag (or `vX.Y.Z-suffix`, published as a pre-release) on a
+`main` commit runs the [release workflow](../.github/workflows/release.yml).
+It builds static `boxpool-linux-amd64` and `boxpool-linux-arm64`, and
+`boxpool-darwin-arm64` with the macOS 26 SDK. It signs the Mac binary with the
+Developer ID, the hardened runtime and `scripts/vz.entitlements`, then has
+Apple notarize it. Next it runs the VM lifecycle integration test with a test
+binary signed the same way. Last, it uploads all three binaries and
+`checksums.txt` to the GitHub release.
+
+A tag push alone creates the release with the workflow's token, which does
+not trigger the [guest image workflow](../.github/workflows/image.yml). To
+publish images too, create the release yourself (`gh release create` or
+the web UI); the release workflow then uploads into that release.
+
+The macOS job needs these repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_P12` | base64 of the exported "Developer ID Application" certificate and key (`base64 -i cert.p12`) |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
+| `APPLE_ID` | the Apple ID email used for notarization |
+| `APPLE_TEAM_ID` | the 10-character team ID |
+| `APPLE_APP_PASSWORD` | an [app-specific password](https://support.apple.com/102654) for that Apple ID |
+
+Check a release:
+
+```sh
+gh release download v0.1.0-alpha.1 --dir /tmp/rel && cd /tmp/rel
+shasum -a 256 -c checksums.txt
+file boxpool-linux-amd64              # statically linked
+chmod +x boxpool-darwin-arm64
+spctl -a -vv -t install boxpool-darwin-arm64   # source=Notarized Developer ID
+```
+
+A bare binary cannot be stapled, so Gatekeeper checks its notarization
+online the first time it runs.
 
 ## Linux and KVM
 
