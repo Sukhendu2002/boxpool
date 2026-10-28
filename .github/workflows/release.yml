@@ -1,0 +1,140 @@
+name: Release
+
+# A v* tag builds and publishes the binaries without Apple signing secrets.
+# macOS builds are ad-hoc signed, not notarized. Pull requests run the same
+# build and signing checks without publishing a release.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'scripts/vz.entitlements'
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      value: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select version and validate release source
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if [[ $GITHUB_EVENT_NAME == push ]]; then
+            [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?$ ]]
+            git merge-base --is-ancestor HEAD origin/main
+            version=$TAG
+          else
+            version=0.0.0-dev.${GITHUB_SHA:0:12}
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Lint this workflow
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml
+      - name: Build static binaries
+        run: |
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "dist/boxpool-linux-$arch" ./cmd/boxpool
+            file "dist/boxpool-linux-$arch" | grep "statically linked"
+          done
+          dist/boxpool-linux-amd64 version | grep -Fx "boxpool $VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    # The macOS 26 SDK is what gives sandboxes a network.
+    runs-on: macos-26
+    timeout-minutes: 15
+    # No VM test here: hosted Macs report "Virtualization is not available on
+    # this hardware", so the vz integration test runs locally before tagging.
+    env:
+      VERSION: ${{ needs.version.outputs.value }}
+      BIN: dist/boxpool-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          xcrun --show-sdk-version
+          CGO_ENABLED=1 GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$BIN" ./cmd/boxpool
+      - name: Ad-hoc sign with the virtualization entitlement
+        shell: bash
+        run: |
+          set -euo pipefail
+          codesign --force --sign - --options runtime --timestamp=none --entitlements scripts/vz.entitlements "$BIN"
+          codesign --verify --strict --verbose=2 "$BIN"
+          codesign -d --verbose=4 "$BIN" 2>&1 | grep -Fx "Signature=adhoc"
+          codesign -d --entitlements - "$BIN" 2>/dev/null | grep com.apple.security.virtualization
+          "$BIN" version | grep -Fx "boxpool $VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: ${{ env.BIN }}
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [version, linux, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Publish binaries and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          files=(boxpool-*)
+          test "${#files[@]}" -eq 3
+          sha256sum boxpool-* > checksums.txt
+          cat checksums.txt
+          # A release made in the UI pushes this tag too and already exists.
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            flags=()
+            [[ $VERSION == *-* ]] && flags+=(--prerelease)
+            notes="The macOS binary is ad-hoc signed and is not notarized. See the [verification and Gatekeeper instructions](https://github.com/$GH_REPO/blob/$VERSION/docs/development.md#releases) before running it."
+            gh release create "$VERSION" --verify-tag --title "$VERSION" --generate-notes --notes "$notes" "${flags[@]}"
+          fi
+          gh release upload "$VERSION" boxpool-* checksums.txt

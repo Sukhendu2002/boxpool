@@ -46,8 +46,7 @@ image's `resize2fs` cannot perform this growth.
 
 On macOS 26 and later each sandbox gets outbound IPv4 through NAT on a
 network of its own, which needs the macOS 26 SDK (Command Line Tools 26 or
-later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause/resume (#29) and notarized
-releases (#24) are separate work. Stop syncs and freezes the guest rootfs,
+later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause/resume (#29) is separate work. Stop syncs and freezes the guest rootfs,
 then triggers sysrq power-off; guest programs get no exit signal first
 (#91). If that fails, Stop requests a framework shutdown, then forces it,
 reporting `backend.ErrUncleanStop`. `boxpool down` or Ctrl-C on a
@@ -86,6 +85,68 @@ Artifacts are cached in `~/Library/Caches/boxpool-test`, or
 `BOXPOOL_TEST_HOME` when set. Boot times include waiting for the agent and
 growing ext4. CI builds and runs unit tests with cgo on macOS; Linux and
 Windows do not compile the framework binding.
+
+## Releases
+
+Pushing a `vX.Y.Z` tag (or `vX.Y.Z-suffix`, published as a pre-release) on a
+`main` commit runs the [release workflow](../.github/workflows/release.yml).
+It builds static `boxpool-linux-amd64` and `boxpool-linux-arm64`, and
+`boxpool-darwin-arm64` with the macOS 26 SDK. The Mac binary is ad-hoc signed
+with the hardened runtime and `scripts/vz.entitlements`. It is **not Developer
+ID signed or notarized**. This release path requires no paid Apple Developer
+membership or Apple repository secrets; Developer ID signing and notarization
+are deferred. Last, the workflow uploads all three binaries and
+`checksums.txt` to the GitHub release using the automatic `GITHUB_TOKEN`.
+PRs that touch the workflow build and verify the same signatures without
+publishing. GitHub's hosted Macs cannot run VMs ("Virtualization is not
+available on this hardware"), so run the integration tests above on your Mac
+before tagging.
+
+A tag push alone creates the release with the workflow's token, which does
+not trigger the [guest image workflow](../.github/workflows/image.yml). To
+publish images too, create the release yourself (`gh release create` or
+the web UI); the release workflow then uploads into that release. Include
+the ad-hoc signing and Gatekeeper notice below in manually created release
+notes too; workflow-created releases include a link to these instructions.
+
+Check a release:
+
+```sh
+release_dir=$(mktemp -d /tmp/boxpool-release.XXXXXX)
+gh release download v0.1.0-alpha.1 --repo Sukhendu2002/boxpool \
+  --pattern 'boxpool-*' --pattern checksums.txt --dir "$release_dir"
+cd "$release_dir"
+shasum -a 256 -c checksums.txt
+file boxpool-linux-amd64 boxpool-linux-arm64   # both statically linked
+chmod +x boxpool-darwin-arm64
+codesign --verify --strict --verbose=2 boxpool-darwin-arm64
+codesign -d --verbose=4 boxpool-darwin-arm64   # Signature=adhoc
+codesign -d --entitlements - boxpool-darwin-arm64
+# Expect com.apple.security.virtualization = true in the entitlement output.
+```
+
+All three checksums must say `OK`. The ad-hoc signature verifies the binary's
+integrity and carries the virtualization entitlement; it does not establish
+a trusted publisher identity or Apple notarization. `spctl` rejection is
+expected for this release and is not a signature verification failure.
+
+macOS may block a browser-downloaded binary because it is not notarized.
+After verifying the download's source and checksums, try opening it, then
+use **System Settings → Privacy & Security → Open Anyway** if offered
+([Apple's instructions](https://support.apple.com/102445)). For a trusted
+standalone CLI download, you can instead remove quarantine from that file
+only, if present:
+
+```sh
+if xattr -p com.apple.quarantine boxpool-darwin-arm64 >/dev/null 2>&1; then
+  xattr -d com.apple.quarantine boxpool-darwin-arm64
+fi
+./boxpool-darwin-arm64 version         # boxpool v0.1.0-alpha.1
+./boxpool-darwin-arm64 doctor
+```
+
+Leave system-wide Gatekeeper protection enabled. Building from source and
+using `scripts/dev-sign.sh` is another free option.
 
 ## Linux and KVM
 
