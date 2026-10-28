@@ -92,8 +92,8 @@ func TestCreateListRemove(t *testing.T) {
 	if list, err := d.List(ctx); err != nil || len(list) != 1 || list[0].State != backend.StatePaused {
 		t.Errorf("List with saved state: %+v, %v; want abc paused", list, err)
 	}
-	if err := d.Stop(ctx, "abc"); err != nil {
-		t.Fatal(err)
+	if err := d.Stop(ctx, "abc"); err == nil || !savedState(l) {
+		t.Errorf("Stop of paused sandbox: %v; saved state was lost", err)
 	}
 	if _, err := d.Dial(ctx, "abc"); err == nil {
 		t.Error("Dial of stopped sandbox succeeded")

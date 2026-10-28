@@ -277,6 +277,19 @@ func TestIntegrationPause(t *testing.T) {
 	if list, err := d.List(ctx); err != nil || len(list) != 1 || list[0].State != backend.StatePaused {
 		t.Fatalf("List after Pause: %+v, %v", list, err)
 	}
+	// Reopen the same sandbox with a fresh driver, as after a daemon restart.
+	stateRoot := filepath.Dir(d.root)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := artifacts.Fetch(ctx, filepath.Join(stateDir(t), artifacts.DirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err = New(ctx, stateRoot, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
 	c.CloseIdleConnections()
 	start = time.Now()
 	if err := d.Resume(ctx, id); err != nil {

@@ -193,6 +193,11 @@ func (d *Driver) start(ctx context.Context, id string, resume bool) error {
 		return err
 	}
 	defer unlock()
+	return d.startLocked(ctx, id, resume)
+}
+
+// startLocked starts or restores a sandbox with its admission lock held.
+func (d *Driver) startLocked(ctx context.Context, id string, resume bool) error {
 	l, spec, err := d.load(id)
 	if err != nil {
 		return err
@@ -503,9 +508,11 @@ func (d *Driver) Stop(ctx context.Context, id string) error {
 		return err
 	}
 	if d.running(id) == nil && savedState(l) {
-		// A saved VM has no process to shut down. Discarding its paused
-		// memory makes Stop's result unambiguously stopped.
-		return removeSavedState(l)
+		// Restore first so dirty guest data held only in the saved VM state is
+		// flushed by the normal clean shutdown path.
+		if err := d.startLocked(lockCtx, id, true); err != nil {
+			return err
+		}
 	}
 	return d.stop(ctx, id)
 }

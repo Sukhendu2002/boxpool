@@ -6,11 +6,11 @@ Run on 2026-10-28 on an Apple M2 with 16 GB RAM, macOS 27.0.1, arm64. Three inte
 
 | Run | Pause | Resume until agent answered |
 | --- | ---: | ---: |
-| 1 | 401 ms | 234 ms |
-| 2 | 417 ms | 230 ms |
-| 3 | 409 ms | 229 ms |
+| 1 | 399 ms | 223 ms |
+| 2 | 449 ms | 222 ms |
+| 3 | 406 ms | 230 ms |
 
-The observed resume time is below the M3 gate of 1 s. The integration test also verified that a background guest process continued writing across pause and resume.
+The observed resume time is below the M3 gate of 1 s. The integration test also verified that a background guest process continued writing across pause, daemon restart, and resume.
 
 ## Reproduce
 
