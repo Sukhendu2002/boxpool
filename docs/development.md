@@ -46,7 +46,7 @@ image's `resize2fs` cannot perform this growth.
 
 On macOS 26 and later each sandbox gets outbound IPv4 through NAT on a
 network of its own, which needs the macOS 26 SDK (Command Line Tools 26 or
-later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause/resume (#29) is separate work. Stop syncs and freezes the guest rootfs,
+later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause saves the Virtualization framework machine state on macOS 14+ and Resume restores it; unsupported configurations fall back to Stop. See [the M3 benchmark](benchmarks/m3-macos-pause.md). Stop syncs and freezes the guest rootfs,
 then triggers sysrq power-off; guest programs get no exit signal first
 (#91). If that fails, Stop requests a framework shutdown, then forces it,
 reporting `backend.ErrUncleanStop`. `boxpool down` or Ctrl-C on a

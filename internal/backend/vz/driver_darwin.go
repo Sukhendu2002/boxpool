@@ -61,8 +61,9 @@ type machine struct {
 	vsock interface {
 		Connect(uint32) (*virt.VirtioSocketConnection, error)
 	}
-	stopped chan struct{} // closed once the VM has stopped
-	console chan struct{} // closed once the console rotator has returned
+	saveRestoreErr error         // non-nil when this VM cannot use saved machine state
+	stopped        chan struct{} // closed once the VM has stopped
+	console        chan struct{} // closed once the console rotator has returned
 }
 
 // New decompresses the fetched rootfs once and creates the sandboxes
@@ -166,9 +167,19 @@ func growDisk(path string, size int64) error {
 	return os.Truncate(path, size)
 }
 
-// Start boots the sandbox and returns once its agent answers. Starting a
-// running sandbox does nothing.
+// Start boots the sandbox, or restores a saved machine state, and returns
+// once its agent answers. Starting a running sandbox does nothing.
 func (d *Driver) Start(ctx context.Context, id string) error {
+	return d.start(ctx, id, false)
+}
+
+// Resume restores a paused sandbox and returns once its agent answers.
+// Resuming a running sandbox does nothing.
+func (d *Driver) Resume(ctx context.Context, id string) error {
+	return d.start(ctx, id, true)
+}
+
+func (d *Driver) start(ctx context.Context, id string, resume bool) error {
 	if err := validID(id); err != nil {
 		return err
 	}
@@ -189,6 +200,10 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	if d.running(id) != nil {
 		return nil
 	}
+	restore := savedState(l)
+	if resume && !restore {
+		return fmt.Errorf("resume sandbox %s: it is not paused", id)
+	}
 	d.waitConsole(id)
 	cfg, err := newVMConfig(spec, d.kernel, l, d.limits)
 	if err != nil {
@@ -204,7 +219,11 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 		}
 		cfg.CommandLine += netBootArg
 	}
-	m, err := startVM(cfg, network)
+	var statePath string
+	if restore {
+		statePath = l.state
+	}
+	m, err := startVM(cfg, network, statePath)
 	if err != nil {
 		return fmt.Errorf("start sandbox %s: %w", id, err)
 	}
@@ -251,7 +270,7 @@ func (d *Driver) releaseNetwork(id string) {
 
 // startVM builds the framework's objects for cfg and starts the VM, with a
 // network device on network unless it is nil.
-func startVM(cfg vmConfig, network unsafe.Pointer) (*machine, error) {
+func startVM(cfg vmConfig, network unsafe.Pointer, statePath string) (*machine, error) {
 	boot, err := virt.NewLinuxBootLoader(cfg.Kernel, virt.WithCommandLine(cfg.CommandLine))
 	if err != nil {
 		return nil, err
@@ -268,14 +287,21 @@ func startVM(cfg vmConfig, network unsafe.Pointer) (*machine, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := blk.SetBlockDeviceIdentifier(cfg.MAC); err != nil && statePath != "" {
+		return nil, err
+	}
 	c.SetStorageDevicesVirtualMachineConfiguration([]virt.StorageDeviceConfiguration{blk})
 	capture, err := newConsoleCapture(cfg.Console)
 	if err != nil {
 		return nil, err
 	}
+	var vm *virt.VirtualMachine
 	started := false
 	defer func() {
 		if !started {
+			if vm != nil && vm.CanStop() {
+				_ = vm.Stop()
+			}
 			capture.close()
 		}
 	}()
@@ -311,18 +337,46 @@ func startVM(cfg vmConfig, network unsafe.Pointer) (*machine, error) {
 		}
 		c.SetNetworkDevicesVirtualMachineConfiguration([]*virt.VirtioNetworkDeviceConfiguration{nic})
 	}
+	machineID, err := loadMachineIdentifier(cfg.MachineID)
+	if err != nil {
+		return nil, fmt.Errorf("load machine identifier: %w", err)
+	}
+	platform, err := virt.NewGenericPlatformConfiguration(virt.WithGenericMachineIdentifier(machineID))
+	if err != nil {
+		return nil, err
+	}
+	c.SetPlatformVirtualMachineConfiguration(platform)
 	if _, err := c.Validate(); err != nil {
 		return nil, entitlementHint(err)
 	}
-	vm, err := virt.NewVirtualMachine(c)
+	saveRestoreOK, saveRestoreErr := c.ValidateSaveRestoreSupport()
+	if saveRestoreErr == nil && !saveRestoreOK {
+		saveRestoreErr = errors.New("the VM configuration does not support saved machine state")
+	}
+	vm, err = virt.NewVirtualMachine(c)
 	if err != nil {
 		return nil, entitlementHint(err)
 	}
-	if err := vm.Start(); err != nil {
-		return nil, entitlementHint(err)
+	if statePath == "" {
+		if err := vm.Start(); err != nil {
+			return nil, entitlementHint(err)
+		}
+	} else {
+		if saveRestoreErr != nil {
+			return nil, fmt.Errorf("restore saved machine state: %w", saveRestoreErr)
+		}
+		if err := vm.RestoreMachineStateFromURL(statePath); err != nil {
+			return nil, entitlementHint(err)
+		}
+		if err := vm.Resume(); err != nil {
+			return nil, entitlementHint(err)
+		}
+		if err := os.Remove(statePath); err != nil {
+			return nil, fmt.Errorf("remove restored machine state: %w", err)
+		}
 	}
 	started = true
-	m := &machine{vm: vm, vsock: vm.SocketDevices()[0], stopped: make(chan struct{}), console: make(chan struct{})}
+	m := &machine{vm: vm, vsock: vm.SocketDevices()[0], saveRestoreErr: saveRestoreErr, stopped: make(chan struct{}), console: make(chan struct{})}
 	go func() {
 		defer close(m.console)
 		capture.run(m.stopped)
@@ -444,8 +498,14 @@ func (d *Driver) Stop(ctx context.Context, id string) error {
 		return err
 	}
 	defer unlock()
-	if _, _, err := d.load(id); err != nil {
+	l, _, err := d.load(id)
+	if err != nil {
 		return err
+	}
+	if d.running(id) == nil && savedState(l) {
+		// A saved VM has no process to shut down. Discarding its paused
+		// memory makes Stop's result unambiguously stopped.
+		return removeSavedState(l)
 	}
 	return d.stop(ctx, id)
 }
@@ -597,12 +657,171 @@ func (d *Driver) Close() error {
 	return errors.Join(errs...)
 }
 
-func (d *Driver) Pause(ctx context.Context, id string) error {
-	return fmt.Errorf("pause: %w until saved machine state lands (#29)", backend.ErrNotSupported)
+type pausableVM interface {
+	CanPause() bool
+	Pause() error
+	Resume() error
+	SaveMachineStateToPath(string) error
 }
 
-func (d *Driver) Resume(ctx context.Context, id string) error {
-	return fmt.Errorf("resume: %w until saved machine state lands (#29)", backend.ErrNotSupported)
+// Pause saves the VM's state and stops its process, so it uses no CPU or
+// memory until Resume. If the host or VM configuration cannot save state, it
+// stops the sandbox instead and tells the caller to use Start.
+func (d *Driver) Pause(ctx context.Context, id string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
+	unlock, err := d.admission.LockSandbox(ctx, "vz", id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	l, _, err := d.load(id)
+	if err != nil {
+		return err
+	}
+	if savedState(l) && d.running(id) == nil {
+		return nil
+	}
+	m := d.running(id)
+	if m == nil {
+		return fmt.Errorf("pause sandbox %s: it is not running", id)
+	}
+	vm, ok := m.vm.(pausableVM)
+	if !ok {
+		return d.pauseFallback(ctx, id, errors.New("the VM does not support pausing"))
+	}
+	if m.saveRestoreErr != nil {
+		return d.pauseFallback(ctx, id, m.saveRestoreErr)
+	}
+	if !vm.CanPause() {
+		return d.pauseFallback(ctx, id, errors.New("the VM is not pausable"))
+	}
+	if err := vm.Pause(); err != nil {
+		return fmt.Errorf("pause sandbox %s: %w", id, err)
+	}
+	if err := saveMachineState(l, vm); err != nil {
+		resumeErr := vm.Resume()
+		return fmt.Errorf("pause sandbox %s: %w", id, errors.Join(err, resumeErr))
+	}
+	if err := forceStop(m); err != nil {
+		return fmt.Errorf("pause sandbox %s: saved machine state, but could not stop the VM: %w", id, err)
+	}
+	<-m.console
+	d.machines.CompareAndDelete(id, m)
+	return nil
+}
+
+func (d *Driver) pauseFallback(ctx context.Context, id string, reason error) error {
+	if err := d.stop(ctx, id); err != nil {
+		return fmt.Errorf("pause sandbox %s: saved machine state unsupported (%v); stop fallback failed: %w", id, reason, err)
+	}
+	return fmt.Errorf("pause sandbox %s: saved machine state unsupported (%v); stopped instead; use start to resume: %w", id, reason, backend.ErrNotSupported)
+}
+
+// saveMachineState publishes the state file only after the framework has
+// written and synced it, so its presence always means a complete snapshot.
+func saveMachineState(l layout, vm pausableVM) (err error) {
+	f, err := os.CreateTemp(l.dir, ".machine-state-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if cleanup := os.Remove(tmp); !errors.Is(cleanup, fs.ErrNotExist) {
+			err = errors.Join(err, cleanup)
+		}
+	}()
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Remove(tmp); err != nil {
+		return err
+	}
+	if err = vm.SaveMachineStateToPath(tmp); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmp, 0600); err != nil {
+		return err
+	}
+	if err = syncPath(tmp); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, l.state); err != nil {
+		return err
+	}
+	return syncPath(l.dir)
+}
+
+func savedState(l layout) bool {
+	_, err := os.Stat(l.state)
+	return err == nil
+}
+
+func removeSavedState(l layout) error {
+	if err := os.Remove(l.state); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return syncPath(l.dir)
+}
+
+func syncPath(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+func loadMachineIdentifier(path string) (*virt.GenericMachineIdentifier, error) {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		id, err := virt.NewGenericMachineIdentifier()
+		if err != nil {
+			return nil, err
+		}
+		if err := writeMachineIdentifier(path, id.DataRepresentation()); err != nil {
+			return nil, err
+		}
+		return id, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == 0 {
+		return nil, errors.New("machine identifier is empty")
+	}
+	return virt.NewGenericMachineIdentifierWithData(b)
+}
+
+func writeMachineIdentifier(path string, data []byte) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), ".machine-id-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if cleanup := os.Remove(tmp); !errors.Is(cleanup, fs.ErrNotExist) {
+			err = errors.Join(err, cleanup)
+		}
+	}()
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = os.Chmod(tmp, 0600); err != nil {
+		return err
+	}
+	if err = os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncPath(filepath.Dir(path))
 }
 
 // List returns the sandboxes on disk, running or stopped.
@@ -613,7 +832,7 @@ func (d *Driver) List(ctx context.Context) ([]backend.Sandbox, error) {
 	}
 	var list []backend.Sandbox
 	for _, e := range entries {
-		_, spec, err := d.load(e.Name())
+		l, spec, err := d.load(e.Name())
 		if errors.Is(err, fs.ErrNotExist) {
 			continue // not a sandbox, or Create has not finished
 		}
@@ -623,6 +842,8 @@ func (d *Driver) List(ctx context.Context) ([]backend.Sandbox, error) {
 		state := backend.StateStopped
 		if d.running(e.Name()) != nil {
 			state = backend.StateRunning
+		} else if savedState(l) {
+			state = backend.StatePaused
 		}
 		list = append(list, backend.Sandbox{ID: e.Name(), Name: spec.Name, State: state})
 	}
