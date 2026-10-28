@@ -94,15 +94,18 @@ func (d *Driver) stopNetwork(ctx context.Context, id string) error {
 	return errors.Join(deleteErr, d.removeRulesIfUnused(ctx))
 }
 
-// sweepNetwork removes verified owned taps after killOrphans has killed
-// every sandbox VM, then frees allocations whose sandbox directory is gone.
-// shortcut: deletes taps of VMs it could re-adopt; #27 must keep those.
+// sweepNetwork removes the verified owned taps of VMs that are not running
+// once adopt has run, then frees allocations whose sandbox directory is gone.
+// The firewall rules stay while an adopted VM has its tap.
 func (d *Driver) sweepNetwork(ctx context.Context) error {
 	slots, err := d.store.NetSlots(ctx)
 	if err != nil {
 		return err
 	}
 	for id, slot := range slots {
+		if _, ok := running(sandboxLayout(d.root, id)); ok {
+			continue
+		}
 		// Foreign devices, even at an allocated name, are never ours to delete.
 		link, err := lookupLink(ctx, tapName(id))
 		if err != nil {

@@ -87,8 +87,8 @@ Running it again changes nothing unless the binary or the unit changed, in
 which case it restarts the service. `sudo boxpool down` stops and disables
 the service and keeps `/var/lib/boxpool`. Stopping or restarting the
 service stops only the daemon (`KillMode=process`): running Firecracker
-VMs keep running until the daemon starts again, which today kills them
-(#27 will re-adopt them); Docker sandboxes keep running.
+VMs and Docker sandboxes keep running, and the daemon adopts them when it
+starts again, including after a crash.
 
 On macOS, run `boxpool up` as yourself, not with sudo: the daemon runs as
 your user. Build and sign it first (see
@@ -125,9 +125,18 @@ outbound NAT, each on a network of its own; on older macOS they have no
 network. [docs/security.md](docs/security.md) covers how each backend
 isolates them.
 
-`boxpool sh [--name N] [--cpu N] [--mem 2g] [--disk 10g] [--timing]` asks the
-daemon for a sandbox (a new one with a generated name, or the one called
-`N`), starts it if needed and opens `bash -l` in it on your terminal.
+When it starts, the daemon reconciles its records with the backend. It
+adopts sandboxes that are still running (on macOS none are: VMs run in the
+daemon's process). A sandbox it finds stopped though it was running when
+the last daemon ended, as after a host reboot, is recorded `stopped`, or
+booted again if it was created with the `always` restart policy. It logs
+sandboxes the backend has but its records do not, and leaves them alone.
+
+`boxpool sh [--name N] [--cpu N] [--mem 2g] [--disk 10g] [--restart always] [--timing]`
+asks the daemon for a sandbox (a new one with a generated name, or the one
+called `N`), starts it if needed and opens `bash -l` in it on your terminal.
+`--restart always` (`"restart": "always"` in the API) boots a new sandbox
+again when the daemon starts after a host reboot.
 `boxpool sh <name>` attaches to an existing sandbox. Leaving the shell
 (`exit`, Ctrl-D) leaves the sandbox running; `--timing` prints the time to
 the first prompt. The daemon's API for this is `POST /v1/sandboxes`

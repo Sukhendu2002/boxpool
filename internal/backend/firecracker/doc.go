@@ -22,6 +22,9 @@
 // resized, and smaller-than-base requests are refused. Guest MemTotal is
 // slightly below configured memory because the guest kernel reserves RAM.
 //
+// VMs run in a session of their own and outlive the daemon. New adopts
+// each one whose agent answers, keeping its tap device, and kills the rest.
+//
 // Firecracker runs without its jailer. The jailer needs root to chroot,
 // create device nodes, join cgroups and drop to another uid, and boxpool's
 // daemon and tests run unprivileged in v1. Firecracker's built-in seccomp

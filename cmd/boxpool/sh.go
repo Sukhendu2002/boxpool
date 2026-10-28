@@ -42,11 +42,12 @@ func sh(args []string) int {
 	cpu := fs.Int("cpu", 0, fmt.Sprintf("vCPUs of a new sandbox (default %d)", daemon.DefaultCPUs))
 	mem := fs.String("mem", "", "memory of a new sandbox, e.g. 512m or 4g (default 2g)")
 	disk := fs.String("disk", "", "disk of a new sandbox, e.g. 20g (default 10g)")
+	restart := fs.String("restart", "no", "restart policy of a new sandbox: always boots it again if the daemon starts and finds it stopped, as after a host reboot")
 	timing := fs.Bool("timing", false, "print the time from the command's start to the shell's first output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	req := daemon.CreateRequest{Name: *name, CPUs: *cpu}
+	req := daemon.CreateRequest{Name: *name, CPUs: *cpu, Restart: *restart}
 	var err error
 	if req.MemoryMB, err = parseSize(*mem, 1); err == nil {
 		req.DiskGB, err = parseSize(*disk, 1024)

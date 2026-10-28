@@ -3,8 +3,11 @@
 package firecracker
 
 import (
+	"bufio"
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/artifacts"
 	"boxpool.run/boxpool/internal/backend"
 	"boxpool.run/boxpool/internal/resources"
@@ -142,8 +146,46 @@ func assertKilled(t *testing.T, exited <-chan error, l layout) {
 	}
 }
 
-func TestKillOrphans(t *testing.T) {
+// vsockListener answers Firecracker's vsock CONNECT handshake before it
+// hands a connection to the agent.
+type vsockListener struct{ net.Listener }
+
+func (l vsockListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	// The client sends nothing more until it reads OK, so this buffers only
+	// the CONNECT line.
+	if _, err := bufio.NewReader(c).ReadString('\n'); err != nil {
+		c.Close()
+		return l.Accept()
+	}
+	_, err = fmt.Fprintf(c, "OK %d\n", agentPort)
+	return c, err
+}
+
+// fakeAgent serves a guest agent on l's vsock socket.
+func fakeAgent(t *testing.T, l layout) {
+	t.Helper()
+	os.Remove(l.vsock)
+	ln, err := agent.Listen("unix:" + l.vsock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- agent.Serve(ctx, vsockListener{ln}, "test") }()
+	t.Cleanup(func() { cancel(); <-served })
+}
+
+func TestAdopt(t *testing.T) {
 	root := t.TempDir()
+	d := &Driver{root: root}
+	// Its agent answers: a booted VM, adopted.
+	booted, bl := fakeFirecracker(t, root, "booted", "--api-sock", sandboxLayout(root, "booted").api)
+	fakeAgent(t, bl)
+	// No agent, as when the daemon died while the VM booted: killed.
 	orphan, ol := fakeFirecracker(t, root, "orphan", "--api-sock", sandboxLayout(root, "orphan").api)
 	// A pid file naming a process that is not this sandbox's firecracker,
 	// as after the pid was reused.
@@ -151,13 +193,111 @@ func TestKillOrphans(t *testing.T) {
 	exited := make(chan error, 1)
 	go func() { exited <- orphan.Wait() }()
 
-	if err := killOrphans(context.Background(), root); err != nil {
+	if err := d.adopt(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	assertKilled(t, exited, ol)
 	// A killed child would be a zombie with an empty command line.
 	if b, _ := os.ReadFile("/proc/" + strconv.Itoa(other.Process.Pid) + "/cmdline"); len(b) == 0 {
 		t.Error("unrelated process was killed")
+	}
+	if _, ok := running(bl); !ok {
+		t.Fatal("booted VM was not adopted")
+	}
+	for _, p := range []string{bl.pid, bl.api, bl.vsock} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("adopted VM lost %s: %v", p, err)
+		}
+	}
+	if _, ok := d.consoles.Load("booted"); !ok {
+		t.Fatal("adopted VM has no console rotator")
+	}
+	// Its console rotator ends once it is gone.
+	booted.Process.Kill()
+	booted.Wait()
+	done := make(chan struct{})
+	go func() { d.waitConsole("booted"); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Error("console rotator of the adopted VM did not end after it exited")
+	}
+}
+
+func TestAdoptInterruptedProbe(t *testing.T) {
+	for _, mode := range []string{"cancelled", "cancel-during-ping", "retry-agent"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			d := &Driver{root: root}
+			vm, l := fakeFirecracker(t, root, "vm", "--api-sock", sandboxLayout(root, "vm").api)
+			t.Cleanup(func() {
+				vm.Process.Kill()
+				vm.Wait()
+				d.waitConsole("vm")
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "cancelled" {
+				fakeAgent(t, l)
+				if err := d.ping(ctx, l); err != nil {
+					t.Fatal(err)
+				}
+				cancel()
+			} else {
+				// Hold the first connection so the test can cancel an active
+				// probe or fail it before making a real agent available.
+				if err := os.Remove(l.vsock); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var ln *net.UnixListener
+			if mode != "cancelled" {
+				var err error
+				ln, err = net.ListenUnix("unix", &net.UnixAddr{Name: l.vsock, Net: "unix"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer ln.Close()
+				ln.SetUnlinkOnClose(false)
+				ln.SetDeadline(time.Now().Add(5 * time.Second))
+			}
+			done := make(chan error, 1)
+			go func() { done <- d.adopt(ctx) }()
+			if ln != nil {
+				c, err := ln.Accept()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == "cancel-during-ping" {
+					cancel()
+				}
+				c.Close()
+				ln.Close()
+				if mode == "retry-agent" {
+					fakeAgent(t, l)
+				}
+			}
+			select {
+			case err := <-done:
+				if mode == "retry-agent" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else if !errors.Is(err, context.Canceled) {
+					t.Fatalf("adopt = %v, want context.Canceled", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("adoption did not finish")
+			}
+			if err := waitExit(context.Background(), l, 50*time.Millisecond); err == nil {
+				t.Fatal("adoption killed the VM")
+			}
+			for _, p := range []string{l.pid, l.api, l.vsock} {
+				if _, err := os.Stat(p); err != nil {
+					t.Errorf("adoption removed %s: %v", p, err)
+				}
+			}
+		})
 	}
 }
 

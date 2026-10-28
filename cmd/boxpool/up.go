@@ -32,8 +32,8 @@ const upTimeout = 5 * time.Minute
 // KillMode=process: stopping or restarting the unit signals only the
 // daemon. Firecracker VMs run in their own sessions in this unit's cgroup;
 // the default would SIGTERM and then SIGKILL them with it. They keep
-// running until the daemon starts again, which today kills them as
-// orphans; #27 will re-adopt them. Docker containers are not in this
+// running, and the daemon adopts them when it starts again. Docker
+// containers are not in this
 // cgroup and survive either way. No User=: the daemon runs as root, which
 // Firecracker networking needs.
 func unit(bin string) []byte {
@@ -246,7 +246,7 @@ func down(args []string) int {
 		return 1
 	}
 	fmt.Println("boxpool.service is stopped and disabled; its state is kept, and boxpool up starts it again")
-	fmt.Println("running Firecracker VMs are stopped when the daemon next starts (#27 will keep them)")
+	fmt.Println("running sandboxes keep running, and the daemon adopts them when it starts again")
 	return 0
 }
 

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -70,6 +71,10 @@ type CreateRequest struct {
 	CPUs     int    `json:"cpu,omitempty"`
 	MemoryMB int    `json:"mem_mb,omitempty"`
 	DiskGB   int    `json:"disk_gb,omitempty"`
+	// Restart is the restart policy of a new sandbox: "always" boots it
+	// again when the daemon starts and finds it stopped though it was
+	// running, as after a host reboot. "" or "no" means never.
+	Restart string `json:"restart,omitempty"`
 }
 
 // StateMissing is the state of a sandbox whose record this node has but
@@ -88,6 +93,7 @@ type Sandbox struct {
 	MemoryMB  int           `json:"mem_mb"`
 	DiskGB    int           `json:"disk_gb"`
 	CreatedAt time.Time     `json:"created_at"`
+	Restart   string        `json:"restart,omitempty"`
 	// Warning is set by stop and remove when the sandbox did not shut down
 	// cleanly (backend.ErrUncleanStop): it is stopped, but its disk may be
 	// inconsistent.
@@ -154,6 +160,14 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid sandbox name %q: use 1 to 63 lower-case letters, digits and hyphens, starting with a letter or digit", req.Name))
 		return
 	}
+	switch req.Restart {
+	case "", "no":
+		req.Restart = ""
+	case "always":
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid restart policy %q: use always or no", req.Restart))
+		return
+	}
 	spec, err := (backend.Spec{Name: req.Name, CPUs: req.CPUs, MemoryMB: req.MemoryMB, DiskGB: req.DiskGB}).WithDefaults()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -181,7 +195,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusCreated
-		sb, err = s.st.Create(ctx, store.Sandbox{Backend: s.d.Name(), Spec: spec, State: backend.StateStopped})
+		sb, err = s.st.Create(ctx, store.Sandbox{Backend: s.d.Name(), Spec: spec, State: backend.StateStopped, Restart: req.Restart})
 		if err == nil {
 			if _, err = s.d.Create(ctx, sb.ID, spec); err != nil {
 				s.st.Delete(context.WithoutCancel(ctx), sb.ID)
@@ -197,8 +211,8 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	// Start does nothing if it runs, and the record can be stale: a daemon
-	// restart stops Firecracker VMs.
+	// Start does nothing if it runs, and the record can be stale: the VM
+	// may have died since.
 	if err := s.d.Start(ctx, sb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -366,6 +380,58 @@ func (s *server) stopSandbox(ctx context.Context, sb store.Sandbox) (warning str
 	return warning, s.st.SetState(context.WithoutCancel(ctx), sb.ID, backend.StateStopped)
 }
 
+// reconcile makes the store match the backend when the daemon starts. A
+// sandbox recorded running whose VM is gone died with the host or an
+// earlier daemon: it is booted again if its restart policy is always, else
+// recorded stopped. One that runs though recorded stopped, as after a crash
+// in the middle of a start, is recorded running. A failed restart is logged
+// and leaves the sandbox stopped. Sandboxes the backend has but the store
+// does not are logged and left alone: deleting them could destroy a disk.
+func reconcile(ctx context.Context, st *store.Store, d Driver) error {
+	records, err := st.List(ctx)
+	if err != nil {
+		return err
+	}
+	live, err := d.List(ctx)
+	if err != nil {
+		return err
+	}
+	state := make(map[string]backend.State, len(live))
+	for _, sb := range live {
+		state[sb.ID] = sb.State
+	}
+	for _, sb := range records {
+		if sb.Backend != d.Name() {
+			continue
+		}
+		got, ok := state[sb.ID]
+		delete(state, sb.ID)
+		want := got
+		switch {
+		case !ok:
+			slog.Warn("sandbox is missing from the backend", "sandbox", sb.Spec.Name, "id", sb.ID)
+			continue
+		case got == backend.StateStopped && sb.State == backend.StateRunning && sb.Restart == "always":
+			slog.Info("restarting sandbox", "sandbox", sb.Spec.Name)
+			if err := d.Start(ctx, sb.ID); err != nil {
+				slog.Error("restarting sandbox failed", "sandbox", sb.Spec.Name, "err", err)
+				want = backend.StateStopped
+			} else {
+				want = backend.StateRunning
+			}
+		}
+		if want != sb.State {
+			if err := st.SetState(ctx, sb.ID, want); err != nil {
+				return err
+			}
+		}
+	}
+	for id := range state {
+		slog.Warn("backend has a sandbox with no record; leaving it", "id", id)
+	}
+	return nil
+}
+
 // exec relays an agent exec session unchanged (docs/agent-protocol.md)
 // between the client's WebSocket and the sandbox's agent.
 func (s *server) exec(w http.ResponseWriter, r *http.Request) {
@@ -477,7 +543,7 @@ func (s *server) sameBackend(sb store.Sandbox) error {
 
 func apiSandbox(sb store.Sandbox) Sandbox {
 	return Sandbox{ID: sb.ID, Name: sb.Spec.Name, Backend: sb.Backend, State: sb.State,
-		CPUs: sb.Spec.CPUs, MemoryMB: sb.Spec.MemoryMB, DiskGB: sb.Spec.DiskGB, CreatedAt: sb.CreatedAt}
+		CPUs: sb.Spec.CPUs, MemoryMB: sb.Spec.MemoryMB, DiskGB: sb.Spec.DiskGB, CreatedAt: sb.CreatedAt, Restart: sb.Restart}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

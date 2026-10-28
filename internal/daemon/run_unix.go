@@ -85,6 +85,13 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	if err := os.Chmod(sock, 0660); err != nil {
 		return err
 	}
+	// Before serving, so no request sees the state the daemon died with;
+	// clients connecting meanwhile wait in the listen backlog.
+	if d != nil {
+		if err := reconcile(ctx, st, d); err != nil {
+			return fmt.Errorf("reconcile sandboxes with the %s backend: %w", info.Backend, err)
+		}
+	}
 
 	// Shutdown ignores hijacked connections, so exec sessions would outlive
 	// Run: every request runs under sessions, which is cancelled after

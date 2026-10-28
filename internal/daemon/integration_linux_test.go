@@ -167,11 +167,15 @@ printf '%s\n' "$limit"`))
 		t.Fatal(err)
 	}
 	stop = start(t, dir, daemon.Info{Backend: backend})
-	// Firecracker kills its orphaned VMs on start (#27 will re-adopt them);
-	// Docker keeps containers running.
-	got := names(t, c)
-	if got != sb.Name+"=stopped other=stopped" && got != sb.Name+"=stopped other=running" {
+	// The new daemon adopts the sandbox that kept running.
+	if got := names(t, c); got != sb.Name+"=stopped other=running" {
 		t.Errorf("ls after a daemon restart = %q", got)
+	}
+	var out bytes.Buffer
+	if s, err := c.Exec(ctx, "other", agent.ExecRequest{Argv: []string{"echo", "adopted"}}, &out, &out); err != nil {
+		t.Errorf("exec in the adopted sandbox: %v", err)
+	} else if code, err := s.Wait(); code != 0 || err != nil || out.String() != "adopted\n" {
+		t.Errorf("exec in the adopted sandbox: exit %d, %v: %q", code, err, out.String())
 	}
 	// start boots the stopped sandbox with the disk it had before stop.
 	if started, err := c.StartSandbox(ctx, sb.Name); err != nil || started.State != "running" {
@@ -274,7 +278,7 @@ func copyRoundTrip(t *testing.T, ctx context.Context, c *client.Client, name str
 }
 
 // removeAll removes every sandbox the daemon in dir left, through a new
-// driver; Firecracker's kills their VMs first.
+// driver, whose Remove kills a running VM first.
 func removeAll(t *testing.T, dir, backend string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
