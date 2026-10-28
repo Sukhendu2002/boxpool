@@ -123,6 +123,7 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 	mux.HandleFunc("POST /v1/sandboxes", s.backendOnly(s.create))
 	mux.HandleFunc("GET /v1/sandboxes", s.backendOnly(s.list))
 	mux.HandleFunc("GET /v1/sandboxes/{name}", s.backendOnly(s.get))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/start", s.backendOnly(s.start))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.backendOnly(s.stop))
 	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.backendOnly(s.remove))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.backendOnly(s.exec))
@@ -258,6 +259,31 @@ func (s *server) live(ctx context.Context, records []store.Sandbox) ([]Sandbox, 
 		list = append(list, apiSandbox(sb))
 	}
 	return list, nil
+}
+
+// start boots a stopped sandbox from its kept disk. Starting a running
+// sandbox does nothing.
+func (s *server) start(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sb, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sameBackend(sb); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if err := s.d.Start(r.Context(), sb.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.st.SetState(r.Context(), sb.ID, backend.StateRunning); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sb.State = backend.StateRunning
+	writeJSON(w, apiSandbox(sb))
 }
 
 // stop shuts the sandbox down, keeping its disk and its reservation.

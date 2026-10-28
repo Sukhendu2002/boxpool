@@ -95,6 +95,13 @@ func (c *Client) ListSandboxes(ctx context.Context) ([]daemon.Sandbox, error) {
 	return list, err
 }
 
+// StartSandbox boots the named sandbox from its kept disk.
+func (c *Client) StartSandbox(ctx context.Context, name string) (daemon.Sandbox, error) {
+	var sb daemon.Sandbox
+	err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(name)+"/start", nil, &sb)
+	return sb, err
+}
+
 // StopSandbox stops the named sandbox. The result's Warning is set if it
 // did not shut down cleanly.
 func (c *Client) StopSandbox(ctx context.Context, name string) (daemon.Sandbox, error) {
