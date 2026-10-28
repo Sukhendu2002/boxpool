@@ -22,6 +22,7 @@ const (
 // layout is the paths of one sandbox's files.
 type layout struct {
 	dir, spec, rootfs, pid, api, vsock, log, console string
+	vmstate, mem                                     string // a paused sandbox's snapshot
 }
 
 func sandboxLayout(root, id string) layout {
@@ -36,6 +37,8 @@ func sandboxLayout(root, id string) layout {
 		vsock:   f("vsock.sock"),
 		log:     f("firecracker.log"),
 		console: f("console.log"),
+		vmstate: f("snapshot.vmstate"),
+		mem:     f("snapshot.mem"),
 	}
 }
 
@@ -62,4 +65,14 @@ func apiCalls(spec backend.Spec, kernel string, l layout, n *nic) []apiCall {
 		calls = append(calls, apiCall{"/network-interfaces/eth0", map[string]any{"iface_id": "eth0", "host_dev_name": n.tap}})
 	}
 	return append(calls, apiCall{"/actions", map[string]any{"action_type": "InstanceStart"}})
+}
+
+// loadSnapshot is the API request that restores a paused sandbox, with its
+// vCPUs still paused.
+func loadSnapshot(l layout) apiCall {
+	return apiCall{"/snapshot/load", map[string]any{
+		"snapshot_path": l.vmstate,
+		"mem_backend":   map[string]any{"backend_type": "File", "backend_path": l.mem},
+		"resume_vm":     false,
+	}}
 }
