@@ -50,10 +50,11 @@ type Driver struct {
 var _ backend.Driver = (*Driver)(nil)
 
 // New unpacks the fetched artifacts, creates the sandboxes directory in
-// stateDir and kills firecracker processes left behind by an earlier daemon.
-// With a store, sandboxes get a network (see the package doc), which needs
-// root; the tap devices and firewall rules of the killed VMs are removed.
-// Without one, sandboxes have no network interface.
+// stateDir and adopts the firecracker processes an earlier daemon left
+// running (see adopt). With a store, sandboxes get a network (see the
+// package doc), which needs root; the tap devices of VMs that are gone are
+// removed, and the firewall rules once none is left. Without one, sandboxes
+// have no network interface.
 func New(ctx context.Context, stateDir string, paths artifacts.Paths, st *store.Store) (*Driver, error) {
 	if st != nil {
 		if err := checkNetwork(); err != nil {
@@ -85,17 +86,18 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths, st *store.
 		return nil, err
 	}
 	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs, store: st, admission: &resources.Manager{StateDir: state}}
-	if err := killOrphans(ctx, d.root); err != nil || st == nil {
+	if err := d.adopt(ctx); err != nil || st == nil {
 		return d, err
 	}
 	return d, d.sweepNetwork(ctx)
 }
 
-// killOrphans kills every sandbox's firecracker process: whoever started it
-// is gone, so nothing would ever stop it.
-// shortcut: kills running VMs instead of re-adopting them; #27 re-adopts.
-func killOrphans(ctx context.Context, root string) error {
-	entries, err := os.ReadDir(root)
+// adopt takes over the firecracker processes an earlier daemon started:
+// VMs whose agent answers keep running, with their console bounded again.
+// The rest, such as a VM the daemon died while booting, are killed, and
+// the runtime files of VMs that are gone are removed.
+func (d *Driver) adopt(ctx context.Context) error {
+	entries, err := os.ReadDir(d.root)
 	if err != nil {
 		return err
 	}
@@ -103,15 +105,52 @@ func killOrphans(ctx context.Context, root string) error {
 		if !e.IsDir() {
 			continue
 		}
-		l := sandboxLayout(root, e.Name())
+		l := sandboxLayout(d.root, e.Name())
 		if pid, ok := running(l); ok {
-			slog.Warn("killing orphaned firecracker process", "sandbox", e.Name(), "pid", pid)
+			err := d.ping(ctx, l)
+			if err == nil {
+				slog.Info("adopting running sandbox", "sandbox", e.Name(), "pid", pid)
+				d.watchConsole(e.Name(), l)
+				continue
+			}
+			slog.Warn("killing firecracker process whose agent does not answer", "sandbox", e.Name(), "pid", pid, "err", err)
 		}
 		if err := kill(ctx, l); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ping checks that the sandbox's agent answers within apiTimeout.
+func (d *Driver) ping(ctx context.Context, l layout) error {
+	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	ag := d.agent(l)
+	defer ag.CloseIdleConnections()
+	_, err := ag.Version(ctx)
+	return err
+}
+
+// watchConsole bounds the console log of an adopted VM, which is not this
+// process's child, until running reports it gone.
+func (d *Driver) watchConsole(id string, l layout) {
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		for {
+			if _, ok := running(l); !ok {
+				return
+			}
+			time.Sleep(time.Second)
+		}
+	}()
+	rotated := make(chan struct{})
+	d.consoles.Store(id, rotated)
+	go func() {
+		defer close(rotated)
+		boundConsole(l.console, exited)
+	}()
 }
 
 func (d *Driver) Name() string { return "firecracker" }
@@ -213,7 +252,7 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 	cmd := exec.Command(d.firecracker, "--api-sock", l.api, "--enable-pci", "--log-path", l.log, "--level", "Info")
 	cmd.Stdout, cmd.Stderr = console, console
 	// Its own session keeps a Ctrl-C in the daemon's terminal away from the
-	// VM. No Pdeathsig: VMs are meant to outlive a daemon crash (#27).
+	// VM. No Pdeathsig: VMs outlive a daemon crash, and New adopts them.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	err = cmd.Start()
 	console.Close()

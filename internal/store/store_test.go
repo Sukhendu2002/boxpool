@@ -77,14 +77,14 @@ func TestRepository(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "state.db"))
 	spec := backend.Spec{Name: "web", Image: "base", CPUs: 2, MemoryMB: 2048, DiskGB: 10}
 
-	web, err := s.Create(ctx, Sandbox{Backend: "firecracker", Spec: spec, State: backend.StateRunning})
+	web, err := s.Create(ctx, Sandbox{Backend: "firecracker", Spec: spec, State: backend.StateRunning, Restart: "always"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(web.ID) != 12 || web.CreatedAt.IsZero() || web.CreatedAt.Location() != time.UTC {
 		t.Errorf("Create() = %+v, want a 12-char ID and a UTC creation time", web)
 	}
-	if got, err := s.Get(ctx, web.ID); err != nil || !got.CreatedAt.Equal(web.CreatedAt) || got.Spec != spec || got.Backend != "firecracker" || got.State != backend.StateRunning {
+	if got, err := s.Get(ctx, web.ID); err != nil || !got.CreatedAt.Equal(web.CreatedAt) || got.Spec != spec || got.Backend != "firecracker" || got.State != backend.StateRunning || got.Restart != "always" {
 		t.Errorf("Get() = %+v, %v; want %+v", got, err, web)
 	}
 	if got, err := s.GetByName(ctx, "web"); err != nil || got.ID != web.ID {

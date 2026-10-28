@@ -43,6 +43,8 @@ type Sandbox struct {
 	Spec      backend.Spec
 	State     backend.State
 	CreatedAt time.Time
+	// Restart is the restart policy: "always" or "" for none.
+	Restart string
 }
 
 // Store is the node's sandbox database.
@@ -148,10 +150,10 @@ func (s *Store) Create(ctx context.Context, sb Sandbox) (Sandbox, error) {
 	sb.ID = hex.EncodeToString(id)
 	sb.CreatedAt = time.Now().UTC()
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sandboxes (id, name, backend, image, cpus, memory_mb, disk_gb, state, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO sandboxes (id, name, backend, image, cpus, memory_mb, disk_gb, state, created_at, restart)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sb.ID, sb.Spec.Name, sb.Backend, sb.Spec.Image, sb.Spec.CPUs, sb.Spec.MemoryMB, sb.Spec.DiskGB,
-		sb.State, sb.CreatedAt.Format(timeFormat))
+		sb.State, sb.CreatedAt.Format(timeFormat), sb.Restart)
 	var serr *sqlite.Error
 	if errors.As(err, &serr) && serr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
 		return Sandbox{}, fmt.Errorf("sandbox name %q %w", sb.Spec.Name, ErrNameTaken)
@@ -162,7 +164,7 @@ func (s *Store) Create(ctx context.Context, sb Sandbox) (Sandbox, error) {
 	return sb, nil
 }
 
-const selectSandbox = `SELECT id, name, backend, image, cpus, memory_mb, disk_gb, state, created_at FROM sandboxes`
+const selectSandbox = `SELECT id, name, backend, image, cpus, memory_mb, disk_gb, state, created_at, restart FROM sandboxes`
 
 // Get returns the sandbox with the given ID.
 func (s *Store) Get(ctx context.Context, id string) (Sandbox, error) {
@@ -217,7 +219,7 @@ func expectOne(res sql.Result, err error) error {
 func scan(row interface{ Scan(...any) error }) (Sandbox, error) {
 	var sb Sandbox
 	var created string
-	err := row.Scan(&sb.ID, &sb.Spec.Name, &sb.Backend, &sb.Spec.Image, &sb.Spec.CPUs, &sb.Spec.MemoryMB, &sb.Spec.DiskGB, &sb.State, &created)
+	err := row.Scan(&sb.ID, &sb.Spec.Name, &sb.Backend, &sb.Spec.Image, &sb.Spec.CPUs, &sb.Spec.MemoryMB, &sb.Spec.DiskGB, &sb.State, &created, &sb.Restart)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Sandbox{}, ErrNotFound
 	}
