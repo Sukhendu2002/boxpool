@@ -1,0 +1,21 @@
+{
+  "version": "boxpool v0.1.0-alpha.1\ndaemon  v0.1.0-alpha.1",
+  "host": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+  "backend": "firecracker",
+  "samples_ms": [
+    416,
+    403,
+    420,
+    444,
+    396,
+    399,
+    445,
+    447,
+    448,
+    430
+  ],
+  "median_ms": 425.0,
+  "p90_ms": 447,
+  "cli_session": "PASS: sh/reattach, exec streams/exit/stdin, cp binary round trip, ls, stop, rm",
+  "remaining_owned_sandboxes": []
+}
