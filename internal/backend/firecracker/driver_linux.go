@@ -349,6 +349,11 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, 
 			return err
 		}
 	} else {
+		// A pause cut short by a daemon crash leaves files as large as the
+		// guest's memory, which are useless without the state file.
+		if err := removeSnapshot(l); err != nil {
+			return err
+		}
 		for _, c := range apiCalls(spec, d.kernel, l, n) {
 			if err := send(ctx, api, http.MethodPut, c); err != nil {
 				return err

@@ -232,8 +232,15 @@ func TestIntegrationPause(t *testing.T) {
 	if err := d.Pause(ctx, id); err == nil || !strings.Contains(err.Error(), "not running") {
 		t.Errorf("Pause of a stopped sandbox: %v, want not running", err)
 	}
+	// As left by a daemon that died while pausing.
+	if err := os.WriteFile(l.mem+".tmp", []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.Start(ctx, id); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(l.mem + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("Start left a partial snapshot: %v", err)
 	}
 	if got := run("cat /root/unsynced"); got != "kept\n" {
 		t.Errorf("file written before Pause and Stop: %q, want kept", got)
