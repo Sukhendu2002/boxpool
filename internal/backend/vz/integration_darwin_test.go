@@ -242,6 +242,67 @@ func integrationSandbox(t *testing.T) (*Driver, string) {
 	return d, id
 }
 
+func TestIntegrationPause(t *testing.T) {
+	d, id := integrationSandbox(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := d.Start(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	c := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, id) })
+	defer c.CloseIdleConnections()
+	run := func(script string) string {
+		t.Helper()
+		var out bytes.Buffer
+		s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", script}}, &out, &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code, err := s.Wait(); err != nil || code != 0 {
+			t.Fatalf("%s: exit %d, %v: %s", script, code, err, out.String())
+		}
+		return out.String()
+	}
+	run(`sh -c 'while :; do echo x >> /root/counter; sleep .01; done' >/dev/null 2>&1 &`)
+	run("sleep .1; test -s /root/counter")
+	before := strings.TrimSpace(run("wc -l < /root/counter"))
+	start := time.Now()
+	if err := d.Pause(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Pause: %v", time.Since(start))
+	if d.running(id) != nil {
+		t.Fatal("the VM still runs after Pause")
+	}
+	if list, err := d.List(ctx); err != nil || len(list) != 1 || list[0].State != backend.StatePaused {
+		t.Fatalf("List after Pause: %+v, %v", list, err)
+	}
+	// Reopen the same sandbox with a fresh driver, as after a daemon restart.
+	stateRoot := filepath.Dir(d.root)
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := artifacts.Fetch(ctx, filepath.Join(stateDir(t), artifacts.DirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err = New(ctx, stateRoot, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.CloseIdleConnections()
+	start = time.Now()
+	if err := d.Resume(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Resume until the agent answered: %v", time.Since(start))
+	time.Sleep(100 * time.Millisecond)
+	after := strings.TrimSpace(run("wc -l < /root/counter"))
+	if before == after {
+		t.Errorf("counter did not continue: before %s, after %s", before, after)
+	}
+}
+
 func TestIntegrationFailedForceStop(t *testing.T) {
 	d, id := integrationSandbox(t)
 	ctx := context.Background()

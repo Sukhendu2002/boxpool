@@ -80,11 +80,20 @@ func TestCreateListRemove(t *testing.T) {
 	if err := d.Stop(ctx, "abc"); err != nil {
 		t.Error(err)
 	}
-	if err := d.Pause(ctx, "abc"); !errors.Is(err, backend.ErrNotSupported) {
+	if err := d.Pause(ctx, "abc"); err == nil || !strings.Contains(err.Error(), "not running") {
 		t.Errorf("Pause: %v", err)
 	}
-	if err := d.Resume(ctx, "abc"); !errors.Is(err, backend.ErrNotSupported) {
+	if err := d.Resume(ctx, "abc"); err == nil || !strings.Contains(err.Error(), "not paused") {
 		t.Errorf("Resume: %v", err)
+	}
+	if err := os.WriteFile(l.state, []byte("saved"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := d.List(ctx); err != nil || len(list) != 1 || list[0].State != backend.StatePaused {
+		t.Errorf("List with saved state: %+v, %v; want abc paused", list, err)
+	}
+	if err := d.Stop(ctx, "abc"); err == nil || !savedState(l) {
+		t.Errorf("Stop of paused sandbox: %v; saved state was lost", err)
 	}
 	if _, err := d.Dial(ctx, "abc"); err == nil {
 		t.Error("Dial of stopped sandbox succeeded")
@@ -108,6 +117,33 @@ func TestGrowDiskRefusesShrink(t *testing.T) {
 	if err := growDisk(path, 3); err == nil {
 		t.Error("shrank disk below base size")
 	}
+}
+
+func TestSaveMachineStatePublishesCompleteFile(t *testing.T) {
+	l := sandboxLayout(t.TempDir(), "abc")
+	if err := os.MkdirAll(l.dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	vm := fakePausableVM{}
+	if err := saveMachineState(l, vm); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(l.state); err != nil || string(got) != "state" {
+		t.Errorf("saved state: %q, %v", got, err)
+	}
+	entries, err := os.ReadDir(l.dir)
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(l.state) {
+		t.Errorf("temporary state files: %v, %v", entries, err)
+	}
+}
+
+type fakePausableVM struct{}
+
+func (fakePausableVM) CanPause() bool { return true }
+func (fakePausableVM) Pause() error   { return nil }
+func (fakePausableVM) Resume() error  { return nil }
+func (fakePausableVM) SaveMachineStateToPath(path string) error {
+	return os.WriteFile(path, []byte("state"), 0600)
 }
 
 func TestEntitlementHint(t *testing.T) {

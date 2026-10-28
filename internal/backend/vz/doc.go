@@ -10,6 +10,8 @@
 //	rootfs.ext4       its disk: an APFS clone (clonefile) of the base image
 //	console.log       the guest's virtio console (hvc0)
 //	console.log.1     its previous MiB or more, once it outgrew 1 MiB
+//	machine.state     a paused VM's saved machine state
+//	machine.id        the stable Virtualization framework machine identifier
 //	resources.json    its persistent CPU, memory and disk reservation
 //
 // Create defaults to 2 vCPUs, 2048 MiB RAM and a 10 GiB disk, with the same
@@ -24,8 +26,9 @@
 // every running sandbox, and a new Driver sees all sandboxes as stopped.
 // Stop freezes the guest's disk through the agent and powers the guest off
 // with sysrq, falling back to the framework's stop request and then a
-// forced stop (backend.ErrUncleanStop). Pause and Resume are not supported
-// yet (#29).
+// forced stop (backend.ErrUncleanStop). Pause saves the paused VM state to
+// machine.state and stops the VM; Resume restores it. Unsupported hosts and
+// configurations fall back to Stop with an explicit error.
 //
 // # Network
 //

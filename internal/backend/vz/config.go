@@ -26,13 +26,13 @@ const agentPort = 1024
 
 // layout is the paths of one sandbox's files.
 type layout struct {
-	dir, spec, rootfs, console string
+	dir, spec, rootfs, console, state, machineID string
 }
 
 func sandboxLayout(root, id string) layout {
 	dir := filepath.Join(root, id)
 	f := func(name string) string { return filepath.Join(dir, name) }
-	return layout{dir: dir, spec: f("spec.json"), rootfs: f("rootfs.ext4"), console: f("console.log")}
+	return layout{dir: dir, spec: f("spec.json"), rootfs: f("rootfs.ext4"), console: f("console.log"), state: f("machine.state"), machineID: f("machine.id")}
 }
 
 // limits are the Virtualization framework's bounds on a VM's size.
@@ -51,6 +51,7 @@ type vmConfig struct {
 	Disk        string // the sandbox's rootfs, a read-write virtio block device
 	Console     string // the virtio console's output, appended to
 	MAC         string // the virtio network device's MAC address
+	MachineID   string // persisted GenericMachineIdentifier data
 }
 
 // newVMConfig describes the VM for a sandbox created with spec. Create has
@@ -68,6 +69,7 @@ func newVMConfig(spec backend.Spec, kernel string, l layout, lim limits) (vmConf
 		Disk:        l.rootfs,
 		Console:     l.console,
 		MAC:         macAddress(filepath.Base(l.dir)), // the directory is named after the sandbox ID
+		MachineID:   l.machineID,
 	}
 	if c.CPUs < lim.minCPUs || c.CPUs > lim.maxCPUs {
 		return vmConfig{}, fmt.Errorf("%d CPUs is outside the Virtualization framework's %d to %d", c.CPUs, lim.minCPUs, lim.maxCPUs)

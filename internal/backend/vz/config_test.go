@@ -25,7 +25,7 @@ func TestVMConfig(t *testing.T) {
 			CPUs: uint(defaults.CPUs), MemoryBytes: uint64(defaults.MemoryMB) << 20,
 			Kernel: "/artifacts/vmlinux-arm64", CommandLine: "console=hvc0 panic=1 root=/dev/vda rw init=/sbin/init",
 			Disk: filepath.Join(l.dir, "rootfs.ext4"), Console: filepath.Join(l.dir, "console.log"),
-			MAC: macAddress("abc"),
+			MAC: macAddress("abc"), MachineID: filepath.Join(l.dir, "machine.id"),
 		}
 		if got != want {
 			t.Errorf("Spec %+v: got %+v, want %+v", spec, got, want)
