@@ -68,13 +68,16 @@ boxpool cp ./src box:/root/          # copy files in or out
 boxpool ls            # list sandboxes (nodes too, once pools exist)
 boxpool stop box      # stop a sandbox
 boxpool start box     # start it again, with its disk
+boxpool pause box     # pause a sandbox, keeping its memory
+boxpool resume box    # resume it where it left off
 boxpool rm box        # delete a sandbox
 boxpool doctor        # check whether this machine can host sandboxes
 ```
 
 Working today, on one Linux machine: `boxpool doctor`, `boxpool daemon`,
 `boxpool up`, `boxpool down`, `boxpool sh`, `boxpool exec`, `boxpool cp`,
-`boxpool ls`, `boxpool start`, `boxpool stop`, `boxpool rm` and `boxpool version`. `join` is
+`boxpool ls`, `boxpool start`, `boxpool stop`, `boxpool pause`, `boxpool resume`,
+`boxpool rm` and `boxpool version`. `join` is
 not implemented yet.
 
 `sudo boxpool up` installs the node on a Linux machine with systemd: it
@@ -177,6 +180,14 @@ sandbox with its process, disk, network and reservation; `--force` stops a
 running one first. If a guest does not shut down cleanly, both print a
 warning and still succeed. The API is `GET /v1/sandboxes`,
 `POST /v1/sandboxes/{name}/start`, `POST /v1/sandboxes/{name}/stop` and `DELETE /v1/sandboxes/{name}?force=1`.
+
+`boxpool pause <name>` saves a running sandbox's memory and stops its VM,
+so it uses no CPU or memory; `boxpool ls` shows it `paused`, and
+`boxpool resume <name>` restores it where it left off. Docker cannot save
+a container's memory, so there pause stops the sandbox, prints that its
+memory is lost, and resume boots it from its disk; so does a macOS VM
+configuration the Virtualization framework cannot save. The API is
+`POST /v1/sandboxes/{name}/pause` and `POST /v1/sandboxes/{name}/resume`.
 
 `boxpool-agent` is the process inside every sandbox that runs commands for
 the host, on vsock port 1024 by default or on a unix socket with

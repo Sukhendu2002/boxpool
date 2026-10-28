@@ -104,30 +104,27 @@ func age(d time.Duration) string {
 }
 
 func start(args []string) int {
-	fs := flag.NewFlagSet("start", flag.ContinueOnError)
-	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: boxpool start <name>\n\nStarts a stopped sandbox with the disk it had when it stopped.\n")
-	}
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	if fs.NArg() != 1 {
-		fs.Usage()
-		return 2
-	}
-	ctx := context.Background()
-	c, ok := connect(ctx, "start")
-	if !ok {
-		return 1
-	}
-	sb, err := c.StartSandbox(ctx, fs.Arg(0))
-	return finish("start", sb, err)
+	return sandboxCmd("start", "Starts a stopped sandbox with the disk it had when it stopped.", (*client.Client).StartSandbox, args)
 }
 
 func stop(args []string) int {
-	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	return sandboxCmd("stop", "Stops a sandbox. Its disk and its CPU, memory and disk reservation are kept.", (*client.Client).StopSandbox, args)
+}
+
+func pause(args []string) int {
+	return sandboxCmd("pause", "Pauses a running sandbox: saves its memory and stops its VM until resume.\nOn Docker, pause stops the sandbox and its memory is lost.", (*client.Client).PauseSandbox, args)
+}
+
+func resume(args []string) int {
+	return sandboxCmd("resume", "Resumes a paused sandbox where it left off. One that pause had to stop\nboots from its disk.", (*client.Client).ResumeSandbox, args)
+}
+
+// sandboxCmd runs a command that takes a sandbox name and calls the daemon
+// once.
+func sandboxCmd(cmd, help string, call func(*client.Client, context.Context, string) (daemon.Sandbox, error), args []string) int {
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: boxpool stop <name>\n\nStops a sandbox. Its disk and its CPU, memory and disk reservation are kept.\n")
+		fmt.Fprintf(os.Stderr, "Usage: boxpool %s <name>\n\n%s\n", cmd, help)
 	}
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -137,12 +134,12 @@ func stop(args []string) int {
 		return 2
 	}
 	ctx := context.Background()
-	c, ok := connect(ctx, "stop")
+	c, ok := connect(ctx, cmd)
 	if !ok {
 		return 1
 	}
-	sb, err := c.StopSandbox(ctx, fs.Arg(0))
-	return finish("stop", sb, err)
+	sb, err := call(c, ctx, fs.Arg(0))
+	return finish(cmd, sb, err)
 }
 
 func rm(args []string) int {
@@ -168,7 +165,7 @@ func rm(args []string) int {
 	return finish("rm", sb, err)
 }
 
-// finish reports the result of start, stop or rm. An unclean stop is a warning.
+// finish reports the result of a sandbox command, printing its warning.
 func finish(cmd string, sb daemon.Sandbox, err error) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool %s: %v\n", cmd, err)

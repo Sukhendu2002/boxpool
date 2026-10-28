@@ -110,6 +110,21 @@ func (c *Client) StopSandbox(ctx context.Context, name string) (daemon.Sandbox, 
 	return sb, err
 }
 
+// PauseSandbox pauses the named sandbox. The result's Warning is set if
+// the backend stopped it instead, losing its memory.
+func (c *Client) PauseSandbox(ctx context.Context, name string) (daemon.Sandbox, error) {
+	var sb daemon.Sandbox
+	err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(name)+"/pause", nil, &sb)
+	return sb, err
+}
+
+// ResumeSandbox resumes the named paused sandbox.
+func (c *Client) ResumeSandbox(ctx context.Context, name string) (daemon.Sandbox, error) {
+	var sb daemon.Sandbox
+	err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(name)+"/resume", nil, &sb)
+	return sb, err
+}
+
 // RemoveSandbox deletes the named sandbox and frees its resources. Without
 // force the daemon refuses a running sandbox; with it, it stops it first.
 func (c *Client) RemoveSandbox(ctx context.Context, name string, force bool) (daemon.Sandbox, error) {

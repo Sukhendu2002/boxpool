@@ -37,6 +37,8 @@ Commands:
   ls        list this machine's sandboxes
   start     start a stopped sandbox with its disk
   stop      stop a sandbox
+  pause     pause a running sandbox, keeping its memory (not on Docker)
+  resume    resume a paused sandbox
   rm        delete a sandbox and free its resources
 `
 
@@ -67,6 +69,10 @@ func main() {
 		os.Exit(start(os.Args[2:]))
 	case "stop":
 		os.Exit(stop(os.Args[2:]))
+	case "pause":
+		os.Exit(pause(os.Args[2:]))
+	case "resume":
+		os.Exit(resume(os.Args[2:]))
 	case "rm":
 		os.Exit(rm(os.Args[2:]))
 	case "up":

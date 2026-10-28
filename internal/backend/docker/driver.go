@@ -503,12 +503,14 @@ func (d *Driver) removeVolume(ctx context.Context, id string) error {
 	return err
 }
 
+// Pause and Resume are not supported: Docker cannot save a container's
+// memory. The daemon stops and starts the sandbox instead.
 func (d *Driver) Pause(ctx context.Context, id string) error {
-	return fmt.Errorf("pause: %w until snapshots land in M3", backend.ErrNotSupported)
+	return fmt.Errorf("pause: %w: docker cannot save a container's memory", backend.ErrNotSupported)
 }
 
 func (d *Driver) Resume(ctx context.Context, id string) error {
-	return fmt.Errorf("resume: %w until snapshots land in M3", backend.ErrNotSupported)
+	return fmt.Errorf("resume: %w: docker cannot save a container's memory", backend.ErrNotSupported)
 }
 
 // List returns the driver's sandboxes, running or not, found by their

@@ -184,6 +184,30 @@ printf '%s\n' "$limit"`))
 	if got := run("cat /root/marker"); got != "kept\n" {
 		t.Errorf("marker after stop and start = %q", got)
 	}
+	// pause keeps the guest's memory, so it does not reboot; Docker cannot,
+	// so pause stops the container and says so.
+	want := "paused"
+	if backend == "docker" {
+		want = "stopped"
+	}
+	bootID := run("cat /proc/sys/kernel/random/boot_id")
+	if paused, err := c.PauseSandbox(ctx, sb.Name); err != nil {
+		t.Fatal(err)
+	} else if string(paused.State) != want || (paused.Warning != "") != (backend == "docker") {
+		t.Errorf("pause = %+v", paused)
+	}
+	if got := names(t, c); got != sb.Name+"="+want+" other=running" {
+		t.Errorf("ls after pause = %q", got)
+	}
+	if resumed, err := c.ResumeSandbox(ctx, sb.Name); err != nil || resumed.State != "running" {
+		t.Fatalf("resume = %+v, %v", resumed, err)
+	}
+	if got := run("cat /proc/sys/kernel/random/boot_id"); backend != "docker" && got != bootID {
+		t.Errorf("boot id after pause and resume = %q, want %q", got, bootID)
+	}
+	if got := run("cat /root/marker"); got != "kept\n" {
+		t.Errorf("marker after pause and resume = %q", got)
+	}
 	if _, err := c.StopSandbox(ctx, sb.Name); err != nil {
 		t.Fatal(err)
 	}
