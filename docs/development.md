@@ -91,40 +91,62 @@ Windows do not compile the framework binding.
 Pushing a `vX.Y.Z` tag (or `vX.Y.Z-suffix`, published as a pre-release) on a
 `main` commit runs the [release workflow](../.github/workflows/release.yml).
 It builds static `boxpool-linux-amd64` and `boxpool-linux-arm64`, and
-`boxpool-darwin-arm64` with the macOS 26 SDK. It signs the Mac binary with the
-Developer ID, the hardened runtime and `scripts/vz.entitlements`, then has
-Apple notarize it. Last, it uploads all three binaries and `checksums.txt`
-to the GitHub release. GitHub's hosted Macs cannot run VMs ("Virtualization
-is not available on this hardware"), so run the integration tests above on
-your Mac before tagging.
+`boxpool-darwin-arm64` with the macOS 26 SDK. The Mac binary is ad-hoc signed
+with the hardened runtime and `scripts/vz.entitlements`. It is **not Developer
+ID signed or notarized**. This release path requires no paid Apple Developer
+membership or Apple repository secrets; Developer ID signing and notarization
+are deferred. Last, the workflow uploads all three binaries and
+`checksums.txt` to the GitHub release using the automatic `GITHUB_TOKEN`.
+PRs that touch the workflow build and verify the same signatures without
+publishing. GitHub's hosted Macs cannot run VMs ("Virtualization is not
+available on this hardware"), so run the integration tests above on your Mac
+before tagging.
 
 A tag push alone creates the release with the workflow's token, which does
 not trigger the [guest image workflow](../.github/workflows/image.yml). To
 publish images too, create the release yourself (`gh release create` or
-the web UI); the release workflow then uploads into that release.
-
-The macOS job needs these repository secrets:
-
-| Secret | Value |
-| --- | --- |
-| `APPLE_CERTIFICATE_P12` | base64 of the exported "Developer ID Application" certificate and key (`base64 -i cert.p12`) |
-| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
-| `APPLE_ID` | the Apple ID email used for notarization |
-| `APPLE_TEAM_ID` | the 10-character team ID |
-| `APPLE_APP_PASSWORD` | an [app-specific password](https://support.apple.com/102654) for that Apple ID |
+the web UI); the release workflow then uploads into that release. Include
+the ad-hoc signing and Gatekeeper notice below in manually created release
+notes too; workflow-created releases include a link to these instructions.
 
 Check a release:
 
 ```sh
-gh release download v0.1.0-alpha.1 --dir /tmp/rel && cd /tmp/rel
+release_dir=$(mktemp -d /tmp/boxpool-release.XXXXXX)
+gh release download v0.1.0-alpha.1 --repo Sukhendu2002/boxpool \
+  --pattern 'boxpool-*' --pattern checksums.txt --dir "$release_dir"
+cd "$release_dir"
 shasum -a 256 -c checksums.txt
-file boxpool-linux-amd64              # statically linked
+file boxpool-linux-amd64 boxpool-linux-arm64   # both statically linked
 chmod +x boxpool-darwin-arm64
-spctl -a -vv -t install boxpool-darwin-arm64   # source=Notarized Developer ID
+codesign --verify --strict --verbose=2 boxpool-darwin-arm64
+codesign -d --verbose=4 boxpool-darwin-arm64   # Signature=adhoc
+codesign -d --entitlements - boxpool-darwin-arm64
+# Expect com.apple.security.virtualization = true in the entitlement output.
 ```
 
-A bare binary cannot be stapled, so Gatekeeper checks its notarization
-online the first time it runs.
+All three checksums must say `OK`. The ad-hoc signature verifies the binary's
+integrity and carries the virtualization entitlement; it does not establish
+a trusted publisher identity or Apple notarization. `spctl` rejection is
+expected for this release and is not a signature verification failure.
+
+macOS may block a browser-downloaded binary because it is not notarized.
+After verifying the download's source and checksums, try opening it, then
+use **System Settings → Privacy & Security → Open Anyway** if offered
+([Apple's instructions](https://support.apple.com/102445)). For a trusted
+standalone CLI download, you can instead remove quarantine from that file
+only, if present:
+
+```sh
+if xattr -p com.apple.quarantine boxpool-darwin-arm64 >/dev/null 2>&1; then
+  xattr -d com.apple.quarantine boxpool-darwin-arm64
+fi
+./boxpool-darwin-arm64 version         # boxpool v0.1.0-alpha.1
+./boxpool-darwin-arm64 doctor
+```
+
+Leave system-wide Gatekeeper protection enabled. Building from source and
+using `scripts/dev-sign.sh` is another free option.
 
 ## Linux and KVM
 

@@ -1,7 +1,8 @@
 name: Release
 
-# A v* tag builds, signs, notarizes and publishes the binaries. Pull requests
-# that touch the pipeline run the same build with ad-hoc signing and no upload.
+# A v* tag builds and publishes the binaries without Apple signing secrets.
+# macOS builds are ad-hoc signed, not notarized. Pull requests run the same
+# build and signing checks without publishing a release.
 on:
   push:
     tags: ['v*']
@@ -71,7 +72,7 @@ jobs:
     needs: version
     # The macOS 26 SDK is what gives sandboxes a network.
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 15
     # No VM test here: hosted Macs report "Virtualization is not available on
     # this hardware", so the vz integration test runs locally before tagging.
     env:
@@ -88,64 +89,15 @@ jobs:
         run: |
           xcrun --show-sdk-version
           CGO_ENABLED=1 GOARCH=arm64 go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$BIN" ./cmd/boxpool
-      - name: Import the Developer ID certificate
-        if: github.event_name == 'push'
-        env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      - name: Ad-hoc sign with the virtualization entitlement
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$APPLE_CERTIFICATE_P12" || { echo "APPLE_CERTIFICATE_P12 is not set" >&2; exit 1; }
-          keychain=$RUNNER_TEMP/signing.keychain-db
-          password=$(openssl rand -hex 16)
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
-          base64 --decode <<<"$APPLE_CERTIFICATE_P12" > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          rm "$RUNNER_TEMP/cert.p12"
-          # Certificates issued since 2021 chain through this intermediate.
-          curl -fsSL -o "$RUNNER_TEMP/g2.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
-          security import "$RUNNER_TEMP/g2.cer" -k "$keychain"
-          security set-key-partition-list -S apple-tool:,apple: -k "$password" "$keychain" >/dev/null
-          security list-keychains -d user -s "$keychain"
-          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
-      - name: Sign with the virtualization entitlement
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ $GITHUB_EVENT_NAME == push ]]; then
-            sign=(--keychain "$KEYCHAIN" --sign "Developer ID Application")
-          else
-            sign=(--sign -)
-          fi
-          codesign --force "${sign[@]}" --options runtime --timestamp --entitlements scripts/vz.entitlements "$BIN"
+          codesign --force --sign - --options runtime --timestamp=none --entitlements scripts/vz.entitlements "$BIN"
           codesign --verify --strict --verbose=2 "$BIN"
+          codesign -d --verbose=4 "$BIN" 2>&1 | grep -Fx "Signature=adhoc"
           codesign -d --entitlements - "$BIN" 2>/dev/null | grep com.apple.security.virtualization
           "$BIN" version | grep -Fx "boxpool $VERSION"
-      - name: Notarize
-        if: github.event_name == 'push'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          auth=(--apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD")
-          ditto -c -k "$BIN" "$RUNNER_TEMP/notarize.zip"
-          out=$(xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" "${auth[@]}" --wait --timeout 30m --output-format json)
-          echo "$out"
-          if [[ $(jq -r .status <<<"$out") != Accepted ]]; then
-            xcrun notarytool log "$(jq -r .id <<<"$out")" "${auth[@]}"
-            exit 1
-          fi
-          # A bare binary cannot be stapled; Gatekeeper fetches the ticket online.
-          spctl -a -vv -t install "$BIN" 2>&1 | grep "source=Notarized Developer ID"
-      - name: Remove the signing keychain
-        if: always() && env.KEYCHAIN != ''
-        run: security delete-keychain "$KEYCHAIN"
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos
@@ -182,6 +134,7 @@ jobs:
           if ! gh release view "$VERSION" >/dev/null 2>&1; then
             flags=()
             [[ $VERSION == *-* ]] && flags+=(--prerelease)
-            gh release create "$VERSION" --verify-tag --title "$VERSION" --generate-notes "${flags[@]}"
+            notes="The macOS binary is ad-hoc signed and is not notarized. See the [verification and Gatekeeper instructions](https://github.com/$GH_REPO/blob/$VERSION/docs/development.md#releases) before running it."
+            gh release create "$VERSION" --verify-tag --title "$VERSION" --generate-notes --notes "$notes" "${flags[@]}"
           fi
           gh release upload "$VERSION" boxpool-* checksums.txt
