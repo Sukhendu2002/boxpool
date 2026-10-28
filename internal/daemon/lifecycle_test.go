@@ -209,3 +209,88 @@ func TestStartSandbox(t *testing.T) {
 		t.Errorf("record after failed start = %s", rec.State)
 	}
 }
+
+func TestPauseResume(t *testing.T) {
+	srv, _, st := newAPIStore(t)
+	_, sb, _ := post(t, srv, `{"name":"web"}`)
+	do := func(op string) Sandbox {
+		t.Helper()
+		code, body := call(t, srv, http.MethodPost, "/v1/sandboxes/web/"+op)
+		var got Sandbox
+		if err := json.Unmarshal([]byte(body), &got); code != http.StatusOK || err != nil {
+			t.Fatalf("%s = %d %s", op, code, body)
+		}
+		return got
+	}
+	if got := do("pause"); got.State != backend.StatePaused || got.Warning != "" {
+		t.Errorf("pause = %+v", got)
+	}
+	if got := states(list(t, srv)); got != "web=paused" {
+		t.Errorf("after pause: %q", got)
+	}
+	if rec, _ := st.Get(context.Background(), sb.ID); rec.State != backend.StatePaused {
+		t.Errorf("record after pause = %s", rec.State)
+	}
+	if got := do("resume"); got.State != backend.StateRunning {
+		t.Errorf("resume = %+v", got)
+	}
+	if got := states(list(t, srv)); got != "web=running" {
+		t.Errorf("after resume: %q", got)
+	}
+	// Resuming a running sandbox does nothing.
+	if got := do("resume"); got.State != backend.StateRunning {
+		t.Errorf("second resume = %+v", got)
+	}
+
+	// A stopped sandbox cannot be paused.
+	call(t, srv, http.MethodPost, "/v1/sandboxes/web/stop")
+	if code, body := call(t, srv, http.MethodPost, "/v1/sandboxes/web/pause"); code != http.StatusInternalServerError || !strings.Contains(body, "not running") {
+		t.Errorf("pause stopped = %d %s", code, body)
+	}
+	if code, _ := call(t, srv, http.MethodPost, "/v1/sandboxes/nope/pause"); code != http.StatusNotFound {
+		t.Errorf("pause nope = %d", code)
+	}
+	if code, _ := call(t, srv, http.MethodPost, "/v1/sandboxes/nope/resume"); code != http.StatusNotFound {
+		t.Errorf("resume nope = %d", code)
+	}
+}
+
+// TestPauseUnsupported checks that a backend that cannot save memory, like
+// Docker, has its sandbox stopped by pause, with a warning, and started by
+// resume.
+func TestPauseUnsupported(t *testing.T) {
+	srv, d, st := newAPIStore(t)
+	_, sb, _ := post(t, srv, `{"name":"web"}`)
+	d.noPause = true
+	code, body := call(t, srv, http.MethodPost, "/v1/sandboxes/web/pause")
+	var got Sandbox
+	json.Unmarshal([]byte(body), &got)
+	if code != http.StatusOK || got.State != backend.StateStopped || !strings.Contains(got.Warning, "memory is lost") {
+		t.Fatalf("pause = %d %s", code, body)
+	}
+	if rec, _ := st.Get(context.Background(), sb.ID); rec.State != backend.StateStopped {
+		t.Errorf("record after pause = %s", rec.State)
+	}
+	if got := states(list(t, srv)); got != "web=stopped" {
+		t.Errorf("after pause: %q", got)
+	}
+
+	// An unclean stop is in the warning too.
+	call(t, srv, http.MethodPost, "/v1/sandboxes/web/start")
+	d.stopErr = fmt.Errorf("stop: %w", backend.ErrUncleanStop)
+	_, body = call(t, srv, http.MethodPost, "/v1/sandboxes/web/pause")
+	json.Unmarshal([]byte(body), &got)
+	if !strings.Contains(got.Warning, "memory is lost") || !strings.Contains(got.Warning, "not stopped cleanly") {
+		t.Errorf("unclean pause = %s", body)
+	}
+	d.stopErr = nil
+
+	code, body = call(t, srv, http.MethodPost, "/v1/sandboxes/web/resume")
+	json.Unmarshal([]byte(body), &got)
+	if code != http.StatusOK || got.State != backend.StateRunning {
+		t.Fatalf("resume = %d %s", code, body)
+	}
+	if got := states(list(t, srv)); got != "web=running" {
+		t.Errorf("after resume: %q", got)
+	}
+}

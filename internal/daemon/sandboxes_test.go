@@ -34,10 +34,14 @@ type fakeDriver struct {
 	mu   sync.Mutex
 	spec map[string]backend.Spec
 	up   map[string]bool
-	n    struct{ create, start, stop, remove int }
-	conn net.Conn // the last connection Dial returned
+	// paused holds the sandboxes Pause saved; Start or Resume restores them.
+	paused map[string]bool
+	n      struct{ create, start, stop, remove int }
+	conn   net.Conn // the last connection Dial returned
 	// stopErr, if set, is what Stop returns after stopping the sandbox.
 	stopErr error
+	// noPause makes Pause and Resume unsupported, as on Docker.
+	noPause bool
 }
 
 func (d *fakeDriver) Name() string { return "fake" }
@@ -60,6 +64,7 @@ func (d *fakeDriver) Start(ctx context.Context, id string) error {
 		return fmt.Errorf("no sandbox %s", id)
 	}
 	d.up[id] = true
+	delete(d.paused, id)
 	d.n.start++
 	return nil
 }
@@ -68,18 +73,46 @@ func (d *fakeDriver) Stop(ctx context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.up[id] = false
+	delete(d.paused, id)
 	d.n.stop++
 	return d.stopErr
 }
 
-func (d *fakeDriver) Pause(context.Context, string) error  { return backend.ErrNotSupported }
-func (d *fakeDriver) Resume(context.Context, string) error { return backend.ErrNotSupported }
+func (d *fakeDriver) Pause(ctx context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch {
+	case d.noPause:
+		return fmt.Errorf("pause: %w", backend.ErrNotSupported)
+	case !d.up[id]:
+		return fmt.Errorf("sandbox %s is not running", id)
+	}
+	d.up[id], d.paused[id] = false, true
+	return nil
+}
+
+func (d *fakeDriver) Resume(ctx context.Context, id string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch {
+	case d.noPause:
+		return fmt.Errorf("resume: %w", backend.ErrNotSupported)
+	case d.up[id]:
+		return nil
+	case !d.paused[id]:
+		return fmt.Errorf("sandbox %s is not paused", id)
+	}
+	d.up[id] = true
+	delete(d.paused, id)
+	return nil
+}
 
 func (d *fakeDriver) Remove(ctx context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	delete(d.spec, id)
 	delete(d.up, id)
+	delete(d.paused, id)
 	d.n.remove++
 	return nil
 }
@@ -92,6 +125,8 @@ func (d *fakeDriver) List(context.Context) ([]backend.Sandbox, error) {
 		state := backend.StateStopped
 		if d.up[id] {
 			state = backend.StateRunning
+		} else if d.paused[id] {
+			state = backend.StatePaused
 		}
 		list = append(list, backend.Sandbox{ID: id, Name: spec.Name, State: state})
 	}
@@ -138,7 +173,7 @@ func newAPIStore(t *testing.T) (*httptest.Server, *fakeDriver, *store.Store) {
 // newFakeDriver returns a fake driver whose agent listens in dir.
 func newFakeDriver(t *testing.T, dir string) *fakeDriver {
 	t.Helper()
-	d := &fakeDriver{sock: filepath.Join(dir, "agent.sock"), spec: map[string]backend.Spec{}, up: map[string]bool{}}
+	d := &fakeDriver{sock: filepath.Join(dir, "agent.sock"), spec: map[string]backend.Spec{}, up: map[string]bool{}, paused: map[string]bool{}}
 	l, err := agent.Listen("unix:" + d.sock)
 	if err != nil {
 		t.Fatal(err)

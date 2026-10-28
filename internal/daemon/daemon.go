@@ -96,7 +96,7 @@ type Sandbox struct {
 	Restart   string        `json:"restart,omitempty"`
 	// Warning is set by stop and remove when the sandbox did not shut down
 	// cleanly (backend.ErrUncleanStop): it is stopped, but its disk may be
-	// inconsistent.
+	// inconsistent. Pause sets it when it stopped the sandbox instead.
 	Warning string `json:"warning,omitempty"`
 }
 
@@ -131,6 +131,8 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{name}", s.backendOnly(s.get))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/start", s.backendOnly(s.start))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.backendOnly(s.stop))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/pause", s.backendOnly(s.pause))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/resume", s.backendOnly(s.resume))
 	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.backendOnly(s.remove))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.backendOnly(s.exec))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/files", s.backendOnly(s.files))
@@ -277,7 +279,13 @@ func (s *server) live(ctx context.Context, records []store.Sandbox) ([]Sandbox, 
 
 // start boots a stopped sandbox from its kept disk. Starting a running
 // sandbox does nothing.
-func (s *server) start(w http.ResponseWriter, r *http.Request) {
+func (s *server) start(w http.ResponseWriter, r *http.Request) { s.boot(w, r, false) }
+
+// resume restores a paused sandbox, or boots one that pause had to stop.
+// Resuming a running sandbox does nothing.
+func (s *server) resume(w http.ResponseWriter, r *http.Request) { s.boot(w, r, true) }
+
+func (s *server) boot(w http.ResponseWriter, r *http.Request, resume bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sb, ok := s.lookup(w, r)
@@ -288,7 +296,20 @@ func (s *server) start(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	if err := s.d.Start(r.Context(), sb.ID); err != nil {
+	start := s.d.Start
+	if resume {
+		list, err := s.live(r.Context(), []store.Sandbox{sb})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		// A driver's Resume refuses a stopped sandbox, which is what pause
+		// leaves on a backend that cannot save memory.
+		if list[0].State != backend.StateStopped {
+			start = s.d.Resume
+		}
+	}
+	if err := start(r.Context(), sb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -318,6 +339,43 @@ func (s *server) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sb.State = backend.StateStopped
+	out := apiSandbox(sb)
+	out.Warning = warning
+	writeJSON(w, out)
+}
+
+// pause saves a running sandbox's memory and stops its VM, so it uses no
+// CPU or memory until resume. A backend that cannot save memory (Docker,
+// or a VM vz cannot save) stops the sandbox instead, with a warning.
+func (s *server) pause(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sb, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sameBackend(sb); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	state, warning := backend.StatePaused, ""
+	err := s.d.Pause(ctx, sb.ID)
+	if errors.Is(err, backend.ErrNotSupported) {
+		state, warning = backend.StateStopped, fmt.Sprintf("%v: stopped the sandbox instead, so its memory is lost; resume boots it from its disk", err)
+		var unclean string
+		if unclean, err = s.stopSandbox(ctx, sb); unclean != "" {
+			warning += "; " + unclean
+		}
+	}
+	if err == nil {
+		err = s.st.SetState(context.WithoutCancel(ctx), sb.ID, state)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	sb.State = state
 	out := apiSandbox(sb)
 	out.Warning = warning
 	writeJSON(w, out)
