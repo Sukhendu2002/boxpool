@@ -231,7 +231,7 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 	}()
 	err = os.WriteFile(l.pid, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0600)
 	if err == nil {
-		err = d.boot(ctx, l, spec, n)
+		err = d.boot(ctx, l, spec, n, exited)
 	}
 	if err != nil {
 		cleanup, cancel := cleanupContext(ctx)
@@ -243,7 +243,8 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 		case <-exited:
 			vmGone = true
 			d.waitConsole(id)
-			err = errors.Join(err, removeRuntimeFiles(l))
+			// "signal: killed" means it still ran when the start gave up.
+			err = errors.Join(err, fmt.Errorf("firecracker: %s", cmd.ProcessState), removeRuntimeFiles(l))
 		case <-cleanup.Done():
 			err = errors.Join(err, fmt.Errorf("wait for failed start cleanup: %w", cleanup.Err()), killErr)
 		}
@@ -252,14 +253,14 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 	return nil
 }
 
-func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic) error {
+func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, exited <-chan struct{}) error {
 	api := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", l.api)
 		},
 	}}
 	defer api.CloseIdleConnections()
-	err := poll(ctx, l, apiTimeout, "the API socket", func(ctx context.Context) error {
+	err := poll(ctx, exited, apiTimeout, "the API socket", func(ctx context.Context) error {
 		c, err := net.Dial("unix", l.api)
 		if err == nil {
 			c.Close()
@@ -276,7 +277,7 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic) 
 	}
 	ag := d.agent(l)
 	defer ag.CloseIdleConnections()
-	err = poll(ctx, l, agentTimeout, "the guest agent", func(ctx context.Context) error {
+	err = poll(ctx, exited, agentTimeout, "the guest agent", func(ctx context.Context) error {
 		_, err := ag.Version(ctx)
 		return err
 	})
@@ -317,9 +318,12 @@ func put(ctx context.Context, c *http.Client, call apiCall) error {
 	return nil
 }
 
-// poll calls try every few milliseconds until it succeeds, the sandbox's
-// firecracker process exits or timeout passes.
-func poll(ctx context.Context, l layout, timeout time.Duration, what string, try func(context.Context) error) error {
+// poll calls try every few milliseconds until it succeeds, exited is closed
+// or timeout passes. It does not use running: just after exec, until the
+// kernel sets up the new program's arguments (milliseconds on a cold page
+// cache, as after a reboot), /proc/<pid>/cmdline is empty, so a live
+// process looks gone.
+func poll(ctx context.Context, exited <-chan struct{}, timeout time.Duration, what string, try func(context.Context) error) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	for {
@@ -327,10 +331,9 @@ func poll(ctx context.Context, l layout, timeout time.Duration, what string, try
 		if err == nil {
 			return nil
 		}
-		if _, ok := running(l); !ok {
-			return fmt.Errorf("firecracker exited while waiting for %s", what)
-		}
 		select {
+		case <-exited:
+			return fmt.Errorf("firecracker exited while waiting for %s", what)
 		case <-ctx.Done():
 			return fmt.Errorf("waiting for %s: %w (last error: %v)", what, ctx.Err(), err)
 		case <-time.After(5 * time.Millisecond):

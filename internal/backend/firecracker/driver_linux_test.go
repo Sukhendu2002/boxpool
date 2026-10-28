@@ -195,3 +195,24 @@ func TestNewThroughSymlink(t *testing.T) {
 	}
 	assertKilled(t, exited, ol)
 }
+
+// TestPoll checks that poll trusts the exited channel, not /proc: a just
+// started process can look gone there (#26).
+func TestPoll(t *testing.T) {
+	ctx := context.Background()
+	tries := 0
+	err := poll(ctx, make(chan struct{}), time.Second, "x", func(context.Context) error {
+		if tries++; tries < 3 {
+			return errors.New("not yet")
+		}
+		return nil
+	})
+	if err != nil || tries != 3 {
+		t.Errorf("poll = %v after %d tries, want success after 3", err, tries)
+	}
+	exited := make(chan struct{})
+	close(exited)
+	if err := poll(ctx, exited, time.Second, "x", func(context.Context) error { return errors.New("no") }); err == nil || err.Error() != "firecracker exited while waiting for x" {
+		t.Errorf("poll after exit = %v", err)
+	}
+}
