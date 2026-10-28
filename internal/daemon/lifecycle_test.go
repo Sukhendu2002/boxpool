@@ -177,3 +177,35 @@ func TestRemoveSandbox(t *testing.T) {
 		t.Errorf("recreate = %d %s", code, body)
 	}
 }
+
+func TestStartSandbox(t *testing.T) {
+	srv, d, st := newAPIStore(t)
+	_, sb, _ := post(t, srv, `{"name":"web"}`)
+	call(t, srv, http.MethodPost, "/v1/sandboxes/web/stop")
+	code, body := call(t, srv, http.MethodPost, "/v1/sandboxes/web/start")
+	var got Sandbox
+	json.Unmarshal([]byte(body), &got)
+	if code != http.StatusOK || got.State != backend.StateRunning || got.ID != sb.ID {
+		t.Fatalf("start = %d %s", code, body)
+	}
+	d.mu.Lock()
+	if !d.up[sb.ID] || d.n.start != 2 || d.n.create != 1 {
+		t.Errorf("driver: running %v, %d starts, %d creates", d.up[sb.ID], d.n.start, d.n.create)
+	}
+	d.mu.Unlock()
+	if rec, err := st.Get(context.Background(), sb.ID); err != nil || rec.State != backend.StateRunning {
+		t.Errorf("record = %+v, %v", rec, err)
+	}
+	if code, _ := call(t, srv, http.MethodPost, "/v1/sandboxes/nope/start"); code != http.StatusNotFound {
+		t.Errorf("start nope = %d", code)
+	}
+	// The driver lost the sandbox: start fails and the record stays stopped.
+	call(t, srv, http.MethodPost, "/v1/sandboxes/web/stop")
+	d.Remove(context.Background(), sb.ID)
+	if code, _ := call(t, srv, http.MethodPost, "/v1/sandboxes/web/start"); code != http.StatusInternalServerError {
+		t.Errorf("start missing = %d", code)
+	}
+	if rec, _ := st.Get(context.Background(), sb.ID); rec.State != backend.StateStopped {
+		t.Errorf("record after failed start = %s", rec.State)
+	}
+}

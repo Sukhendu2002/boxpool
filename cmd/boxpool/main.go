@@ -35,6 +35,7 @@ Commands:
   exec      run a command in a sandbox
   cp        copy files between this machine and a sandbox
   ls        list this machine's sandboxes
+  start     start a stopped sandbox with its disk
   stop      stop a sandbox
   rm        delete a sandbox and free its resources
 `
@@ -62,6 +63,8 @@ func main() {
 		os.Exit(cp(os.Args[2:]))
 	case "ls":
 		os.Exit(ls(os.Args[2:]))
+	case "start":
+		os.Exit(start(os.Args[2:]))
 	case "stop":
 		os.Exit(stop(os.Args[2:]))
 	case "rm":

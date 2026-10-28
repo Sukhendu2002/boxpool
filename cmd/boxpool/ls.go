@@ -103,6 +103,27 @@ func age(d time.Duration) string {
 	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
+func start(args []string) int {
+	fs := flag.NewFlagSet("start", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprint(os.Stderr, "Usage: boxpool start <name>\n\nStarts a stopped sandbox with the disk it had when it stopped.\n")
+	}
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return 2
+	}
+	ctx := context.Background()
+	c, ok := connect(ctx, "start")
+	if !ok {
+		return 1
+	}
+	sb, err := c.StartSandbox(ctx, fs.Arg(0))
+	return finish("start", sb, err)
+}
+
 func stop(args []string) int {
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
 	fs.Usage = func() {
@@ -147,7 +168,7 @@ func rm(args []string) int {
 	return finish("rm", sb, err)
 }
 
-// finish reports the result of stop or rm. An unclean stop is a warning.
+// finish reports the result of start, stop or rm. An unclean stop is a warning.
 func finish(cmd string, sb daemon.Sandbox, err error) int {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool %s: %v\n", cmd, err)

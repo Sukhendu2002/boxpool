@@ -173,6 +173,16 @@ printf '%s\n' "$limit"`))
 	if got != sb.Name+"=stopped other=stopped" && got != sb.Name+"=stopped other=running" {
 		t.Errorf("ls after a daemon restart = %q", got)
 	}
+	// start boots the stopped sandbox with the disk it had before stop.
+	if started, err := c.StartSandbox(ctx, sb.Name); err != nil || started.State != "running" {
+		t.Fatalf("start = %+v, %v", started, err)
+	}
+	if got := run("cat /root/marker"); got != "kept\n" {
+		t.Errorf("marker after stop and start = %q", got)
+	}
+	if _, err := c.StopSandbox(ctx, sb.Name); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "other"}); err != nil {
 		t.Fatal(err)
 	}
