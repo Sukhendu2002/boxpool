@@ -42,6 +42,9 @@ type fakeDriver struct {
 	stopErr error
 	// noPause makes Pause and Resume unsupported, as on Docker.
 	noPause bool
+	// pauseErr, if set, is what Pause returns after stopping the sandbox,
+	// as vz's fallback does.
+	pauseErr error
 }
 
 func (d *fakeDriver) Name() string { return "fake" }
@@ -84,6 +87,9 @@ func (d *fakeDriver) Pause(ctx context.Context, id string) error {
 	switch {
 	case d.noPause:
 		return fmt.Errorf("pause: %w", backend.ErrNotSupported)
+	case d.pauseErr != nil:
+		d.up[id] = false
+		return d.pauseErr
 	case !d.up[id]:
 		return fmt.Errorf("sandbox %s is not running", id)
 	}

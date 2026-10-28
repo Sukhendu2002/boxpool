@@ -303,9 +303,9 @@ func (s *server) boot(w http.ResponseWriter, r *http.Request, resume bool) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		// A driver's Resume refuses a stopped sandbox, which is what pause
-		// leaves on a backend that cannot save memory.
-		if list[0].State != backend.StateStopped {
+		// Only a paused sandbox needs Resume, which Docker never supports;
+		// Start boots one that pause had to stop and leaves a running one.
+		if list[0].State == backend.StatePaused {
 			start = s.d.Resume
 		}
 	}
@@ -361,7 +361,8 @@ func (s *server) pause(w http.ResponseWriter, r *http.Request) {
 	}
 	state, warning := backend.StatePaused, ""
 	err := s.d.Pause(ctx, sb.ID)
-	if errors.Is(err, backend.ErrNotSupported) {
+	// vz's fallback stops the VM, cleanly or not, before it reports either.
+	if errors.Is(err, backend.ErrNotSupported) || errors.Is(err, backend.ErrUncleanStop) {
 		state, warning = backend.StateStopped, fmt.Sprintf("%v: stopped the sandbox instead, so its memory is lost; resume boots it from its disk", err)
 		var unclean string
 		if unclean, err = s.stopSandbox(ctx, sb); unclean != "" {

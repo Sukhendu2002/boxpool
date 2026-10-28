@@ -293,4 +293,25 @@ func TestPauseUnsupported(t *testing.T) {
 	if got := states(list(t, srv)); got != "web=running" {
 		t.Errorf("after resume: %q", got)
 	}
+	// Resuming a running sandbox does nothing, though Resume is unsupported.
+	if code, body := call(t, srv, http.MethodPost, "/v1/sandboxes/web/resume"); code != http.StatusOK {
+		t.Errorf("second resume = %d %s", code, body)
+	}
+}
+
+// TestPauseFallbackUnclean checks that a pause whose stop fallback was
+// unclean, as vz reports it, records the sandbox stopped with a warning.
+func TestPauseFallbackUnclean(t *testing.T) {
+	srv, d, st := newAPIStore(t)
+	_, sb, _ := post(t, srv, `{"name":"web"}`)
+	d.pauseErr = fmt.Errorf("pause sandbox %s: stop fallback failed: %w", sb.ID, backend.ErrUncleanStop)
+	code, body := call(t, srv, http.MethodPost, "/v1/sandboxes/web/pause")
+	var got Sandbox
+	json.Unmarshal([]byte(body), &got)
+	if code != http.StatusOK || got.State != backend.StateStopped || !strings.Contains(got.Warning, "not stopped cleanly") {
+		t.Fatalf("pause = %d %s", code, body)
+	}
+	if rec, _ := st.Get(context.Background(), sb.ID); rec.State != backend.StateStopped {
+		t.Errorf("record after pause = %s", rec.State)
+	}
 }

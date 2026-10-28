@@ -193,7 +193,7 @@ printf '%s\n' "$limit"`))
 	bootID := run("cat /proc/sys/kernel/random/boot_id")
 	if paused, err := c.PauseSandbox(ctx, sb.Name); err != nil {
 		t.Fatal(err)
-	} else if paused.State != want || (paused.Warning != "") != (backend == "docker") {
+	} else if string(paused.State) != want || (paused.Warning != "") != (backend == "docker") {
 		t.Errorf("pause = %+v", paused)
 	}
 	if got := names(t, c); got != sb.Name+"="+want+" other=running" {
