@@ -224,6 +224,83 @@ func TestAdopt(t *testing.T) {
 	}
 }
 
+func TestAdoptInterruptedProbe(t *testing.T) {
+	for _, mode := range []string{"cancelled", "cancel-during-ping", "retry-agent"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			d := &Driver{root: root}
+			vm, l := fakeFirecracker(t, root, "vm", "--api-sock", sandboxLayout(root, "vm").api)
+			t.Cleanup(func() {
+				vm.Process.Kill()
+				vm.Wait()
+				d.waitConsole("vm")
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "cancelled" {
+				fakeAgent(t, l)
+				if err := d.ping(ctx, l); err != nil {
+					t.Fatal(err)
+				}
+				cancel()
+			} else {
+				// Hold the first connection so the test can cancel an active
+				// probe or fail it before making a real agent available.
+				if err := os.Remove(l.vsock); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var ln *net.UnixListener
+			if mode != "cancelled" {
+				var err error
+				ln, err = net.ListenUnix("unix", &net.UnixAddr{Name: l.vsock, Net: "unix"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer ln.Close()
+				ln.SetUnlinkOnClose(false)
+				ln.SetDeadline(time.Now().Add(5 * time.Second))
+			}
+			done := make(chan error, 1)
+			go func() { done <- d.adopt(ctx) }()
+			if ln != nil {
+				c, err := ln.Accept()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == "cancel-during-ping" {
+					cancel()
+				}
+				c.Close()
+				ln.Close()
+				if mode == "retry-agent" {
+					fakeAgent(t, l)
+				}
+			}
+			select {
+			case err := <-done:
+				if mode == "retry-agent" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else if !errors.Is(err, context.Canceled) {
+					t.Fatalf("adopt = %v, want context.Canceled", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("adoption did not finish")
+			}
+			if err := waitExit(context.Background(), l, 50*time.Millisecond); err == nil {
+				t.Fatal("adoption killed the VM")
+			}
+			for _, p := range []string{l.pid, l.api, l.vsock} {
+				if _, err := os.Stat(p); err != nil {
+					t.Errorf("adoption removed %s: %v", p, err)
+				}
+			}
+		})
+	}
+}
+
 // A VM started through the real state directory is an orphan to a Driver
 // made through a symlink to it.
 func TestNewThroughSymlink(t *testing.T) {

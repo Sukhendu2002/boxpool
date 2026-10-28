@@ -102,6 +102,9 @@ func (d *Driver) adopt(ctx context.Context) error {
 		return err
 	}
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !e.IsDir() {
 			continue
 		}
@@ -112,6 +115,9 @@ func (d *Driver) adopt(ctx context.Context) error {
 				slog.Info("adopting running sandbox", "sandbox", e.Name(), "pid", pid)
 				d.watchConsole(e.Name(), l)
 				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			slog.Warn("killing firecracker process whose agent does not answer", "sandbox", e.Name(), "pid", pid, "err", err)
 		}
@@ -124,12 +130,12 @@ func (d *Driver) adopt(ctx context.Context) error {
 
 // ping checks that the sandbox's agent answers within apiTimeout.
 func (d *Driver) ping(ctx context.Context, l layout) error {
-	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
-	defer cancel()
 	ag := d.agent(l)
 	defer ag.CloseIdleConnections()
-	_, err := ag.Version(ctx)
-	return err
+	return poll(ctx, nil, apiTimeout, "the guest agent", func(ctx context.Context) error {
+		_, err := ag.Version(ctx)
+		return err
+	})
 }
 
 // watchConsole bounds the console log of an adopted VM, which is not this
