@@ -8,10 +8,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,57 +37,9 @@ func stateDir(t *testing.T) string {
 }
 
 func TestIntegration(t *testing.T) {
-	if f, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0); err != nil {
-		t.Skipf("needs read/write /dev/kvm: %v", err)
-	} else {
-		f.Close()
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	home := stateDir(t)
-	paths, err := artifacts.Fetch(ctx, filepath.Join(home, artifacts.DirName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, err := New(ctx, home, paths, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := make([]byte, 6)
-	rand.Read(b)
-	id := hex.EncodeToString(b)
-	if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
-		t.Fatal(err)
-	}
-	l := sandboxLayout(d.root, id)
-	t.Cleanup(func() {
-		if t.Failed() {
-			for _, p := range []string{l.console, l.log} {
-				b, _ := os.ReadFile(p)
-				t.Logf("%s:\n%s", p, b)
-			}
-		}
-		if err := d.Remove(context.Background(), id); err != nil {
-			t.Error(err)
-		}
-		if _, err := os.Stat(l.dir); !os.IsNotExist(err) {
-			t.Errorf("Remove left %s: %v", l.dir, err)
-		}
-	})
-	c := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, id) })
-	defer c.CloseIdleConnections()
-	run := func(script string) string {
-		t.Helper()
-		var out bytes.Buffer
-		s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", script}}, &out, &out)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if code, err := s.Wait(); err != nil || code != 0 {
-			t.Fatalf("%s: exit %d, %v: %s", script, code, err, out.String())
-		}
-		return out.String()
-	}
+	d, id, l, run := newSandbox(t, ctx, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1})
 	stop := func() {
 		t.Helper()
 		start := time.Now()
@@ -181,6 +135,177 @@ func TestIntegration(t *testing.T) {
 	if _, ok := running(l); ok {
 		t.Error("firecracker still runs after an unclean Stop")
 	}
+}
+
+// TestIntegrationPause pauses and resumes a 2 GiB sandbox with background
+// processes running, then stops it while paused.
+func TestIntegrationPause(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	d, id, l, run := newSandbox(t, ctx, backend.Spec{CPUs: 1, MemoryMB: 2048, DiskGB: 1})
+	if err := d.Start(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	state := func() backend.State {
+		t.Helper()
+		list, err := d.List(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sb := range list {
+			if sb.ID == id {
+				return sb.State
+			}
+		}
+		t.Fatalf("List does not show %s", id)
+		return ""
+	}
+	pause := func() {
+		t.Helper()
+		start := time.Now()
+		if err := d.Pause(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("Pause: %v", time.Since(start))
+		du, _ := exec.Command("du", "-h", l.mem, l.vmstate).CombinedOutput()
+		t.Logf("snapshot on disk:\n%s", du)
+		if got := state(); got != backend.StatePaused {
+			t.Fatalf("after Pause: %s, want paused", got)
+		}
+	}
+	sleeper := strings.TrimSpace(run("sleep 1000 >/dev/null 2>&1 & echo $!"))
+	run("sh -c 'i=0; while :; do i=$((i+1)); echo $i > /tmp/count; sleep 0.1; done' >/dev/null 2>&1 &")
+	// Not synced: Stop of a paused sandbox must still get it to the disk.
+	run("echo kept > /root/unsynced")
+	pause()
+	if err := d.Pause(ctx, id); err != nil {
+		t.Errorf("Pause of a paused sandbox: %v", err)
+	}
+	time.Sleep(2 * time.Second)
+	// A new Driver, as after a daemon restart, resumes it.
+	paths, err := artifacts.Fetch(ctx, filepath.Join(stateDir(t), artifacts.DirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := New(ctx, stateDir(t), paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	if err := restarted.Resume(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("Resume of a 2 GiB sandbox until the agent answered: %v", time.Since(start))
+	if got := state(); got != backend.StateRunning {
+		t.Errorf("after Resume: %s, want running", got)
+	}
+	for _, p := range []string{l.vmstate, l.mem} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("Resume left %s: %v", p, err)
+		}
+	}
+	run("kill -0 " + sleeper)
+	run(`a=$(cat /tmp/count); sleep 0.5; b=$(cat /tmp/count); test "$b" -gt "$a"`)
+	// The guest's clock must not lag by the time it spent paused.
+	skew := strings.TrimSpace(run(fmt.Sprintf("echo $(( $(date +%%s) - %d ))", time.Now().Unix())))
+	t.Logf("guest clock minus host clock after Resume: %s s", skew)
+	if n, err := strconv.Atoi(skew); err != nil || n < -1 || n > 1 {
+		t.Errorf("guest clock off by %q s after Resume", skew)
+	}
+	if err := d.Resume(ctx, id); err != nil {
+		t.Errorf("Resume of a running sandbox: %v", err)
+	}
+
+	pause()
+	if err := d.Stop(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if log, _ := os.ReadFile(l.log); !bytes.Contains(log, []byte("exiting successfully")) {
+		t.Errorf("Stop of a paused sandbox was not clean; firecracker's log:\n%s", log)
+	}
+	if got := state(); got != backend.StateStopped {
+		t.Errorf("after Stop: %s, want stopped", got)
+	}
+	if err := d.Resume(ctx, id); err == nil || !strings.Contains(err.Error(), "not paused") {
+		t.Errorf("Resume of a stopped sandbox: %v, want not paused", err)
+	}
+	if err := d.Pause(ctx, id); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Errorf("Pause of a stopped sandbox: %v, want not running", err)
+	}
+	// As left by a daemon that died while pausing.
+	if err := os.WriteFile(l.mem+".tmp", []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Start(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(l.mem + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("Start left a partial snapshot: %v", err)
+	}
+	if got := run("cat /root/unsynced"); got != "kept\n" {
+		t.Errorf("file written before Pause and Stop: %q, want kept", got)
+	}
+	if err := d.Stop(ctx, id); err != nil {
+		t.Error(err)
+	}
+}
+
+// newSandbox creates a sandbox named it-<id>, removed when the test ends,
+// and returns run, which runs a shell script in it and fails the test if
+// the script fails.
+func newSandbox(t *testing.T, ctx context.Context, spec backend.Spec) (*Driver, string, layout, func(string) string) {
+	t.Helper()
+	if f, err := os.OpenFile("/dev/kvm", os.O_RDWR, 0); err != nil {
+		t.Skipf("needs read/write /dev/kvm: %v", err)
+	} else {
+		f.Close()
+	}
+	home := stateDir(t)
+	paths, err := artifacts.Fetch(ctx, filepath.Join(home, artifacts.DirName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(ctx, home, paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := make([]byte, 6)
+	rand.Read(b)
+	id := hex.EncodeToString(b)
+	spec.Name = "it-" + id
+	if _, err := d.Create(ctx, id, spec); err != nil {
+		t.Fatal(err)
+	}
+	l := sandboxLayout(d.root, id)
+	t.Cleanup(func() {
+		if t.Failed() {
+			for _, p := range []string{l.console, l.log} {
+				b, _ := os.ReadFile(p)
+				t.Logf("%s:\n%s", p, b)
+			}
+		}
+		if err := d.Remove(context.Background(), id); err != nil {
+			t.Error(err)
+		}
+		if _, err := os.Stat(l.dir); !os.IsNotExist(err) {
+			t.Errorf("Remove left %s: %v", l.dir, err)
+		}
+	})
+	c := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, id) })
+	t.Cleanup(c.CloseIdleConnections)
+	run := func(script string) string {
+		t.Helper()
+		var out bytes.Buffer
+		s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", script}}, &out, &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code, err := s.Wait(); err != nil || code != 0 {
+			t.Fatalf("%s: exit %d, %v: %s", script, code, err, out.String())
+		}
+		return out.String()
+	}
+	return d, id, l, run
 }
 
 // fsck checks that Stop left the sandbox's disk consistent.

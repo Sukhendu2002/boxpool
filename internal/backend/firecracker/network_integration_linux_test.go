@@ -121,6 +121,16 @@ func TestIntegrationNetwork(t *testing.T) {
 	rules, _ := exec.Command("nft", "list", "table", "inet", "boxpool").CombinedOutput()
 	accepts, _ := exec.Command("sh", "-c", "iptables -S | grep boxpool").CombinedOutput()
 	t.Logf("nft list table inet boxpool:\n%s\niptables rules:\n%s", rules, accepts)
+	// A paused sandbox has no tap; a resumed one gets its address back.
+	if err := d.Pause(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if link, err := lookupLink(ctx, nics[a].tap); err != nil || link != nil {
+		t.Errorf("tap of paused A: %+v, %v; want none", link, err)
+	}
+	if err := d.Resume(ctx, a); err != nil {
+		t.Fatal(err)
+	}
 	t.Logf("A resolv.conf: %q", must(a, "cat /etc/resolv.conf"))
 	t.Logf("A getent hosts example.com: %s", must(a, "getent hosts example.com"))
 	head := must(a, `exec 3<>/dev/tcp/example.com/80 && printf 'HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n' >&3 && head -n1 <&3`)

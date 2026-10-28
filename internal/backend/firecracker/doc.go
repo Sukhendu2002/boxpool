@@ -14,6 +14,8 @@
 //	console.log       the guest's serial console
 //	console.log.1     its previous MiB or more, once it outgrew 1 MiB
 //	resources.json    its persistent CPU, memory and disk reservation
+//	snapshot.vmstate  a paused sandbox's VM state
+//	snapshot.mem      a paused sandbox's memory
 //
 // Create defaults to 2 vCPUs, 2048 MiB RAM and a 10 GiB disk. Shared
 // admission keeps one CPU and max(1 GiB, 10% of RAM) for the host. Stopped
@@ -24,6 +26,17 @@
 //
 // VMs run in a session of their own and outlive the daemon. New adopts
 // each one whose agent answers, keeping its tap device, and kills the rest.
+//
+// Pause writes a full snapshot (VM state and all guest memory, so as much
+// disk as the sandbox has RAM), syncs it and the rootfs to disk, ends the
+// firecracker process and removes the tap. A paused sandbox has no process
+// for New to adopt or kill, so it survives a daemon restart. Resume, or
+// Start, recreates the tap, loads the snapshot, deletes it, resumes the
+// vCPUs and sets the guest's clock, which stood still while paused. The
+// deleted memory file keeps its disk space until the VM stops, because
+// Firecracker maps it. Stop restores a paused sandbox first, to shut it
+// down cleanly. Firecracker loads only snapshots from its own version, so a
+// paused sandbox does not survive an upgrade of the pinned Firecracker.
 //
 // Firecracker runs without its jailer. The jailer needs root to chroot,
 // create device nodes, join cgroups and drop to another uid, and boxpool's

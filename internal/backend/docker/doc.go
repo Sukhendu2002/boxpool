@@ -72,7 +72,7 @@
 //     about 30 by default; raise default-address-pools in daemon.json for
 //     more.
 //   - SELinux hosts would need the agent directory relabelled; not handled.
-//   - Pause and Resume are not supported, as on Firecracker until M3.
+//   - Pause and Resume are not supported.
 //
 // Shared resource admission (internal/resources) keeps one CPU and the
 // larger of 1 GiB or 10% of memory for the host. Defaults are 2 CPUs,

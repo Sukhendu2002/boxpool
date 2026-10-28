@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,8 +94,21 @@ func TestCreateListRemove(t *testing.T) {
 	if err := d.Stop(ctx, "abc"); err != nil {
 		t.Errorf("Stop of a stopped sandbox: %v", err)
 	}
-	if err := d.Pause(ctx, "abc"); !errors.Is(err, backend.ErrNotSupported) {
-		t.Errorf("Pause: %v", err)
+	if err := d.Pause(ctx, "abc"); err == nil || !strings.Contains(err.Error(), "not running") {
+		t.Errorf("Pause of a stopped sandbox: %v", err)
+	}
+	if err := d.Resume(ctx, "abc"); err == nil || !strings.Contains(err.Error(), "not paused") {
+		t.Errorf("Resume of a stopped sandbox: %v", err)
+	}
+	if err := os.WriteFile(l.vmstate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := d.List(ctx); err != nil || len(list) != 1 || list[0].State != backend.StatePaused {
+		t.Errorf("List with a snapshot: %+v, %v; want abc paused", list, err)
+	}
+	// d has no firecracker binary, so the snapshot cannot be restored.
+	if err := d.Stop(ctx, "abc"); !errors.Is(err, backend.ErrUncleanStop) || paused(l) {
+		t.Errorf("Stop of a paused sandbox that does not restore: %v, paused %v; want ErrUncleanStop, not paused", err, paused(l))
 	}
 
 	canceled, cancel := context.WithCancel(ctx)

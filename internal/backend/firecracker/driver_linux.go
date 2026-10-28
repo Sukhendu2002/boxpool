@@ -210,9 +210,15 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	return backend.Sandbox{ID: id, Name: spec.Name, State: backend.StateStopped}, nil
 }
 
-// Start boots the sandbox and returns once its agent answers. Starting a
-// running sandbox does nothing.
-func (d *Driver) Start(ctx context.Context, id string) (err error) {
+// Start boots the sandbox, or restores it if it is paused, and returns once
+// its agent answers. Starting a running sandbox does nothing.
+func (d *Driver) Start(ctx context.Context, id string) error { return d.start(ctx, id, false) }
+
+// Resume restores a paused sandbox from its snapshot, which it deletes, and
+// returns once its agent answers. Resuming a running sandbox does nothing.
+func (d *Driver) Resume(ctx context.Context, id string) error { return d.start(ctx, id, true) }
+
+func (d *Driver) start(ctx context.Context, id string, resume bool) error {
 	if err := validID(id); err != nil {
 		return err
 	}
@@ -228,6 +234,15 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 	if _, ok := running(l); ok {
 		return nil
 	}
+	if resume && !paused(l) {
+		return fmt.Errorf("resume sandbox %s: it is not paused", id)
+	}
+	return d.launch(ctx, id, l, spec)
+}
+
+// launch starts the firecracker process of a sandbox that does not run and
+// boots or restores it. The caller holds the sandbox's lock.
+func (d *Driver) launch(ctx context.Context, id string, l layout, spec backend.Spec) (err error) {
 	// Firecracker cannot bind over sockets left by an unclean exit.
 	if err := removeRuntimeFiles(l); err != nil {
 		return err
@@ -298,12 +313,16 @@ func (d *Driver) Start(ctx context.Context, id string) (err error) {
 	return nil
 }
 
-func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, exited <-chan struct{}) error {
-	api := &http.Client{Transport: &http.Transport{
+func apiClient(l layout) *http.Client {
+	return &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", l.api)
 		},
 	}}
+}
+
+func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, exited <-chan struct{}) error {
+	api := apiClient(l)
 	defer api.CloseIdleConnections()
 	err := poll(ctx, exited, apiTimeout, "the API socket", func(ctx context.Context) error {
 		c, err := net.Dial("unix", l.api)
@@ -315,9 +334,30 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, 
 	if err != nil {
 		return err
 	}
-	for _, c := range apiCalls(spec, d.kernel, l, n) {
-		if err := put(ctx, api, c); err != nil {
+	restore := paused(l)
+	if restore {
+		// Deleted before the guest runs on, because from then on its memory
+		// and disk no longer match the snapshot.
+		err := send(ctx, api, http.MethodPut, loadSnapshot(l))
+		if err == nil {
+			err = removeSnapshot(l)
+		}
+		if err == nil {
+			err = send(ctx, api, http.MethodPatch, apiCall{"/vm", map[string]any{"state": "Resumed"}})
+		}
+		if err != nil {
 			return err
+		}
+	} else {
+		// A pause cut short by a daemon crash leaves files as large as the
+		// guest's memory, which are useless without the state file.
+		if err := removeSnapshot(l); err != nil {
+			return err
+		}
+		for _, c := range apiCalls(spec, d.kernel, l, n) {
+			if err := send(ctx, api, http.MethodPut, c); err != nil {
+				return err
+			}
 		}
 	}
 	ag := d.agent(l)
@@ -326,39 +366,52 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, 
 		_, err := ag.Version(ctx)
 		return err
 	})
-	if err != nil || n == nil {
-		return err
-	}
-	// Written on every boot: the host's resolvers may have changed.
-	var out bytes.Buffer
-	s, err := ag.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", `printf %s "$1" > /etc/resolv.conf`, "sh", n.resolvConf()}}, &out, &out)
 	if err != nil {
 		return err
 	}
-	if code, err := s.Wait(); err != nil || code != 0 {
-		return fmt.Errorf("write the guest's /etc/resolv.conf: exit status %d, %v: %s", code, err, bytes.TrimSpace(out.Bytes()))
+	guest := func(what, script string, args ...string) error {
+		var out bytes.Buffer
+		s, err := ag.Exec(ctx, agent.ExecRequest{Argv: append([]string{"sh", "-c", script, "sh"}, args...)}, &out, &out)
+		if err != nil {
+			return err
+		}
+		if code, err := s.Wait(); err != nil || code != 0 {
+			return fmt.Errorf("%s: exit status %d, %v: %s", what, code, err, bytes.TrimSpace(out.Bytes()))
+		}
+		return nil
 	}
-	return nil
+	if restore {
+		// A restored guest's clock stands where it was paused.
+		now := time.Now()
+		if err := guest("set the guest's clock", `date -u -s "@$1" >/dev/null`, fmt.Sprintf("%d.%09d", now.Unix(), now.Nanosecond())); err != nil {
+			return err
+		}
+	}
+	if n == nil {
+		return nil
+	}
+	// Written on every boot: the host's resolvers may have changed.
+	return guest("write the guest's /etc/resolv.conf", `printf %s "$1" > /etc/resolv.conf`, n.resolvConf())
 }
 
-func put(ctx context.Context, c *http.Client, call apiCall) error {
+func send(ctx context.Context, c *http.Client, method string, call apiCall) error {
 	b, err := json.Marshal(call.body)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://firecracker"+call.path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, method, "http://firecracker"+call.path, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.Do(req)
 	if err != nil {
-		return fmt.Errorf("PUT %s: %w", call.path, err)
+		return fmt.Errorf("%s %s: %w", method, call.path, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("PUT %s: %s: %s", call.path, resp.Status, bytes.TrimSpace(msg))
+		return fmt.Errorf("%s %s: %s: %s", method, call.path, resp.Status, bytes.TrimSpace(msg))
 	}
 	return nil
 }
@@ -402,11 +455,23 @@ func (d *Driver) Stop(ctx context.Context, id string) error {
 		return err
 	}
 	defer unlock()
-	l, _, err := d.load(id)
+	l, spec, err := d.load(id)
 	if err != nil {
 		return err
 	}
 	var unclean error
+	if _, ok := running(l); !ok && paused(l) {
+		// Discarding the snapshot would lose what the guest had not yet
+		// written to its disk, so restore it to shut it down cleanly. One
+		// that cannot be restored must not block Stop and so Remove.
+		if err := d.launch(ctx, id, l, spec); err != nil {
+			unclean = fmt.Errorf("stop sandbox %s: %w: discarded its snapshot, which did not restore: %v", id, backend.ErrUncleanStop, err)
+			slog.Warn("paused sandbox did not restore; discarding its snapshot", "sandbox", id, "err", err)
+			if err := removeSnapshot(l); err != nil {
+				return errors.Join(unclean, err)
+			}
+		}
+	}
 	if pid, ok := running(l); ok {
 		if err := d.shutdownGuest(ctx, l); err != nil {
 			unclean = fmt.Errorf("stop sandbox %s: %w: %v", id, backend.ErrUncleanStop, err)
@@ -501,12 +566,69 @@ func (d *Driver) Remove(ctx context.Context, id string) error {
 	return nil
 }
 
+// Pause writes a full snapshot of the sandbox's memory and VM state to its
+// directory, then ends its firecracker process and removes its tap device,
+// so it uses no CPU or memory until Resume. Pausing a paused sandbox does
+// nothing. If the snapshot fails, the guest runs on.
 func (d *Driver) Pause(ctx context.Context, id string) error {
-	return fmt.Errorf("pause: %w until snapshots land in M3", backend.ErrNotSupported)
-}
-
-func (d *Driver) Resume(ctx context.Context, id string) error {
-	return fmt.Errorf("resume: %w until snapshots land in M3", backend.ErrNotSupported)
+	if err := validID(id); err != nil {
+		return err
+	}
+	unlock, err := d.lockSandbox(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	l, _, err := d.load(id)
+	if err != nil {
+		return err
+	}
+	if _, ok := running(l); !ok {
+		if paused(l) {
+			return nil
+		}
+		return fmt.Errorf("pause sandbox %s: it is not running", id)
+	}
+	api := apiClient(l)
+	defer api.CloseIdleConnections()
+	// Written under temporary names, synced with the disk, and renamed state
+	// last: paused means the state file exists, so a pause cut short by an
+	// error or a host crash never leaves a snapshot to restore.
+	err = send(ctx, api, http.MethodPatch, apiCall{"/vm", map[string]any{"state": "Paused"}})
+	if err == nil {
+		err = send(ctx, api, http.MethodPut, apiCall{"/snapshot/create", map[string]any{
+			"snapshot_type": "Full", "snapshot_path": l.vmstate + ".tmp", "mem_file_path": l.mem + ".tmp",
+		}})
+	}
+	for _, p := range []string{l.mem + ".tmp", l.vmstate + ".tmp", l.rootfs} {
+		if err == nil {
+			err = syncPath(p)
+		}
+	}
+	if err == nil {
+		err = os.Rename(l.mem+".tmp", l.mem)
+	}
+	if err == nil {
+		err = os.Rename(l.vmstate+".tmp", l.vmstate)
+	}
+	if err == nil {
+		err = syncPath(l.dir)
+	}
+	if err != nil {
+		cleanup, cancel := cleanupContext(ctx)
+		defer cancel()
+		resumeErr := send(cleanup, api, http.MethodPatch, apiCall{"/vm", map[string]any{"state": "Resumed"}})
+		return fmt.Errorf("pause sandbox %s: %w", id, errors.Join(err, resumeErr, removeSnapshot(l)))
+	}
+	// The snapshot is complete: a caller giving up now must not leave the
+	// paused VM and its network behind.
+	cleanup, cancel := cleanupContext(ctx)
+	defer cancel()
+	if err := kill(cleanup, l); err != nil {
+		return err
+	}
+	d.waitConsole(id)
+	return d.stopNetwork(cleanup, id)
 }
 
 // List returns the sandboxes on disk, running or stopped.
@@ -527,6 +649,8 @@ func (d *Driver) List(ctx context.Context) ([]backend.Sandbox, error) {
 		state := backend.StateStopped
 		if _, ok := running(l); ok {
 			state = backend.StateRunning
+		} else if paused(l) {
+			state = backend.StatePaused
 		}
 		list = append(list, backend.Sandbox{ID: e.Name(), Name: spec.Name, State: state})
 	}
@@ -654,4 +778,31 @@ func removeRuntimeFiles(l layout) error {
 		}
 	}
 	return nil
+}
+
+// paused reports whether the sandbox has a snapshot to restore.
+func paused(l layout) bool {
+	_, err := os.Stat(l.vmstate)
+	return err == nil
+}
+
+// removeSnapshot deletes the sandbox's snapshot and any partial one, state
+// first, so the sandbox stops counting as paused before its memory goes.
+func removeSnapshot(l layout) error {
+	for _, p := range []string{l.vmstate, l.mem, l.vmstate + ".tmp", l.mem + ".tmp"} {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncPath flushes a file or directory to disk.
+func syncPath(p string) error {
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }

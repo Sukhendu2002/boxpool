@@ -19,6 +19,8 @@ func TestSandboxLayout(t *testing.T) {
 		vsock:   "/state/sandboxes/abc/vsock.sock",
 		log:     "/state/sandboxes/abc/firecracker.log",
 		console: "/state/sandboxes/abc/console.log",
+		vmstate: "/state/sandboxes/abc/snapshot.vmstate",
+		mem:     "/state/sandboxes/abc/snapshot.mem",
 	}
 	if l != want {
 		t.Errorf("got %+v, want %+v", l, want)
