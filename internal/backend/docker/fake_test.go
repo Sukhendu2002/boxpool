@@ -390,7 +390,7 @@ func (f *fakeEngine) start(c *fakeContainer) {
 	c.stop, c.done = cancel, make(chan struct{})
 	go func() {
 		defer close(c.done)
-		agent.Serve(ctx, l, "fake")
+		agent.Serve(ctx, l, "fake", nil)
 	}()
 }
 

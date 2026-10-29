@@ -137,7 +137,7 @@ func startDaemon(t *testing.T, dir string) (kill func()) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- agent.Serve(ctx, al, "test") }()
+	go func() { served <- agent.Serve(ctx, al, "test", nil) }()
 	t.Cleanup(func() { cancel(); <-served })
 
 	l, err := net.Listen("unix", filepath.Join(dir, daemon.SocketName))

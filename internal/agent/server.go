@@ -93,16 +93,22 @@ func removeStaleSocket(path string) error {
 
 // Serve serves the agent API on l until ctx is cancelled. Cancelling ctx
 // also ends every exec session and kills its processes; Serve returns once
-// they are gone.
-func Serve(ctx context.Context, l net.Listener, version string) error {
+// they are gone. With shutdown nil, the agent does not serve POST
+// /v1/shutdown.
+func Serve(ctx context.Context, l net.Listener, version string, shutdown *Shutdown) error {
 	var sessions sync.WaitGroup
+	var features []string
 	mux := http.NewServeMux()
+	if shutdown != nil {
+		features = append(features, FeatureShutdown)
+		mux.HandleFunc("POST /v1/shutdown", shutdown.serve)
+	}
 	mux.HandleFunc("GET /v1/files", getFiles)
 	mux.HandleFunc("PUT /v1/files", putFiles)
 	mux.HandleFunc("GET /v1/ports", getPorts)
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(Version{Protocol: ProtocolVersion, Agent: version})
+		json.NewEncoder(w).Encode(Version{Protocol: ProtocolVersion, Agent: version, Features: features})
 	})
 	mux.HandleFunc("GET /v1/exec", func(w http.ResponseWriter, r *http.Request) {
 		sessions.Add(1)

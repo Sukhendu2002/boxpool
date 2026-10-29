@@ -211,7 +211,7 @@ func newFakeDriver(t *testing.T, dir string) *fakeDriver {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- agent.Serve(ctx, l, "test") }()
+	go func() { served <- agent.Serve(ctx, l, "test", nil) }()
 	t.Cleanup(func() { cancel(); <-served })
 	return d
 }

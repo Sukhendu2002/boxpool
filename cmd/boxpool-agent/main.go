@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"boxpool.run/boxpool/internal/agent"
@@ -28,7 +29,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	slog.Info("agent started", "listen", *listen, "version", version)
-	if err := agent.Serve(ctx, l, version); err != nil {
+	// Only a VM's agent, on vsock, may stop every process and reboot.
+	var shutdown *agent.Shutdown
+	if strings.HasPrefix(*listen, "vsock:") {
+		shutdown = agent.GuestShutdown()
+	}
+	if err := agent.Serve(ctx, l, version, shutdown); err != nil {
 		slog.Error("agent failed", "err", err)
 		os.Exit(1)
 	}

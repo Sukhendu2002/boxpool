@@ -393,6 +393,30 @@ It downloads the artifacts once into `~/.cache/boxpool-test` (override with
 fixed, a run you interrupt leaves its VM behind, and the next run kills it.
 Without `/dev/kvm` the test skips.
 
+To test agent changes before an image release, set `BOXPOOL_TEST_ROOTFS` to
+a `rootfs-<arch>.ext4.zst` in a directory of its own, for example one from
+`image/build.sh`, or the pinned rootfs with a new agent written into it:
+
+```sh
+CGO_ENABLED=0 go build -o /tmp/boxpool-agent ./cmd/boxpool-agent
+mkdir /tmp/img && cp --sparse=always ~/.cache/boxpool-test/artifacts/rootfs-amd64.ext4 /tmp/img/
+debugfs -w -f - /tmp/img/rootfs-amd64.ext4 <<'EOF'
+cd /usr/local/bin
+rm boxpool-agent
+write /tmp/boxpool-agent boxpool-agent
+sif boxpool-agent mode 0100755
+sif boxpool-agent uid 0
+sif boxpool-agent gid 0
+EOF
+zstd --rm /tmp/img/rootfs-amd64.ext4
+BOXPOOL_TEST_ROOTFS=/tmp/img/rootfs-amd64.ext4.zst go test -tags integration -v ./internal/backend/firecracker/...
+```
+
+`TestIntegration` checks Stop through `POST /v1/shutdown` when the agent
+lists that feature (a SIGTERM trap's marker survives, a process ignoring
+SIGTERM is killed after the grace period, the disk is clean) and through
+the freeze and sysrq fallback otherwise.
+
 `TestIntegrationSh` runs commands through a real daemon, as `boxpool sh`
 does, on each backend, with a temporary state directory that links to the
 same artifact cache:

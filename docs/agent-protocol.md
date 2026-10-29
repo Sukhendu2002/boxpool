@@ -36,11 +36,16 @@ Host: agent
 HTTP/1.1 200 OK
 Content-Type: application/json
 
-{"protocol":1,"agent":"0.1.0"}
+{"protocol":1,"agent":"0.1.0","features":["shutdown"]}
 ```
 
 `protocol` changes only when a change breaks existing clients. A client
 should check it before anything else and refuse a version it does not know.
+
+`features` lists optional endpoints this agent serves, and is left out when
+there are none. The only one is `shutdown`, for
+[`POST /v1/shutdown`](#post-v1shutdown). Agents older than a feature do not
+list it, so a client checks `features` before using one.
 
 ## `GET /v1/exec`
 
@@ -314,11 +319,48 @@ curl --fail --unix-socket /run/boxpool/agent.sock http://agent/v1/ports
 # Includes {"proto":"tcp","address":"0.0.0.0","port":8000}.
 ```
 
+## `POST /v1/shutdown`
+
+Stops every guest process, then the guest. Only the agent in a VM, which
+listens on vsock, serves it and lists the `shutdown` feature. In a container,
+and in agents from images before it, the endpoint is `404 Not Found`.
+
+```http
+POST /v1/shutdown HTTP/1.1
+Host: agent
+Content-Type: application/json
+
+{"grace_ms":10000}
+```
+
+The body is optional; `grace_ms` defaults to 10000. The agent then:
+
+1. Sends `SIGTERM` to every process except itself and PID 1 (`tini`), so
+   programs can save their state and exit.
+2. Waits until they have all exited, or `grace_ms` has passed.
+3. Sends `SIGKILL` to the survivors and waits up to 2 s for them to die.
+4. Runs `sync` and remounts `/` read-only, which leaves the filesystem clean
+   on disk.
+5. Answers `200 OK` with an empty body, then calls `reboot(2)`. Firecracker
+   exits on a guest reboot (`reboot=k` on x86_64, PSCI on arm64).
+
+The reboot can cut the reply short, so a client that loses the connection
+should wait for the VM to end rather than treat that as a failure. Exec
+sessions end with their processes; their clients see the connection drop.
+
+Errors are JSON `{"message": "..."}`:
+
+- `400 Bad Request`: the body is not a JSON shutdown request.
+- `500 Internal Server Error`: the agent could not list processes, or could
+  not remount `/` read-only, for example because a process survived
+  `SIGKILL`. Every process may already have been signalled; the guest has
+  not rebooted, and the agent still serves requests.
+
 ## Go client
 
 `internal/agent.Client` exposes `Upload(ctx, dest, tar io.Reader) error`,
-`Download(ctx, src) (io.ReadCloser, error)` and `Ports(ctx) ([]Port, error)`
-for the daemon. `Upload` consumes an already-prepared tar stream;
+`Download(ctx, src) (io.ReadCloser, error)`, `Ports(ctx) ([]Port, error)`
+and `Shutdown(ctx, grace) error` for the daemon. `Upload` consumes an already-prepared tar stream;
 `Download` returns the HTTP response body, which the caller must drain to
 EOF (checking read errors) and close. Cancelling the context interrupts the
 request/transfer. Non-success responses include the HTTP status and the

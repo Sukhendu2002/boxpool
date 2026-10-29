@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -47,6 +49,19 @@ func (c *Client) Version(ctx context.Context) (Version, error) {
 		return v, fmt.Errorf("GET /v1/version: %s", resp.Status)
 	}
 	return v, json.NewDecoder(resp.Body).Decode(&v)
+}
+
+// Shutdown asks the agent to stop every guest process, giving them grace
+// after SIGTERM before SIGKILL, remount / read-only and reboot the guest.
+// It returns once / is read-only; the reboot follows, and can cut the reply
+// short.
+func (c *Client) Shutdown(ctx context.Context, grace time.Duration) error {
+	b, _ := json.Marshal(ShutdownRequest{GraceMS: grace.Milliseconds()})
+	resp, err := c.request(ctx, http.MethodPost, "/v1/shutdown", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
 }
 
 // Session is a running command. Cancelling the context passed to Exec ends

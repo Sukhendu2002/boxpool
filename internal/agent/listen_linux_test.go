@@ -20,7 +20,7 @@ func TestVsock(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, l, "test") }()
+	go func() { done <- Serve(ctx, l, "test", nil) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {
