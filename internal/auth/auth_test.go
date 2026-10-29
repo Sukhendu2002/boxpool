@@ -58,14 +58,14 @@ func TestJoinTokenValidAddresses(t *testing.T) {
 
 func TestLoadOrCreateCA(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := LoadOrCreateCA(dir)
+	ca, _, err := LoadOrCreateCA(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !ca.IsCA || ca.CheckSignatureFrom(ca) != nil {
 		t.Errorf("CA is not a self-signed CA: IsCA=%v", ca.IsCA)
 	}
-	again, err := LoadOrCreateCA(dir)
+	again, _, err := LoadOrCreateCA(dir)
 	if err != nil || !again.Equal(ca) {
 		t.Fatalf("second LoadOrCreateCA returned a different CA: %v", err)
 	}

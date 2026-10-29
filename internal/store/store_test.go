@@ -269,3 +269,22 @@ func TestJoinTokens(t *testing.T) {
 		t.Errorf("UseJoinToken() after creating another token = %v, want ErrTokenExpired", err)
 	}
 }
+
+func TestNodes(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "state.db"))
+	mac, err := s.CreateNode(ctx, Node{Name: "mac", OS: "darwin", Arch: "arm64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mac.ID) != 12 || mac.JoinedAt.IsZero() {
+		t.Errorf("CreateNode() = %+v, want a 12-char ID and a join time", mac)
+	}
+	box, err := s.CreateNode(ctx, Node{Name: "box", OS: "linux", Arch: "amd64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list, err := s.ListNodes(ctx); err != nil || len(list) != 2 || list[0] != mac || list[1] != box {
+		t.Errorf("ListNodes() = %+v, %v; want mac then box", list, err)
+	}
+}

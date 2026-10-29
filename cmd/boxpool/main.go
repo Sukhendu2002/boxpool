@@ -30,12 +30,12 @@ Commands:
   up        install and start the daemon: a systemd service on Linux (as
             root), a launch agent on macOS (as you)
   down      stop the daemon's service or launch agent, keeping its state
-  join      join an existing pool (not implemented yet)
+  join      install the daemon as up does and join the pool a token names
   token     create or revoke a single-use token to join this pool
   sh        open a shell in a new or existing sandbox
   exec      run a command in a sandbox
   cp        copy files between this machine and a sandbox
-  ls        list this machine's sandboxes
+  ls        list this machine's sandboxes, or with --nodes the pool's machines
   start     start a stopped sandbox with its disk
   stop      stop a sandbox
   pause     pause a running sandbox, keeping its memory (not on Docker)
@@ -86,8 +86,7 @@ func main() {
 	case "token":
 		os.Exit(tokenCmd(os.Args[2:]))
 	case "join":
-		fmt.Fprintf(os.Stderr, "boxpool %s: not implemented yet\n", os.Args[1])
-		os.Exit(1)
+		os.Exit(join(os.Args[2:]))
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 	default:

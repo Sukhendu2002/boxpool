@@ -103,6 +103,13 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	if err := removePartialSnapshots(dir); err != nil {
 		return err
 	}
+	// Other machines joining is optional: a busy port must not stop the
+	// daemon serving this machine.
+	if stopPool, err := servePool(info, st); err != nil {
+		slog.Warn("not serving the pool API; other machines cannot join this one", "err", err)
+	} else {
+		defer stopPool()
+	}
 
 	// Shutdown ignores hijacked connections, so exec sessions would outlive
 	// Run: every request runs under sessions, which is cancelled after
