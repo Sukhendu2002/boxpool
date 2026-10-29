@@ -258,11 +258,7 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 // from, stopped, resumed and removed through the head, and listed
 // unreachable while the node is away.
 func TestPoolRouting(t *testing.T) {
-	for v, d := range map[*time.Duration]time.Duration{&heartbeatInterval: 50 * time.Millisecond, &unreachableAfter: 300 * time.Millisecond, &tunnelPoll: 200 * time.Millisecond, &tunnelWait: 200 * time.Millisecond} {
-		old := *v
-		*v = d
-		t.Cleanup(func() { *v = old })
-	}
+	fastPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	head, headServer, headDriver := poolMachine(t, "linux")

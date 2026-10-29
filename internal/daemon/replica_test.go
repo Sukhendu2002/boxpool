@@ -99,9 +99,17 @@ func TestFSM(t *testing.T) {
 	}
 }
 
-// fastPool shortens the pool's timers for a test.
+// fastPool shortens the pool's timers for a test, allowing for TLS and
+// replicated SQLite writes on shared CI runners. A 50 ms heartbeat timeout
+// and 300 ms expiry can mark a live node unreachable during normal work.
 func fastPool(t *testing.T) {
-	for v, d := range map[*time.Duration]time.Duration{&heartbeatInterval: 50 * time.Millisecond, &unreachableAfter: 300 * time.Millisecond, &tunnelPoll: 200 * time.Millisecond, &tunnelWait: 200 * time.Millisecond} {
+	t.Helper()
+	for v, d := range map[*time.Duration]time.Duration{
+		&heartbeatInterval: 200 * time.Millisecond,
+		&unreachableAfter:  2 * time.Second,
+		&tunnelPoll:        200 * time.Millisecond,
+		&tunnelWait:        time.Second,
+	} {
 		old := *v
 		*v = d
 		t.Cleanup(func() { *v = old })
@@ -458,9 +466,10 @@ func TestPromote(t *testing.T) {
 	if json.Unmarshal([]byte(body), &res); code != http.StatusOK || res.Head != b.s.poolAddr || !b.s.leading.Load() {
 		t.Fatalf("promote = %d %s", code, body)
 	}
-	if got := sandboxes(t, b); got != "on-a=unreachable on-b=running" {
-		t.Errorf("new head's sandboxes = %s", got)
-	}
+	// Promotion may finish before the old head's last report expires.
+	waitFor(t, "the promoted head to mark the old head unreachable", func() bool {
+		return sandboxes(t, b) == "on-a=unreachable on-b=running"
+	})
 	if code, body := revoke(t, b, tok); code != http.StatusNoContent {
 		t.Errorf("revoke a token from before the promotion = %d %s", code, body)
 	}
