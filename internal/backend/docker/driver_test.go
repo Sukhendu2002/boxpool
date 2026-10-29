@@ -1,8 +1,11 @@
 package docker
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -551,5 +554,50 @@ func TestSnapshot(t *testing.T) {
 	got := f.containers[d.name("def")].files
 	if len(got) != 2 || got[".bashrc"] != "alias ll='ls -l'" || got["bin/jq"] != "jq" {
 		t.Errorf("/root from the snapshot = %q", got)
+	}
+	// The image's /root must not fill the volume under the snapshot's.
+	for name, want := range map[string]bool{"abc": false, "def": true} {
+		vol := f.containers[d.name(name)].cfg.HostConfig.Mounts[0].VolumeOptions
+		if got := vol != nil && vol.NoCopy; got != want {
+			t.Errorf("%s: volume NoCopy = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestRebase(t *testing.T) {
+	var in, out bytes.Buffer
+	tw := tar.NewWriter(&in)
+	for _, h := range []tar.Header{
+		{Typeflag: tar.TypeDir, Name: "root/"},
+		{Typeflag: tar.TypeReg, Name: "root/a"},
+		{Typeflag: tar.TypeLink, Name: "root/hard", Linkname: "root/a"},
+		{Typeflag: tar.TypeSymlink, Name: "root/in", Linkname: "a"},
+		{Typeflag: tar.TypeSymlink, Name: "root/d/up", Linkname: "../a"},
+		{Typeflag: tar.TypeSymlink, Name: "root/tmp", Linkname: "../tmp"},
+		{Typeflag: tar.TypeSymlink, Name: "root/self", Linkname: ".."},
+		{Typeflag: tar.TypeSymlink, Name: "root/abs", Linkname: "/etc"},
+		{Typeflag: tar.TypeReg, Name: "other"},
+	} {
+		tw.WriteHeader(&h)
+	}
+	tw.Close()
+	if err := rebase(&out, &in, "root/"); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	tr := tar.NewReader(&out)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, h.Name+">"+h.Linkname)
+	}
+	want := []string{"a>", "hard>a", "in>a", "d/up>../a", "tmp>/tmp", "self>/", "abs>/etc"}
+	if !slices.Equal(got, want) {
+		t.Errorf("rebase = %q, want %q", got, want)
 	}
 }

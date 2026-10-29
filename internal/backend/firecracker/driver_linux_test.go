@@ -402,6 +402,12 @@ func TestSnapshot(t *testing.T) {
 	if err := d.Snapshot(ctx, "abc", path); err != nil {
 		t.Fatal(err)
 	}
+	// An existing destination is refused and kept.
+	if err := d.Snapshot(ctx, "abc", path); err == nil {
+		t.Error("Snapshot over an existing file succeeded")
+	} else if _, err := os.Stat(path); err != nil {
+		t.Errorf("failed Snapshot removed the existing file: %v", err)
+	}
 	// The sandbox writing on must not change the snapshot.
 	os.WriteFile(l.rootfs, []byte("vi"), 0600)
 	from := spec

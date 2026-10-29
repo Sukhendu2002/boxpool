@@ -514,24 +514,11 @@ func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, fmt.Errorf("sandbox %q is paused: resume or stop it first", sb.Spec.Name))
 		return
 	}
-	var warning string
-	if state == backend.StateRunning {
-		if warning, err = s.stopSandbox(ctx, sb); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-	}
-	snap, err := s.st.CreateSnapshot(ctx, store.Snapshot{Name: req.Name, Backend: sb.Backend, Sandbox: sb.Spec.Name, DiskGB: sb.Spec.DiskGB})
-	if err == nil {
-		if err = os.MkdirAll(s.snapshots, 0700); err == nil {
-			err = s.d.Snapshot(ctx, sb.ID, s.snapshotPath(snap))
-		}
-		if err != nil {
-			err = errors.Join(err, s.st.DeleteSnapshot(context.WithoutCancel(ctx), snap.ID))
-		}
-	}
-	if state == backend.StateRunning {
-		// Whatever became of the snapshot, the sandbox was running.
+	running := state == backend.StateRunning
+	snap, warning, err := s.takeSnapshot(ctx, sb, req.Name, running)
+	if running {
+		// Whatever became of the stop or the copy, the sandbox was running;
+		// Start does nothing if it still is.
 		ctx := context.WithoutCancel(ctx)
 		startErr := s.d.Start(ctx, sb.ID)
 		if startErr == nil {
@@ -548,6 +535,53 @@ func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(out)
+}
+
+// takeSnapshot stops sb if it runs and copies its disk to a temporary file,
+// which it renames to the snapshot's after storing the record: a record
+// never names a partial copy. A crash leaves at most the temporary file,
+// which Run removes, or a record without a file, which fails to start
+// sandboxes and can be removed.
+func (s *server) takeSnapshot(ctx context.Context, sb store.Sandbox, name string, running bool) (snap store.Snapshot, warning string, err error) {
+	if running {
+		if warning, err = s.stopSandbox(ctx, sb); err != nil {
+			return snap, "", err
+		}
+	}
+	if err := os.MkdirAll(s.snapshots, 0700); err != nil {
+		return snap, warning, err
+	}
+	tmp := filepath.Join(s.snapshots, sb.ID+tmpSuffix)
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return snap, warning, err
+	}
+	err = s.d.Snapshot(ctx, sb.ID, tmp)
+	if err == nil {
+		snap, err = s.st.CreateSnapshot(ctx, store.Snapshot{Name: name, Backend: sb.Backend, Sandbox: sb.Spec.Name, DiskGB: sb.Spec.DiskGB})
+	}
+	if err == nil {
+		if err = os.Rename(tmp, s.snapshotPath(snap)); err != nil {
+			err = errors.Join(err, s.st.DeleteSnapshot(context.WithoutCancel(ctx), snap.ID))
+		}
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return snap, warning, err
+}
+
+// tmpSuffix names a snapshot file still being copied.
+const tmpSuffix = ".tmp"
+
+// removePartialSnapshots deletes the temporary files of snapshots a crash
+// interrupted.
+func removePartialSnapshots(stateDir string) error {
+	tmps, _ := filepath.Glob(filepath.Join(stateDir, "snapshots", "*"+tmpSuffix))
+	var err error
+	for _, f := range tmps {
+		err = errors.Join(err, os.Remove(f))
+	}
+	return err
 }
 
 // listSnapshots returns every snapshot in the store, oldest first.

@@ -105,9 +105,16 @@ func splitImage(ref string) (repo, tag string, err error) {
 
 // mount is a HostConfig.Mounts entry.
 type mount struct {
-	Type   string
-	Source string
-	Target string
+	Type          string
+	Source        string
+	Target        string
+	VolumeOptions *volumeOptions `json:",omitempty"`
+}
+
+type volumeOptions struct {
+	// NoCopy keeps the engine from filling an empty volume with the
+	// image's files at that path.
+	NoCopy bool
 }
 
 type hostConfig struct {
@@ -145,7 +152,13 @@ func labels(root, id string) map[string]string {
 // directory on /run/boxpool, its own network, and the Spec's CPU and memory
 // as limits. No ports are published; Docker's default seccomp and AppArmor
 // profiles stay on. Spec.DiskGB is not applied: a plain volume has no quota.
+// With Spec.From the volume starts empty, for the snapshot to fill.
 func newContainerConfig(root, id string, spec backend.Spec, image, name string, l layout) containerConfig {
+	var vol *volumeOptions
+	if spec.From != "" {
+		// Else files deleted before the snapshot come back from the image.
+		vol = &volumeOptions{NoCopy: true}
+	}
 	lb := labels(root, id)
 	lb[labelName] = spec.Name
 	mem := int64(spec.MemoryMB) << 20
@@ -159,7 +172,7 @@ func newContainerConfig(root, id string, spec backend.Spec, image, name string, 
 		HostConfig: hostConfig{
 			NetworkMode: name,
 			Mounts: []mount{
-				{Type: "volume", Source: name, Target: homeDir},
+				{Type: "volume", Source: name, Target: homeDir, VolumeOptions: vol},
 				{Type: "bind", Source: l.agent, Target: agentDir},
 			},
 			Tmpfs: map[string]string{

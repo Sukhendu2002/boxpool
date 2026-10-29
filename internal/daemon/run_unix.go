@@ -92,6 +92,9 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 			return fmt.Errorf("reconcile sandboxes with the %s backend: %w", info.Backend, err)
 		}
 	}
+	if err := removePartialSnapshots(dir); err != nil {
+		return err
+	}
 
 	// Shutdown ignores hijacked connections, so exec sessions would outlive
 	// Run: every request runs under sessions, which is cancelled after

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -569,9 +570,9 @@ func (d *Driver) Snapshot(ctx context.Context, id, path string) (err error) {
 	return errors.Join(err, f.Close())
 }
 
-// rebase copies the tar in to out with prefix cut from every name, dropping
-// the entry for the prefix itself, so it extracts into the prefix's
-// directory.
+// rebase copies the tar in to out with prefix, a directory under / ending
+// in a slash, cut from every name, dropping the entry for the prefix
+// itself, so it extracts into the prefix's directory.
 func rebase(out io.Writer, in io.Reader, prefix string) error {
 	tr, tw := tar.NewReader(in), tar.NewWriter(out)
 	for {
@@ -587,8 +588,16 @@ func rebase(out io.Writer, in io.Reader, prefix string) error {
 			continue
 		}
 		h.Name = name
-		if h.Typeflag == tar.TypeLink {
+		switch {
+		case h.Typeflag == tar.TypeLink:
 			h.Linkname = strings.TrimPrefix(h.Linkname, prefix)
+		case h.Typeflag == tar.TypeSymlink && !path.IsAbs(h.Linkname):
+			// The engine refuses to extract a relative symlink that leaves
+			// the target directory, such as /root/tmp -> ../tmp; the
+			// absolute path it resolves to in the container is the same.
+			if abs := path.Join("/", prefix, path.Dir(name), h.Linkname); !strings.HasPrefix(abs, "/"+prefix) {
+				h.Linkname = abs
+			}
 		}
 		if err := tw.WriteHeader(h); err != nil {
 			return err

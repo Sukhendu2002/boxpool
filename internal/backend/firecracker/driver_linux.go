@@ -652,11 +652,11 @@ func (d *Driver) Snapshot(ctx context.Context, id, path string) error {
 	if _, ok := running(l); ok || paused(l) {
 		return fmt.Errorf("snapshot sandbox %s: it is not stopped", id)
 	}
-	err = copyRootfs(path, l.rootfs)
-	if err == nil {
-		err = syncPath(path)
+	// copyRootfs removes a copy it fails to finish, and never an existing path.
+	if err := copyRootfs(path, l.rootfs); err != nil {
+		return fmt.Errorf("snapshot sandbox %s: %w", id, err)
 	}
-	if err != nil {
+	if err := syncPath(path); err != nil {
 		return fmt.Errorf("snapshot sandbox %s: %w", id, errors.Join(err, os.Remove(path)))
 	}
 	return nil

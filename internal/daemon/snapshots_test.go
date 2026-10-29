@@ -5,6 +5,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -132,8 +133,34 @@ func TestSnapshotFailure(t *testing.T) {
 	}
 
 	os.Remove(dir)
+	// A stop that fails after stopping still has the sandbox started again.
+	d.stopErr = errors.New("stop: lost the answer")
+	if code, _, body := postSnapshot(t, srv, "box", "s"); code != http.StatusInternalServerError {
+		t.Errorf("snapshot with a failed stop = %d %s", code, body)
+	}
+	if got := states(list(t, srv)); got != "box=running" {
+		t.Errorf("after a failed stop: %q", got)
+	}
+
+	// A copy a crash interrupted does not block the next snapshot, and
+	// removePartialSnapshots deletes the others.
+	box, _ := st.GetByName(context.Background(), "box")
+	os.Mkdir(dir, 0700)
+	os.WriteFile(filepath.Join(dir, box.ID+tmpSuffix), []byte("partial"), 0600)
+	other := filepath.Join(dir, "gone"+tmpSuffix)
+	os.WriteFile(other, nil, 0600)
 	d.stopErr = fmt.Errorf("stop: %w", backend.ErrUncleanStop)
-	if code, snap, body := postSnapshot(t, srv, "box", "s"); code != http.StatusCreated || !strings.Contains(snap.Warning, "not stopped cleanly") {
+	code, snap, body := postSnapshot(t, srv, "box", "s")
+	if code != http.StatusCreated || !strings.Contains(snap.Warning, "not stopped cleanly") {
 		t.Errorf("snapshot after an unclean stop = %d %s", code, body)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, snap.ID)); err != nil || string(b) == "partial" {
+		t.Errorf("snapshot file = %q, %v", b, err)
+	}
+	if err := removePartialSnapshots(filepath.Dir(dir)); err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*")); len(left) != 1 || left[0] != filepath.Join(dir, snap.ID) {
+		t.Errorf("snapshots dir after removePartialSnapshots: %q", left)
 	}
 }

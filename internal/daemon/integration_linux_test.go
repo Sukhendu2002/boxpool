@@ -327,6 +327,9 @@ func snapshotRoundTrip(t *testing.T, ctx context.Context, c *client.Client, name
 	for f := range files {
 		run(name, "echo jq > "+f)
 	}
+	// A deleted image file stays deleted, and a relative link out of /root
+	// survives the copy.
+	run(name, "rm -f /root/.bashrc && ln -s ../tmp /root/tmplink")
 	snap, err := c.SnapshotSandbox(ctx, name, "it-snap")
 	if err != nil {
 		t.Fatal(err)
@@ -349,6 +352,9 @@ func snapshotRoundTrip(t *testing.T, ctx context.Context, c *client.Client, name
 		if got := run("from-b", "cat "+f); got != want {
 			t.Errorf("%s in from-b = %q, want %q", f, got, want)
 		}
+	}
+	if got := run("from-b", "test ! -e /root/.bashrc && cd /root/tmplink && pwd -P"); got != "/tmp\n" {
+		t.Errorf("/root/tmplink in from-b resolves to %q, want /tmp", got)
 	}
 	for _, n := range []string{"from-a", "from-b"} {
 		if _, err := c.RemoveSandbox(ctx, n, true); err != nil {
