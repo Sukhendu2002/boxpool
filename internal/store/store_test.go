@@ -231,7 +231,7 @@ func TestSnapshots(t *testing.T) {
 func TestJoinTokens(t *testing.T) {
 	ctx := context.Background()
 	s := open(t, filepath.Join(t.TempDir(), "state.db"))
-	t0 := time.Now()
+	t0 := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	for _, h := range []string{"once", "late", "revoked"} {
 		if err := s.CreateJoinToken(ctx, h, t0.Add(time.Hour)); err != nil {
 			t.Fatal(err)
@@ -258,14 +258,14 @@ func TestJoinTokens(t *testing.T) {
 	if err := s.RevokeJoinToken(ctx, "revoked"); !errors.Is(err, ErrTokenInvalid) {
 		t.Errorf("second RevokeJoinToken() = %v, want ErrTokenInvalid", err)
 	}
-	// Creating a token drops those that expired unused.
+	// Issuing another token must preserve the expiry error for an unused token.
 	if err := s.CreateJoinToken(ctx, "stale", t0.Add(-time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CreateJoinToken(ctx, "fresh", t0.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RevokeJoinToken(ctx, "stale"); !errors.Is(err, ErrTokenInvalid) {
-		t.Errorf("RevokeJoinToken() of an expired token = %v, want it dropped", err)
+	if err := s.UseJoinToken(ctx, "stale", t0); !errors.Is(err, ErrTokenExpired) {
+		t.Errorf("UseJoinToken() after creating another token = %v, want ErrTokenExpired", err)
 	}
 }

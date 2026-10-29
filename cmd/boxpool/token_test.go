@@ -52,10 +52,14 @@ func TestTokenCmd(t *testing.T) {
 		{[]string{"token", "create"}, 2, "Usage:"},
 		{[]string{"token", "create", "--join", "--ttl", "0s"}, 2, "--ttl must be positive"},
 		{[]string{"token", "create", "--join", "--addr", "head.lan"}, 1, `invalid head address "head.lan"`},
+		{[]string{"token", "create", "--join", "--addr", "127.0.0.1:65536"}, 1, `invalid head address "127.0.0.1:65536"`},
+		{[]string{"token", "create", "--join", "--addr", "127.0.0.1:-1"}, 1, `invalid head address "127.0.0.1:-1"`},
+		{[]string{"token", "create", "--join", "--addr", "head.lan:0"}, 1, `invalid head address "head.lan:0"`},
+		{[]string{"token", "create", "--join", "--addr", "head.lan:https"}, 1, `invalid head address "head.lan:https"`},
 		{[]string{"token", "revoke", "nonsense"}, 1, "not a boxpool join token"},
 	} {
-		if code, _, errOut := cli(t, dir, "", tc.args...); code != tc.code || !strings.Contains(errOut, tc.err) {
-			t.Errorf("%v = %d %q, want %d and %q", tc.args, code, errOut, tc.code, tc.err)
+		if code, out, errOut := cli(t, dir, "", tc.args...); code != tc.code || out != "" || !strings.Contains(errOut, tc.err) {
+			t.Errorf("%v = %d %q %q, want %d, no token, and %q", tc.args, code, out, errOut, tc.code, tc.err)
 		}
 	}
 }

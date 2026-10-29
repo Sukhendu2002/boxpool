@@ -402,11 +402,9 @@ var (
 )
 
 // CreateJoinToken stores the hash of a join token's secret, valid until
-// expires, and drops tokens that have expired unused.
+// expires. Expired hashes are kept until use or revocation so that an
+// unused expired token can be distinguished from an invalid token.
 func (s *Store) CreateJoinToken(ctx context.Context, hash string, expires time.Time) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM join_tokens WHERE expires_at <= ?`, time.Now().UTC().Format(timeFormat)); err != nil {
-		return err
-	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO join_tokens (hash, expires_at) VALUES (?, ?)`, hash, expires.UTC().Format(timeFormat))
 	return err
 }

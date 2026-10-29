@@ -214,8 +214,8 @@ func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Addr = net.JoinHostPort(host, auth.JoinPort)
 	}
-	if host, port, err := net.SplitHostPort(req.Addr); err != nil || host == "" || port == "" {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid head address %q: use host:port", req.Addr))
+	if err := auth.ValidateJoinAddr(req.Addr); err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	s.mu.Lock()

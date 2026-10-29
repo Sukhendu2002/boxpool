@@ -31,10 +31,28 @@ func TestParseJoinTokenRejects(t *testing.T) {
 		good[:len(tokenPrefix)+60],
 		good + "!",
 		NewJoinToken("no-port", [32]byte{}).String(),
+		NewJoinToken(":7443", [32]byte{}).String(),
+		NewJoinToken("head:", [32]byte{}).String(),
+		NewJoinToken("head:0", [32]byte{}).String(),
+		NewJoinToken("head:-1", [32]byte{}).String(),
+		NewJoinToken("head:65536", [32]byte{}).String(),
+		NewJoinToken("head:https", [32]byte{}).String(),
 	} {
 		if _, err := ParseJoinToken(s); err == nil {
 			t.Errorf("ParseJoinToken(%q) succeeded", s)
 		}
+	}
+}
+
+func TestJoinTokenValidAddresses(t *testing.T) {
+	for _, addr := range []string{"head:1", "head:65535", "127.0.0.1:7443", "[::1]:7443", "[fe80::1%en0]:7443"} {
+		t.Run(addr, func(t *testing.T) {
+			tok := NewJoinToken(addr, [32]byte{})
+			got, err := ParseJoinToken(tok.String())
+			if err != nil || got != tok {
+				t.Fatalf("token round trip for %q = %+v, %v; want %+v", addr, got, err, tok)
+			}
+		})
 	}
 }
 

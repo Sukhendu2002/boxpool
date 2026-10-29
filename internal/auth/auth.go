@@ -18,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -64,10 +65,23 @@ func ParseJoinToken(s string) (JoinToken, error) {
 	n := copy(t.Secret[:], b)
 	n += copy(t.CA[:], b[n:])
 	t.Addr = string(b[n:])
-	if _, _, err := net.SplitHostPort(t.Addr); err != nil {
+	if err := ValidateJoinAddr(t.Addr); err != nil {
 		return JoinToken{}, fmt.Errorf("join token has a bad head address: %w", err)
 	}
 	return t, nil
+}
+
+// ValidateJoinAddr checks for a nonempty host and a numeric TCP port in
+// the range 1 through 65535, without requiring the host to resolve locally.
+func ValidateJoinAddr(addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err == nil && host != "" {
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err == nil && n > 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid head address %q: use host:port with a numeric port from 1 to 65535", addr)
 }
 
 // LoadOrCreateCA returns the head CA certificate in dir, creating it and
