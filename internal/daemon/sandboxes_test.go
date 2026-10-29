@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -45,6 +46,9 @@ type fakeDriver struct {
 	// pauseErr, if set, is what Pause returns after stopping the sandbox,
 	// as vz's fallback does.
 	pauseErr error
+	// disk is each sandbox's disk contents, which Snapshot saves and
+	// Create from a snapshot restores.
+	disk map[string]string
 }
 
 func (d *fakeDriver) Name() string { return "fake" }
@@ -54,6 +58,13 @@ func (d *fakeDriver) Create(ctx context.Context, id string, spec backend.Spec) (
 	defer d.mu.Unlock()
 	if _, ok := d.spec[id]; ok {
 		return backend.Sandbox{}, fmt.Errorf("sandbox %s already exists", id)
+	}
+	if spec.From != "" {
+		b, err := os.ReadFile(spec.From)
+		if err != nil {
+			return backend.Sandbox{}, err
+		}
+		d.disk[id] = string(b)
 	}
 	d.spec[id] = spec
 	d.n.create++
@@ -139,6 +150,20 @@ func (d *fakeDriver) List(context.Context) ([]backend.Sandbox, error) {
 	return list, nil
 }
 
+func (d *fakeDriver) Snapshot(ctx context.Context, id, path string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.up[id] || d.paused[id] {
+		return fmt.Errorf("sandbox %s is not stopped", id)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(d.disk[id])
+	return errors.Join(err, f.Close())
+}
+
 func (d *fakeDriver) Dial(ctx context.Context, id string) (net.Conn, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -171,7 +196,7 @@ func newAPIStore(t *testing.T) (*httptest.Server, *fakeDriver, *store.Store) {
 	}
 	t.Cleanup(func() { st.Close() })
 	d := newFakeDriver(t, tmp)
-	srv := httptest.NewServer(Handler(Info{}, st, d))
+	srv := httptest.NewServer(Handler(Info{StateDir: tmp}, st, d))
 	t.Cleanup(srv.Close)
 	return srv, d, st
 }
@@ -179,7 +204,7 @@ func newAPIStore(t *testing.T) (*httptest.Server, *fakeDriver, *store.Store) {
 // newFakeDriver returns a fake driver whose agent listens in dir.
 func newFakeDriver(t *testing.T, dir string) *fakeDriver {
 	t.Helper()
-	d := &fakeDriver{sock: filepath.Join(dir, "agent.sock"), spec: map[string]backend.Spec{}, up: map[string]bool{}, paused: map[string]bool{}}
+	d := &fakeDriver{sock: filepath.Join(dir, "agent.sock"), spec: map[string]backend.Spec{}, up: map[string]bool{}, paused: map[string]bool{}, disk: map[string]string{}}
 	l, err := agent.Listen("unix:" + d.sock)
 	if err != nil {
 		t.Fatal(err)

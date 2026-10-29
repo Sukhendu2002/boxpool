@@ -169,8 +169,9 @@ func (d *Driver) lockSandbox(ctx context.Context, id string) (func(), error) {
 	return m.LockSandbox(ctx, "firecracker", id)
 }
 
-// Create reserves capacity and grows a private copy of the base rootfs to
-// Spec.DiskGB GiB. Spec.Image is ignored (there is one image).
+// Create reserves capacity and grows a private copy of the base rootfs, or
+// of the disk snapshot Spec.From, to Spec.DiskGB GiB. Spec.Image is ignored
+// (there is one image).
 func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
 	if err := validID(id); err != nil {
 		return backend.Sandbox{}, err
@@ -196,7 +197,11 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 		return backend.Sandbox{}, err
 	}
 	b, _ := json.Marshal(spec)
-	err = copyRootfs(l.rootfs, d.rootfs)
+	src := d.rootfs
+	if spec.From != "" {
+		src = spec.From
+	}
+	err = copyRootfs(l.rootfs, src)
 	if err == nil {
 		err = growRootfs(ctx, l.rootfs, int64(spec.DiskGB)<<30)
 	}
@@ -629,6 +634,32 @@ func (d *Driver) Pause(ctx context.Context, id string) error {
 	}
 	d.waitConsole(id)
 	return d.stopNetwork(cleanup, id)
+}
+
+// Snapshot copies the disk of a stopped sandbox to path, sharing its blocks
+// where the file system can. A running or paused sandbox is refused: its
+// disk may lag what the guest has written.
+func (d *Driver) Snapshot(ctx context.Context, id, path string) error {
+	unlock, err := d.lockSandbox(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	l, _, err := d.load(id)
+	if err != nil {
+		return err
+	}
+	if _, ok := running(l); ok || paused(l) {
+		return fmt.Errorf("snapshot sandbox %s: it is not stopped", id)
+	}
+	// copyRootfs removes a copy it fails to finish, and never an existing path.
+	if err := copyRootfs(path, l.rootfs); err != nil {
+		return fmt.Errorf("snapshot sandbox %s: %w", id, err)
+	}
+	if err := syncPath(path); err != nil {
+		return fmt.Errorf("snapshot sandbox %s: %w", id, errors.Join(err, os.Remove(path)))
+	}
+	return nil
 }
 
 // List returns the sandboxes on disk, running or stopped.

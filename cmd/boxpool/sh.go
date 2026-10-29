@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,34 +27,42 @@ import (
 // shell is the guest's login shell; the image is Debian, which has bash.
 var shell = []string{"/bin/bash", "-l"}
 
-const shUsage = `Usage: boxpool sh [flags] [name]
+const shUsage = `Usage: boxpool sh [flags] [name] [-- command [args...]]
 
-Opens a shell in a new sandbox, or with a name, in that existing one.
-Leaving the shell leaves the sandbox running.
+Opens a shell, or runs command, in a new sandbox, or with a name, in that
+existing one. Leaving the shell leaves the sandbox running.
 
 Flags:
 `
 
 func sh(args []string) int {
 	start := time.Now()
+	argv := shell
+	if i := slices.Index(args, "--"); i >= 0 && i < len(args)-1 {
+		args, argv = args[:i], args[i+1:]
+	}
 	fs := flag.NewFlagSet("sh", flag.ContinueOnError)
 	fs.Usage = func() { fmt.Fprint(os.Stderr, shUsage); fs.PrintDefaults() }
 	name := fs.String("name", "", "name for the sandbox, or of an existing one to attach to (default: generated)")
 	cpu := fs.Int("cpu", 0, fmt.Sprintf("vCPUs of a new sandbox (default %d)", daemon.DefaultCPUs))
 	mem := fs.String("mem", "", "memory of a new sandbox, e.g. 512m or 4g (default 2g)")
 	disk := fs.String("disk", "", "disk of a new sandbox, e.g. 20g (default 10g)")
+	from := fs.String("from", "", "snapshot to copy a new sandbox's disk from (see boxpool snapshot)")
 	restart := fs.String("restart", "no", "restart policy of a new sandbox: always boots it again if the daemon starts and finds it stopped, as after a host reboot")
 	timing := fs.Bool("timing", false, "print the time from the command's start to the shell's first output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	req := daemon.CreateRequest{Name: *name, CPUs: *cpu, Restart: *restart}
+	req := daemon.CreateRequest{Name: *name, CPUs: *cpu, Restart: *restart, From: *from}
 	var err error
 	if req.MemoryMB, err = parseSize(*mem, 1); err == nil {
 		req.DiskGB, err = parseSize(*disk, 1024)
 	}
 	if err == nil && (fs.NArg() > 1 || fs.NArg() == 1 && *name != "") {
 		err = errors.New("give at most one sandbox name")
+	}
+	if err == nil && fs.NArg() == 1 && *from != "" {
+		err = errors.New("--from starts a new sandbox; it cannot attach to an existing one")
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool sh: %v\n", err)
@@ -94,7 +103,7 @@ func sh(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "sandbox %s (%s)\n", sb.Name, sb.Backend)
-	code, err := attach(ctx, c, sb.Name, shell, os.Stdin, os.Stdout, os.Stderr, start, *timing)
+	code, err := attach(ctx, c, sb.Name, argv, os.Stdin, os.Stdout, os.Stderr, start, *timing)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool sh: %v\n", err)
 		return 1

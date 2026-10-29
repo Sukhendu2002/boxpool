@@ -74,6 +74,9 @@
 //   - SELinux hosts would need the agent directory relabelled; not handled.
 //   - Pause and Resume are not supported; the daemon stops and starts
 //     the sandbox instead, losing its memory.
+//   - Snapshot saves only /root, as a tar from the Engine's archive API,
+//     and Create with Spec.From extracts it there. The root file system is
+//     read-only, so docker commit would save nothing the guest changed.
 //
 // Shared resource admission (internal/resources) keeps one CPU and the
 // larger of 1 GiB or 10% of memory for the host. Defaults are 2 CPUs,

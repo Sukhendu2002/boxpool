@@ -28,8 +28,9 @@ const (
 
 // Timeouts; tests may shorten them.
 var (
-	apiTimeout  = 30 * time.Second // one Engine API request
-	pullTimeout = 10 * time.Minute // pulling the image
+	apiTimeout     = 30 * time.Second // one Engine API request
+	pullTimeout    = 10 * time.Minute // pulling the image
+	archiveTimeout = 10 * time.Minute // copying a sandbox's files to or from a snapshot
 )
 
 // DefaultHost is the Engine API socket used when DOCKER_HOST is unset.
@@ -148,15 +149,21 @@ func (e *engine) do(ctx context.Context, method, path string, query url.Values, 
 }
 
 // send sends one request and returns a 2xx response for the caller to read,
-// or an error that explains a failure to reach the engine.
+// or an error that explains a failure to reach the engine. A body that is
+// an io.Reader is sent as a tar, anything else as JSON.
 func (e *engine) send(ctx context.Context, method, path string, query url.Values, body any) (*http.Response, error) {
 	var r io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	contentType := "application/json"
+	switch b := body.(type) {
+	case nil:
+	case io.Reader:
+		r, contentType = b, "application/x-tar"
+	default:
+		j, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		r = bytes.NewReader(b)
+		r = bytes.NewReader(j)
 	}
 	u := e.base + path
 	if len(query) > 0 {
@@ -167,7 +174,7 @@ func (e *engine) send(ctx context.Context, method, path string, query url.Values
 		return nil, err
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := e.c.Do(req)
 	if err != nil {

@@ -70,6 +70,8 @@ boxpool stop box      # stop a sandbox
 boxpool start box     # start it again, with its disk
 boxpool pause box     # pause a sandbox, keeping its memory
 boxpool resume box    # resume it where it left off
+boxpool snapshot box --name withjq   # save a copy of a sandbox's disk
+boxpool sh --from withjq             # start a new sandbox from it
 boxpool rm box        # delete a sandbox
 boxpool doctor        # check whether this machine can host sandboxes
 ```
@@ -77,7 +79,7 @@ boxpool doctor        # check whether this machine can host sandboxes
 Working today, on one Linux machine: `boxpool doctor`, `boxpool daemon`,
 `boxpool up`, `boxpool down`, `boxpool sh`, `boxpool exec`, `boxpool cp`,
 `boxpool ls`, `boxpool start`, `boxpool stop`, `boxpool pause`, `boxpool resume`,
-`boxpool rm` and `boxpool version`. `join` is
+`boxpool rm`, `boxpool snapshot` and `boxpool version`. `join` is
 not implemented yet.
 
 `sudo boxpool up` installs the node on a Linux machine with systemd: it
@@ -188,6 +190,19 @@ a container's memory, so there pause stops the sandbox, prints that its
 memory is lost, and resume boots it from its disk; so does a macOS VM
 configuration the Virtualization framework cannot save. The API is
 `POST /v1/sandboxes/{name}/pause` and `POST /v1/sandboxes/{name}/resume`.
+
+`boxpool snapshot <name> --name <snapshot>` saves a copy of a sandbox's
+disk, and `boxpool sh --from <snapshot>` starts new sandboxes from it on
+the same machine, each with its own copy. A running sandbox is stopped for
+the copy, so the disk is consistent, then started again; its processes
+restart. A paused one is refused. On Firecracker and macOS the whole disk
+is copied, installed packages too, as a reflink or APFS clone where the
+file system can; on Docker only `/root` persists, so only `/root` is saved.
+`boxpool snapshot ls` lists snapshots and `boxpool snapshot rm <snapshot>`
+deletes one; sandboxes started from it keep their disks. `boxpool sh ... --
+<command>` runs a command instead of the shell. The API is
+`POST /v1/sandboxes/{name}/snapshot` (`{"name": "..."}`), `GET /v1/snapshots`,
+`DELETE /v1/snapshots/{name}`, and `"from"` in `POST /v1/sandboxes`.
 
 `boxpool-agent` is the process inside every sandbox that runs commands for
 the host, on vsock port 1024 by default or on a unix socket with

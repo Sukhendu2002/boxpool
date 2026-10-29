@@ -189,3 +189,41 @@ func TestNetSlot(t *testing.T) {
 		t.Errorf("NetSlots() = %v, %v; want b:1 c:0", got, err)
 	}
 }
+
+func TestSnapshots(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "state.db"))
+	jq, err := s.CreateSnapshot(ctx, Snapshot{Name: "withjq", Backend: "vz", Sandbox: "box", DiskGB: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jq.ID) != 12 || jq.CreatedAt.IsZero() {
+		t.Errorf("CreateSnapshot() = %+v, want a 12-char ID and a creation time", jq)
+	}
+	if got, err := s.GetSnapshot(ctx, "withjq"); err != nil || got != jq {
+		t.Errorf("GetSnapshot() = %+v, %v; want %+v", got, err, jq)
+	}
+	if _, err := s.CreateSnapshot(ctx, Snapshot{Name: "withjq", Backend: "vz"}); !errors.Is(err, ErrNameTaken) || err.Error() != `snapshot name "withjq" already exists` {
+		t.Errorf("duplicate CreateSnapshot() = %v, want ErrNameTaken", err)
+	}
+	// A sandbox may share a snapshot's name.
+	if _, err := s.Create(ctx, Sandbox{Spec: backend.Spec{Name: "withjq"}}); err != nil {
+		t.Errorf("Create() with a snapshot's name = %v", err)
+	}
+	py, err := s.CreateSnapshot(ctx, Snapshot{Name: "withpy", Backend: "vz", Sandbox: "box", DiskGB: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list, err := s.ListSnapshots(ctx); err != nil || len(list) != 2 || list[0] != jq || list[1] != py {
+		t.Errorf("ListSnapshots() = %+v, %v; want withjq then withpy", list, err)
+	}
+	if err := s.DeleteSnapshot(ctx, jq.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSnapshot(ctx, "withjq"); !errors.Is(err, ErrSnapshotNotFound) {
+		t.Errorf("GetSnapshot() after delete = %v, want ErrSnapshotNotFound", err)
+	}
+	if err := s.DeleteSnapshot(ctx, jq.ID); !errors.Is(err, ErrSnapshotNotFound) {
+		t.Errorf("second DeleteSnapshot() = %v, want ErrSnapshotNotFound", err)
+	}
+}

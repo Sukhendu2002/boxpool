@@ -10,11 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"sync"
@@ -45,9 +48,10 @@ const (
 
 // Info describes the daemon and the node it runs on.
 type Info struct {
-	Version  string `json:"version"`
-	OS       string `json:"os"`
-	Arch     string `json:"arch"`
+	Version string `json:"version"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	// StateDir holds the snapshots, in snapshots/; Run sets it.
 	StateDir string `json:"state_dir"`
 	Backend  string `json:"backend"`
 	// PID is the serving daemon's process ID; Run sets it.
@@ -75,6 +79,29 @@ type CreateRequest struct {
 	// again when the daemon starts and finds it stopped though it was
 	// running, as after a host reboot. "" or "no" means never.
 	Restart string `json:"restart,omitempty"`
+	// From is a snapshot to copy a new sandbox's disk from. Its disk is at
+	// least the snapshot's size.
+	From string `json:"from,omitempty"`
+}
+
+// SnapshotRequest is the body of POST /v1/sandboxes/{name}/snapshot.
+type SnapshotRequest struct {
+	Name string `json:"name"`
+}
+
+// Snapshot is a named copy of a sandbox's disk, which new sandboxes on the
+// same backend can start from. Sandbox is the source's name when it was
+// taken.
+type Snapshot struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Backend   string    `json:"backend"`
+	Sandbox   string    `json:"sandbox"`
+	DiskGB    int       `json:"disk_gb"`
+	CreatedAt time.Time `json:"created_at"`
+	// Warning is set when the sandbox, stopped for the snapshot, did not
+	// shut down cleanly, so the snapshot may be inconsistent.
+	Warning string `json:"warning,omitempty"`
 }
 
 // StateMissing is the state of a sandbox whose record this node has but
@@ -110,15 +137,16 @@ type Error struct {
 var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`).MatchString
 
 type server struct {
-	st *store.Store
-	d  Driver     // nil when this node has no usable backend
-	mu sync.Mutex // serialises creating, starting, stopping and removing sandboxes
+	st        *store.Store
+	d         Driver     // nil when this node has no usable backend
+	mu        sync.Mutex // serialises changing sandboxes and snapshots
+	snapshots string     // directory of the snapshot files, named by ID
 }
 
 // Handler returns the daemon's HTTP API. Without a driver, the sandbox
 // endpoints answer 503.
 func Handler(info Info, st *store.Store, d Driver) http.Handler {
-	s := &server{st: st, d: d}
+	s := &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots")}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true})
@@ -134,6 +162,9 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 	mux.HandleFunc("POST /v1/sandboxes/{name}/pause", s.backendOnly(s.pause))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/resume", s.backendOnly(s.resume))
 	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.backendOnly(s.remove))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/snapshot", s.backendOnly(s.snapshot))
+	mux.HandleFunc("GET /v1/snapshots", s.backendOnly(s.listSnapshots))
+	mux.HandleFunc("DELETE /v1/snapshots/{name}", s.backendOnly(s.removeSnapshot))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.backendOnly(s.exec))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/files", s.backendOnly(s.files))
 	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.backendOnly(s.files))
@@ -151,7 +182,7 @@ func (s *server) backendOnly(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // create returns the sandbox with the requested name, started, creating it
-// first if there is none.
+// first if there is none, from the snapshot req.From if set.
 func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	var req CreateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
@@ -192,9 +223,24 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	spec.Name = req.Name
+	if req.From != "" {
+		snap, ok := s.lookupSnapshot(w, r, req.From)
+		if !ok {
+			return
+		}
+		if req.DiskGB != 0 && req.DiskGB < snap.DiskGB {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("snapshot %q needs a disk of at least %d GiB", snap.Name, snap.DiskGB))
+			return
+		}
+		spec.DiskGB = max(spec.DiskGB, snap.DiskGB)
+		spec.From = s.snapshotPath(snap)
+	}
 	sb, err := s.st.GetByName(ctx, req.Name)
 	status := http.StatusOK
 	switch {
+	case err == nil && req.From != "":
+		writeError(w, http.StatusConflict, fmt.Errorf("sandbox %q already exists: a snapshot can only start a new sandbox", req.Name))
+		return
 	case errors.Is(err, store.ErrNotFound):
 		status = http.StatusCreated
 		sb, err = s.st.Create(ctx, store.Sandbox{Backend: s.d.Name(), Spec: spec, State: backend.StateStopped, Restart: req.Restart})
@@ -424,6 +470,180 @@ func (s *server) remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, out)
+}
+
+// snapshot copies the sandbox's disk to a new named snapshot. A running
+// sandbox is stopped for the copy, so its disk is consistent, and started
+// again: its processes and memory are lost. A paused one is refused, so
+// that its memory is not.
+func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
+	var req SnapshotRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return
+	}
+	if !validName(req.Name) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid snapshot name %q: use 1 to 63 lower-case letters, digits and hyphens, starting with a letter or digit", req.Name))
+		return
+	}
+	ctx := r.Context()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sb, ok := s.lookup(w, r)
+	if !ok {
+		return
+	}
+	if err := s.sameBackend(sb); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if _, err := s.st.GetSnapshot(ctx, req.Name); err == nil {
+		writeError(w, http.StatusConflict, fmt.Errorf("snapshot name %q %w", req.Name, store.ErrNameTaken))
+		return
+	} else if !errors.Is(err, store.ErrSnapshotNotFound) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	list, err := s.live(ctx, []store.Sandbox{sb})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	state := list[0].State
+	if state == backend.StatePaused {
+		writeError(w, http.StatusConflict, fmt.Errorf("sandbox %q is paused: resume or stop it first", sb.Spec.Name))
+		return
+	}
+	running := state == backend.StateRunning
+	snap, warning, err := s.takeSnapshot(ctx, sb, req.Name, running)
+	if running {
+		// Whatever became of the stop or the copy, the sandbox was running;
+		// Start does nothing if it still is.
+		ctx := context.WithoutCancel(ctx)
+		startErr := s.d.Start(ctx, sb.ID)
+		if startErr == nil {
+			startErr = s.st.SetState(ctx, sb.ID, backend.StateRunning)
+		}
+		err = errors.Join(err, startErr)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := apiSnapshot(snap)
+	out.Warning = warning
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(out)
+}
+
+// takeSnapshot stops sb if it runs and copies its disk to a temporary file,
+// which it renames to the snapshot's after storing the record: a record
+// never names a partial copy. A crash leaves at most the temporary file,
+// which Run removes, or a record without a file, which fails to start
+// sandboxes and can be removed.
+func (s *server) takeSnapshot(ctx context.Context, sb store.Sandbox, name string, running bool) (snap store.Snapshot, warning string, err error) {
+	if running {
+		if warning, err = s.stopSandbox(ctx, sb); err != nil {
+			return snap, "", err
+		}
+	}
+	if err := os.MkdirAll(s.snapshots, 0700); err != nil {
+		return snap, warning, err
+	}
+	tmp := filepath.Join(s.snapshots, sb.ID+tmpSuffix)
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return snap, warning, err
+	}
+	err = s.d.Snapshot(ctx, sb.ID, tmp)
+	if err == nil {
+		snap, err = s.st.CreateSnapshot(ctx, store.Snapshot{Name: name, Backend: sb.Backend, Sandbox: sb.Spec.Name, DiskGB: sb.Spec.DiskGB})
+	}
+	if err == nil {
+		if err = os.Rename(tmp, s.snapshotPath(snap)); err != nil {
+			err = errors.Join(err, s.st.DeleteSnapshot(context.WithoutCancel(ctx), snap.ID))
+		}
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return snap, warning, err
+}
+
+// tmpSuffix names a snapshot file still being copied.
+const tmpSuffix = ".tmp"
+
+// removePartialSnapshots deletes the temporary files of snapshots a crash
+// interrupted.
+func removePartialSnapshots(stateDir string) error {
+	tmps, _ := filepath.Glob(filepath.Join(stateDir, "snapshots", "*"+tmpSuffix))
+	var err error
+	for _, f := range tmps {
+		err = errors.Join(err, os.Remove(f))
+	}
+	return err
+}
+
+// listSnapshots returns every snapshot in the store, oldest first.
+func (s *server) listSnapshots(w http.ResponseWriter, r *http.Request) {
+	records, err := s.st.ListSnapshots(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	list := make([]Snapshot, 0, len(records))
+	for _, snap := range records {
+		list = append(list, apiSnapshot(snap))
+	}
+	writeJSON(w, list)
+}
+
+// removeSnapshot deletes the snapshot's file, then its record. Sandboxes
+// started from it have their own copy and are not affected.
+func (s *server) removeSnapshot(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap, ok := s.lookupSnapshot(w, r, r.PathValue("name"))
+	if !ok {
+		return
+	}
+	// The file first: a record without one only fails to start sandboxes,
+	// and removing it again succeeds.
+	if err := os.Remove(s.snapshotPath(snap)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if err := s.st.DeleteSnapshot(context.WithoutCancel(ctx), snap.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, apiSnapshot(snap))
+}
+
+// lookupSnapshot returns the named snapshot of this daemon's backend, or
+// writes a 404 or a 409.
+func (s *server) lookupSnapshot(w http.ResponseWriter, r *http.Request, name string) (store.Snapshot, bool) {
+	snap, err := s.st.GetSnapshot(r.Context(), name)
+	switch {
+	case errors.Is(err, store.ErrSnapshotNotFound):
+		writeError(w, http.StatusNotFound, fmt.Errorf("snapshot %q not found", name))
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err)
+	case snap.Backend != s.d.Name():
+		writeError(w, http.StatusConflict, fmt.Errorf("snapshot %q is on the %s backend, but this daemon runs %s", name, snap.Backend, s.d.Name()))
+	default:
+		return snap, true
+	}
+	return snap, false
+}
+
+func (s *server) snapshotPath(snap store.Snapshot) string {
+	return filepath.Join(s.snapshots, snap.ID)
+}
+
+func apiSnapshot(snap store.Snapshot) Snapshot {
+	return Snapshot{ID: snap.ID, Name: snap.Name, Backend: snap.Backend, Sandbox: snap.Sandbox, DiskGB: snap.DiskGB, CreatedAt: snap.CreatedAt}
 }
 
 // stopSandbox stops sb and records it. An unclean stop still stops it, so

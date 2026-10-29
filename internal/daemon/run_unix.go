@@ -55,7 +55,7 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 		}
 		return fmt.Errorf("lock %s: %w", lock.Name(), err)
 	}
-	info.PID = os.Getpid()
+	info.PID, info.StateDir = os.Getpid(), dir
 	st, err := store.Open(filepath.Join(dir, StoreName))
 	if err != nil {
 		return err
@@ -91,6 +91,9 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 		if err := reconcile(ctx, st, d); err != nil {
 			return fmt.Errorf("reconcile sandboxes with the %s backend: %w", info.Backend, err)
 		}
+	}
+	if err := removePartialSnapshots(dir); err != nil {
+		return err
 	}
 
 	// Shutdown ignores hijacked connections, so exec sessions would outlive

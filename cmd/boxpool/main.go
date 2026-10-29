@@ -40,6 +40,7 @@ Commands:
   pause     pause a running sandbox, keeping its memory (not on Docker)
   resume    resume a paused sandbox
   rm        delete a sandbox and free its resources
+  snapshot  save a sandbox's disk for boxpool sh --from; snapshot ls, rm
 `
 
 func main() {
@@ -75,6 +76,8 @@ func main() {
 		os.Exit(resume(os.Args[2:]))
 	case "rm":
 		os.Exit(rm(os.Args[2:]))
+	case "snapshot":
+		os.Exit(snapshotCmd(os.Args[2:]))
 	case "up":
 		os.Exit(up(os.Args[2:]))
 	case "down":

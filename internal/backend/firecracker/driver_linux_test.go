@@ -370,3 +370,53 @@ func TestPoll(t *testing.T) {
 		t.Errorf("poll after exit = %v", err)
 	}
 }
+
+// TestSnapshot checks that a sandbox created from a snapshot gets a copy of
+// the source's disk, and that a paused sandbox is refused.
+func TestSnapshot(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	base := filepath.Join(dir, "rootfs.ext4")
+	os.WriteFile(base, []byte("ext4"), 0644)
+	d := &Driver{root: filepath.Join(dir, "sandboxes"), rootfs: base, admission: &resources.Manager{StateDir: dir, Probe: func(string) (resources.Capacity, error) {
+		return resources.Capacity{CPUs: []int{0, 1, 2, 3}, MemoryMB: 8192, AvailableMB: 8192, DiskBytes: 1 << 40}, nil
+	}}}
+	oldResize := resizeFilesystem
+	resizeFilesystem = func(context.Context, string) error { return nil }
+	t.Cleanup(func() { resizeFilesystem = oldResize })
+	os.Mkdir(d.root, 0700)
+	spec := backend.Spec{Name: "web", CPUs: 1, MemoryMB: 256, DiskGB: 1}
+	if _, err := d.Create(ctx, "abc", spec); err != nil {
+		t.Fatal(err)
+	}
+	l := sandboxLayout(d.root, "abc")
+	if err := os.WriteFile(l.rootfs, []byte("jq"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "snap")
+	os.WriteFile(l.vmstate, nil, 0600)
+	if err := d.Snapshot(ctx, "abc", path); err == nil || !strings.Contains(err.Error(), "not stopped") {
+		t.Errorf("Snapshot of a paused sandbox = %v", err)
+	}
+	os.Remove(l.vmstate)
+	if err := d.Snapshot(ctx, "abc", path); err != nil {
+		t.Fatal(err)
+	}
+	// An existing destination is refused and kept.
+	if err := d.Snapshot(ctx, "abc", path); err == nil {
+		t.Error("Snapshot over an existing file succeeded")
+	} else if _, err := os.Stat(path); err != nil {
+		t.Errorf("failed Snapshot removed the existing file: %v", err)
+	}
+	// The sandbox writing on must not change the snapshot.
+	os.WriteFile(l.rootfs, []byte("vi"), 0600)
+	from := spec
+	from.From = path
+	if _, err := d.Create(ctx, "def", from); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(sandboxLayout(d.root, "def").rootfs)
+	if err != nil || len(b) != 1<<30 || string(b[:2]) != "jq" {
+		t.Errorf("disk from the snapshot: %d bytes starting %q, %v", len(b), b[:min(len(b), 2)], err)
+	}
+}
