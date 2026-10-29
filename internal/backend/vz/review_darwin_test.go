@@ -228,6 +228,10 @@ func TestCloseWaitsForStart(t *testing.T) {
 					close(m.console)
 					return nil
 				}}
+				// Model a fully initialized running VM, not a fresh clone.
+				if err := os.Remove(filepath.Join(sandboxLayout(d.root, "vm").dir, "fresh")); err != nil {
+					t.Fatal(err)
+				}
 				d.machines.Store("vm", m)
 			}
 			unlock()

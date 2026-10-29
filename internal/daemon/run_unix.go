@@ -92,6 +92,14 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 			return fmt.Errorf("reconcile sandboxes with the %s backend: %w", info.Backend, err)
 		}
 	}
+	if warmer, ok := d.(interface{ Warm(context.Context) error }); ok {
+		warmCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err := warmer.Warm(warmCtx)
+		cancel()
+		if err != nil {
+			slog.Warn("warm base unavailable; new sandboxes will cold-boot", "err", err)
+		}
+	}
 	if err := removePartialSnapshots(dir); err != nil {
 		return err
 	}

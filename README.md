@@ -137,6 +137,14 @@ the last daemon ended, as after a host reboot, is recorded `stopped`, or
 booted again if it was created with the `always` restart policy. It logs
 sandboxes the backend has but its records do not, and leaves them alone.
 
+Before reporting healthy, the VM backends prepare a private, paused base
+snapshot for new sandboxes with the default 2 CPUs, 2 GiB RAM and 10 GiB
+disk. Each restore gets a private disk, hostname, machine ID and network
+address; the guest RNG is reseeded. The cache is rebuilt on image upgrades.
+Custom sizes, `--from` snapshots and unsupported hosts keep cold-booting;
+cache preparation failures log a warning rather than prevent startup.
+See [warm-boot testing](docs/benchmarks/m3-warm-boot.md).
+
 `boxpool sh [--name N] [--cpu N] [--mem 2g] [--disk 10g] [--restart always] [--timing]`
 asks the daemon for a sandbox (a new one with a generated name, or the one
 called `N`), starts it if needed and opens `bash -l` in it on your terminal.
