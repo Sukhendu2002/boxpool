@@ -266,7 +266,7 @@ func (s *server) lead(ctx context.Context, rep *replica) {
 		case <-t.C:
 		}
 		if rep.State() == raft.Leader {
-			if err := s.reportSelf(ctx); err != nil && ctx.Err() == nil {
+			if err := s.reportSelf(ctx, rep); err != nil && ctx.Err() == nil {
 				slog.Warn("cannot record this head's report", "err", err)
 			}
 			s.addReplicas(ctx, rep)
@@ -362,13 +362,39 @@ func (s *server) waitLeading(ctx context.Context) error {
 
 // reportSelf records the head's own report, so that its sandboxes are
 // listed, unreachable, if another machine takes over.
-func (s *server) reportSelf(ctx context.Context) error {
+func (s *server) reportSelf(ctx context.Context, rep *replica) error {
+	// Keep collecting and applying a report together: a periodic report
+	// collected before a local change must not overwrite its newer report.
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
 	r, err := s.report(ctx)
 	if err != nil {
 		return err
 	}
 	b, _ := json.Marshal(r)
-	return s.apply(ctx, command{Op: "report", Node: &store.Node{ID: s.selfID(), Report: b, SeenAt: time.Now()}})
+	return applyTo(rep.Raft, command{Op: "report", Node: &store.Node{ID: s.selfID(), Report: b, SeenAt: time.Now()}})
+}
+
+// headReplica captures whether a local sandbox change needs replication.
+// Keep this replica across the backend operation so losing leadership
+// meanwhile fails the acknowledgement instead of skipping replication.
+func (s *server) headReplica() *replica {
+	if s.leading.Load() {
+		return s.raft.Load()
+	}
+	return nil
+}
+
+// syncLocal records a local change before its successful response. The
+// caller holds mu, so another local mutation cannot race its report.
+func (s *server) syncLocal(w http.ResponseWriter, r *http.Request, rep *replica) bool {
+	if rep != nil {
+		if err := s.reportSelf(context.WithoutCancel(r.Context()), rep); err != nil {
+			writeError(w, http.StatusServiceUnavailable, fmt.Errorf("local sandbox change could not be replicated: %w", err))
+			return false
+		}
+	}
+	return true
 }
 
 // addReplicas makes ready nodes replicas until there are maxReplicas:

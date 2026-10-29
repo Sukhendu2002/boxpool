@@ -366,6 +366,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	rep := s.headReplica()
 	// A generated name must not attach to an existing sandbox.
 	for req.Name == "" {
 		b := make([]byte, 3)
@@ -427,6 +428,9 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sb.State = backend.StateRunning
+	if !s.syncLocal(w, r, rep) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(apiSandbox(sb))
@@ -515,6 +519,7 @@ func (s *server) resume(w http.ResponseWriter, r *http.Request) { s.boot(w, r, t
 func (s *server) boot(w http.ResponseWriter, r *http.Request, resume bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	rep := s.headReplica()
 	sb, ok := s.lookup(w, r)
 	if !ok {
 		return
@@ -546,6 +551,9 @@ func (s *server) boot(w http.ResponseWriter, r *http.Request, resume bool) {
 		return
 	}
 	sb.State = backend.StateRunning
+	if !s.syncLocal(w, r, rep) {
+		return
+	}
 	writeJSON(w, apiSandbox(sb))
 }
 
@@ -553,6 +561,7 @@ func (s *server) boot(w http.ResponseWriter, r *http.Request, resume bool) {
 func (s *server) stop(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	rep := s.headReplica()
 	sb, ok := s.lookup(w, r)
 	if !ok {
 		return
@@ -567,6 +576,9 @@ func (s *server) stop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sb.State = backend.StateStopped
+	if !s.syncLocal(w, r, rep) {
+		return
+	}
 	out := apiSandbox(sb)
 	out.Warning = warning
 	writeJSON(w, out)
@@ -579,6 +591,7 @@ func (s *server) pause(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	rep := s.headReplica()
 	sb, ok := s.lookup(w, r)
 	if !ok {
 		return
@@ -605,6 +618,9 @@ func (s *server) pause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sb.State = state
+	if !s.syncLocal(w, r, rep) {
+		return
+	}
 	out := apiSandbox(sb)
 	out.Warning = warning
 	writeJSON(w, out)
@@ -618,6 +634,7 @@ func (s *server) remove(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	rep := s.headReplica()
 	sb, ok := s.lookup(w, r)
 	if !ok {
 		return
@@ -649,6 +666,9 @@ func (s *server) remove(w http.ResponseWriter, r *http.Request) {
 	// The sandbox is gone: a cancelled request must not leave its record.
 	if err := s.st.Delete(context.WithoutCancel(ctx), sb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if !s.syncLocal(w, r, rep) {
 		return
 	}
 	writeJSON(w, out)

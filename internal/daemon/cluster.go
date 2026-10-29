@@ -182,6 +182,11 @@ func (s *server) reportTo() string {
 	if s.leading.Load() {
 		return ""
 	}
+	if rep := s.raft.Load(); rep != nil {
+		if addr, id := rep.LeaderWithID(); addr != "" && string(id) != s.selfID() {
+			return string(addr)
+		}
+	}
 	head, _ := s.head.Load().(string)
 	return head
 }

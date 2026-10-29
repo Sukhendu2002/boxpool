@@ -154,6 +154,12 @@ makes it the head.
   from the other replicas. Other nodes still only dial out.
 - A node keeps the replicas' addresses (`pool/peers`) and, when the head
   stops answering, reports to the first one that answers as head.
+  Replicas use Raft's elected leader for their reports and tunnels, so a
+  returning head can follow it even without saved peers.
+- The head commits its local sandbox inventory through Raft before
+  acknowledging a create, start, stop, pause, resume or delete. If it loses
+  leadership during the operation, the local change may have happened,
+  but the request fails rather than acknowledge an unreplicated change.
 - `boxpool promote` refuses while it can reach any other replica. An old
   head that comes back after a promotion asks the other replicas, finds
   one leading without it, drops its raft state, and follows that head as

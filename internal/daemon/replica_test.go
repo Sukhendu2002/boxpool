@@ -290,6 +290,112 @@ func TestFailover(t *testing.T) {
 	if code, body := revoke(t, other, tok); code != http.StatusConflict || !strings.Contains(body, "revoke join tokens on the head") {
 		t.Errorf("revoke on a replica = %d %s", code, body)
 	}
+
+	// The original head never received a heartbeat response while leading,
+	// so it has no saved peers. Raft must still direct its reports and
+	// tunnels to the elected head after it restarts as a follower.
+	if peers, err := auth.Peers(a.s.info.StateDir); err != nil || len(peers) != 0 {
+		t.Fatalf("original head peers = %v, %v; want none", peers, err)
+	}
+	a = restart(t, a)
+	waitFor(t, "the original head to report to the elected head", func() bool {
+		return !a.s.leading.Load() && a.s.reportTo() == head.s.poolAddr && nodeStates(t, head)[aID] == "ready"
+	})
+	waitFor(t, "the elected head to reach the original head's sandbox", func() bool {
+		code, _ := call(t, head.local, "GET", "/v1/sandboxes/on-a")
+		return code == http.StatusOK
+	})
+}
+
+// localHead starts a single-voter pool without periodic reports, so a
+// successful mutation must commit its inventory rather than wait for a tick.
+func localHead(t *testing.T) (*httptest.Server, *server) {
+	t.Helper()
+	old := heartbeatInterval
+	heartbeatInterval = time.Hour
+	t.Cleanup(func() { heartbeatInterval = old })
+	local, s, _ := poolMachine(t, "linux")
+	if err := s.bootstrap(context.Background(), "127.0.0.1:"+auth.JoinPort); err != nil {
+		t.Fatal(err)
+	}
+	return local, s
+}
+
+func TestLocalSandboxReplication(t *testing.T) {
+	local, s := localHead(t)
+	for _, step := range []struct {
+		name, method, path, body, want string
+		status                         int
+	}{
+		{"create", "POST", "/v1/sandboxes", `{"name":"local"}`, "local=running", http.StatusCreated},
+		{"pause", "POST", "/v1/sandboxes/local/pause", "", "local=paused", http.StatusOK},
+		{"resume", "POST", "/v1/sandboxes/local/resume", "", "local=running", http.StatusOK},
+		{"stop", "POST", "/v1/sandboxes/local/stop", "", "local=stopped", http.StatusOK},
+		{"start", "POST", "/v1/sandboxes/local/start", "", "local=running", http.StatusOK},
+		{"delete", "DELETE", "/v1/sandboxes/local?force=true", "", "", http.StatusOK},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			if code, body := send(t, local, step.method, step.path, step.body); code != step.status {
+				t.Fatalf("mutation = %d %s", code, body)
+			}
+			state, err := s.st.PoolState(context.Background())
+			if err != nil || len(state.Nodes) != 1 {
+				t.Fatalf("replicated state = %+v, %v", state, err)
+			}
+			var report Report
+			if err := json.Unmarshal(state.Nodes[0].Report, &report); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(states(report.Sandboxes)); got != step.want {
+				t.Fatalf("inventory at acknowledgement = %q, want %q", got, step.want)
+			}
+		})
+	}
+}
+
+type loseLeadershipDriver struct {
+	Driver
+	stopRaft func() error
+}
+
+func (d loseLeadershipDriver) Start(ctx context.Context, id string) error {
+	if err := d.Driver.Start(ctx, id); err != nil {
+		return err
+	}
+	return d.stopRaft()
+}
+
+func TestLocalSandboxReplicationLosesLeadership(t *testing.T) {
+	local, s := localHead(t)
+	s.d = loseLeadershipDriver{Driver: s.d, stopRaft: s.stopRaft}
+	code, _, body := post(t, local, `{"name":"local"}`)
+	if code != http.StatusServiceUnavailable || !strings.Contains(body, "could not be replicated") {
+		t.Fatalf("create after leadership loss = %d %s", code, body)
+	}
+}
+
+func TestLocalSandboxImmediateFailover(t *testing.T) {
+	fastPool(t)
+	a, b, c := startPoolDaemon(t, "a"), startPoolDaemon(t, "b"), startPoolDaemon(t, "c")
+	joinTo(t, a, b)
+	joinTo(t, a, c)
+	waitFor(t, "three voting replicas", func() bool { v, o := replicas(a); return len(v) == 3 && len(o) == 0 })
+	if code, _, body := post(t, a.local, `{"name":"just-created","node":"a"}`); code != http.StatusCreated {
+		t.Fatalf("create = %d %s", code, body)
+	}
+	// No wait for a heartbeat or for followers to apply the report.
+	a.stop()
+	waitFor(t, "a new head", func() bool { return b.s.leading.Load() || c.s.leading.Load() })
+	head := b
+	if c.s.leading.Load() {
+		head = c
+	}
+	waitFor(t, "the acknowledged sandbox on the new head", func() bool {
+		return sandboxes(t, head) == "just-created="+string(StateUnreachable)
+	})
+	if code, _, body := post(t, head.local, `{"name":"just-created"}`); code != http.StatusBadGateway || !strings.Contains(body, "unreachable") {
+		t.Fatalf("create with the unreachable sandbox's name = %d %s", code, body)
+	}
 }
 
 // TestPromote runs a pool of two in this process: the second machine keeps
