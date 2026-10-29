@@ -21,7 +21,6 @@ import (
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/client"
 	"boxpool.run/boxpool/internal/daemon"
-	"boxpool.run/boxpool/internal/preflight"
 )
 
 // shell is the guest's login shell; the image is Debian, which has bash.
@@ -78,12 +77,11 @@ func sh(args []string) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGHUP, syscall.SIGTERM)
 	defer stop()
-	dir, err := preflight.StateDir()
+	c, err := newClient()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool sh: %v\n", err)
 		return 1
 	}
-	c := client.New(dir)
 	info, err := c.Info(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool sh: %v\n", err)

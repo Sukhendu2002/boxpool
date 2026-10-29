@@ -77,3 +77,20 @@ func TestLoadOrCreateCA(t *testing.T) {
 		t.Errorf("ca-key.pem mode = %v, want 0600", fi.Mode())
 	}
 }
+
+func TestAccessTokenRoundTrip(t *testing.T) {
+	tok := NewAccessToken(sha256.Sum256([]byte("ca")))
+	got, err := ParseAccessToken(tok.String())
+	if err != nil || got != tok {
+		t.Fatalf("ParseAccessToken(%q) = %+v, %v; want %+v", tok, got, err, tok)
+	}
+	if NewAccessToken(tok.CA).Secret == tok.Secret || len(tok.Hash()) != 64 {
+		t.Error("two tokens share a secret, or the hash is not SHA-256 hex")
+	}
+	join := NewJoinToken("head:7443", tok.CA).String()
+	for _, s := range []string{"", accessPrefix, tok.String()[:len(tok.String())-1], tok.String() + "AA", strings.TrimPrefix(tok.String(), accessPrefix), join} {
+		if _, err := ParseAccessToken(s); err == nil {
+			t.Errorf("ParseAccessToken(%q) succeeded", s)
+		}
+	}
+}

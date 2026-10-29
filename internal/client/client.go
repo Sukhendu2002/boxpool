@@ -1,4 +1,5 @@
-// Package client talks to the local Boxpool daemon over its unix socket.
+// Package client talks to the local Boxpool daemon over its unix socket,
+// or to a head over the network with an access token.
 package client
 
 import (
@@ -20,17 +21,22 @@ import (
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/daemon"
+	"boxpool.run/boxpool/internal/transport"
 )
 
-// Client is a client for the daemon serving one state directory.
+// Client is a client for the daemon serving one state directory, or for
+// a remote head.
 type Client struct {
-	hc *http.Client
+	hc    *http.Client
+	base  string // URL the API's paths are relative to
+	token string // access token for a remote head
 }
 
 // New returns a client for the daemon whose state directory is stateDir.
 func New(stateDir string) *Client {
 	sock := filepath.Join(stateDir, daemon.SocketName)
-	return &Client{hc: &http.Client{Transport: &http.Transport{
+	// The host is ignored: every request goes to the socket.
+	return &Client{base: "http://boxpool", hc: &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			conn, err := d.DialContext(ctx, "unix", sock)
@@ -40,6 +46,17 @@ func New(stateDir string) *Client {
 			return conn, nil
 		},
 	}}}
+}
+
+// Remote returns a client for the head at addr, host:port, with an access
+// token, which also pins the head's CA.
+func Remote(addr, token string) (*Client, error) {
+	tok, err := auth.ParseAccessToken(token)
+	if err != nil {
+		return nil, err
+	}
+	tr := &http.Transport{TLSClientConfig: tok.TLS(), DialContext: transport.DialContext}
+	return &Client{base: "https://" + addr, token: token, hc: &http.Client{Transport: tr}}, nil
 }
 
 // socketError adds actionable context without losing the underlying dial error.
@@ -185,6 +202,30 @@ func (c *Client) RevokeJoinToken(ctx context.Context, token string) error {
 	return resp.Body.Close()
 }
 
+// CreateAccessToken returns a new access token for this head's API.
+func (c *Client) CreateAccessToken(ctx context.Context, req daemon.AccessTokenRequest) (daemon.AccessToken, error) {
+	var tok daemon.AccessToken
+	body, _ := json.Marshal(req)
+	err := c.do(ctx, http.MethodPost, "/v1/access-tokens", bytes.NewReader(body), &tok)
+	return tok, err
+}
+
+// ListAccessTokens returns this head's access tokens, oldest first.
+func (c *Client) ListAccessTokens(ctx context.Context) ([]daemon.AccessToken, error) {
+	var list []daemon.AccessToken
+	err := c.get(ctx, "/v1/access-tokens", &list)
+	return list, err
+}
+
+// RevokeAccessToken makes the access token with the given ID invalid.
+func (c *Client) RevokeAccessToken(ctx context.Context, id string) error {
+	resp, err := c.send(ctx, http.MethodDelete, "/v1/access-tokens/"+url.PathEscape(id), "", nil)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
 // JoinPool joins this node to the pool named in token.
 func (c *Client) JoinPool(ctx context.Context, token string) (daemon.JoinPoolResponse, error) {
 	var out daemon.JoinPoolResponse
@@ -237,7 +278,7 @@ func (c *Client) Logs(ctx context.Context, name string, follow bool) (io.ReadClo
 // relays the agent's exec protocol unchanged.
 func (c *Client) Exec(ctx context.Context, name string, req agent.ExecRequest, stdout, stderr io.Writer) (*agent.Session, error) {
 	path := "/v1/sandboxes/" + url.PathEscape(name) + "/exec"
-	conn, resp, err := websocket.Dial(ctx, "ws://boxpool"+path, &websocket.DialOptions{HTTPClient: c.hc})
+	conn, resp, err := websocket.Dial(ctx, c.base+path, &websocket.DialOptions{HTTPClient: c.hc, HTTPHeader: c.header()})
 	if err != nil {
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
 			return nil, apiError(http.MethodGet, path, resp)
@@ -288,11 +329,11 @@ func filesPath(name, path string) string {
 // send sends a request and returns the response if it succeeded, or the
 // daemon's error.
 func (c *Client) send(ctx context.Context, method, path, contentType string, body io.Reader) (*http.Response, error) {
-	// The host is ignored: every request goes to the socket.
-	req, err := http.NewRequestWithContext(ctx, method, "http://boxpool"+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
 	if err != nil {
 		return nil, err
 	}
+	req.Header = c.header()
 	if body != nil {
 		req.Header.Set("Content-Type", contentType)
 	}
@@ -305,6 +346,14 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 		return nil, apiError(method, path, resp)
 	}
 	return resp, nil
+}
+
+func (c *Client) header() http.Header {
+	h := http.Header{}
+	if c.token != "" {
+		h.Set("Authorization", "Bearer "+c.token)
+	}
+	return h
 }
 
 // apiError returns the daemon's error message, or the status without one.

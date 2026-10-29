@@ -190,6 +190,7 @@ type server struct {
 	poolAddr     string                       // where servePool listens
 	stopPool     func()                       // stops servePool's server; guarded by poolMu
 	poolTLS      atomic.Pointer[tls.Config]   // the pool port's, from the head CA
+	api          http.Handler                 // the local API as Run serves it, set before servePool
 	raft         atomic.Pointer[replica]      // this machine's replica of the head's state, if it keeps one
 	leading      atomic.Bool                  // raft elected this machine head, and its state is current
 	id           atomic.Value                 // string: this machine's node ID, once in a pool
@@ -250,6 +251,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.route(s.backendOnly(s.files)))
 	mux.HandleFunc("POST /v1/tokens", s.createToken)
 	mux.HandleFunc("DELETE /v1/tokens/{hash}", s.revokeToken)
+	mux.HandleFunc("POST /v1/access-tokens", s.createAccessToken)
+	mux.HandleFunc("GET /v1/access-tokens", s.listAccessTokens)
+	mux.HandleFunc("DELETE /v1/access-tokens/{id}", s.revokeAccessToken)
 	mux.HandleFunc("GET /v1/nodes", s.listNodes)
 	mux.HandleFunc("POST /v1/pool/join", s.joinPool)
 	mux.HandleFunc("POST /v1/pool/promote", s.promote)

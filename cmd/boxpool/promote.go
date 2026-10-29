@@ -30,7 +30,7 @@ func promote(args []string) int {
 		return 1
 	}
 	ctx := context.Background()
-	c, ok := connect(ctx, "promote")
+	c, ok := connectLocal(ctx, "promote")
 	if !ok {
 		return 1
 	}

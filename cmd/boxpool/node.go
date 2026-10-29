@@ -29,7 +29,7 @@ func nodeCmd(args []string) int {
 // setLabels replaces this machine's labels with the comma-separated list.
 func setLabels(cmd, list string) int {
 	ctx := context.Background()
-	c, ok := connect(ctx, cmd)
+	c, ok := connectLocal(ctx, cmd)
 	if !ok {
 		return 1
 	}

@@ -109,25 +109,6 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	if err := removePartialSnapshots(dir); err != nil {
 		return err
 	}
-	// A replica of the head's state resumes it, and serves the pool port
-	// as a head does, for raft and in case it becomes the head.
-	if me, ok := s.storedIdentity(); ok {
-		if err := s.startRaft(me, raftResume); err != nil {
-			slog.Error("cannot resume the replica of the pool's state; this machine cannot be the head", "err", err)
-		}
-	}
-	defer s.closePool()
-	// Other machines joining is optional: a busy port must not stop the
-	// daemon serving this machine.
-	if head, err := auth.Head(dir); err != nil || head == "" || s.raft.Load() != nil {
-		if err == nil {
-			err = s.servePool()
-		}
-		if err != nil {
-			slog.Warn("not serving the pool API; other machines cannot join this one", "err", err)
-		}
-	}
-
 	// Shutdown ignores hijacked connections, so exec sessions would outlive
 	// Run: every request runs under sessions, which is cancelled after
 	// Shutdown, and Run waits for all handlers before it closes the store.
@@ -155,9 +136,34 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 				mu.Unlock()
 				active.Done()
 			}()
-			h.ServeHTTP(w, r)
+			// Requests on the pool port do not start under sessions.
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			defer context.AfterFunc(sessions, cancel)()
+			h.ServeHTTP(w, r.WithContext(ctx))
 		}),
 	}
+	// Remote requests with an access token go through the same handler.
+	s.api = srv.Handler
+	// A replica of the head's state resumes it, and serves the pool port
+	// as a head does, for raft and in case it becomes the head.
+	if me, ok := s.storedIdentity(); ok {
+		if err := s.startRaft(me, raftResume); err != nil {
+			slog.Error("cannot resume the replica of the pool's state; this machine cannot be the head", "err", err)
+		}
+	}
+	defer s.closePool()
+	// Other machines joining is optional: a busy port must not stop the
+	// daemon serving this machine.
+	if head, err := auth.Head(dir); err != nil || head == "" || s.raft.Load() != nil {
+		if err == nil {
+			err = s.servePool()
+		}
+		if err != nil {
+			slog.Warn("not serving the pool API; other machines cannot join this one", "err", err)
+		}
+	}
+
 	// The head's requests, once this machine joins a pool, go through the
 	// same handler, so shutdown waits for them too.
 	fromHead := &http.Server{BaseContext: srv.BaseContext, Handler: srv.Handler, ReadHeaderTimeout: 10 * time.Second}

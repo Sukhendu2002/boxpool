@@ -33,7 +33,9 @@ Commands:
             root), a launch agent on macOS (as you)
   down      stop the daemon's service or launch agent, keeping its state
   join      install the daemon as up does and join the pool a token names
-  token     create or revoke a single-use token to join this pool
+  token     create, list or revoke join tokens and access tokens
+  login     send sandbox commands to a remote head with an access token
+  logout    send them to this machine's daemon again
   node      set this machine's labels: node label gpu,always-on
   promote   make this machine the head of a pool of two whose head is gone
   sh        open a shell in a new or existing sandbox; on a head, on the
@@ -93,6 +95,10 @@ func main() {
 		os.Exit(down(os.Args[2:]))
 	case "token":
 		os.Exit(tokenCmd(os.Args[2:]))
+	case "login":
+		os.Exit(login(os.Args[2:]))
+	case "logout":
+		os.Exit(logout(os.Args[2:]))
 	case "join":
 		os.Exit(join(os.Args[2:]))
 	case "promote":
