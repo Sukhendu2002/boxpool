@@ -332,6 +332,11 @@ func TestSandboxNotFound(t *testing.T) {
 }
 
 func TestNoBackend(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), StoreName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
 	for _, r := range []*http.Request{
 		httptest.NewRequest(http.MethodPost, "/v1/sandboxes", strings.NewReader(`{}`)),
 		httptest.NewRequest(http.MethodGet, "/v1/sandboxes/web", nil),
@@ -343,7 +348,7 @@ func TestNoBackend(t *testing.T) {
 		httptest.NewRequest(http.MethodPut, "/v1/sandboxes/web/files?path=/", nil),
 	} {
 		rec := httptest.NewRecorder()
-		Handler(Info{}, nil, nil).ServeHTTP(rec, r)
+		Handler(Info{}, st, nil).ServeHTTP(rec, r)
 		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "boxpool doctor") {
 			t.Errorf("%s %s = %d %s", r.Method, r.URL, rec.Code, rec.Body)
 		}

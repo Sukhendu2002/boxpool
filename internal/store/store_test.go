@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -284,7 +285,17 @@ func TestNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if list, err := s.ListNodes(ctx); err != nil || len(list) != 2 || list[0] != mac || list[1] != box {
-		t.Errorf("ListNodes() = %+v, %v; want mac then box", list, err)
+	if list, err := s.ListNodes(ctx); err != nil || !reflect.DeepEqual(list, []Node{mac, box}) {
+		t.Errorf("ListNodes() = %+v, %v; want mac then box, without reports", list, err)
+	}
+	seen := time.Now()
+	if err := s.SetNodeReport(ctx, box.ID, []byte(`{"cpu":2}`), seen); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := s.ListNodes(ctx); err != nil || string(list[1].Report) != `{"cpu":2}` || !list[1].SeenAt.Equal(seen) || list[0].Report != nil {
+		t.Errorf("ListNodes() after a report = %+v, %v", list, err)
+	}
+	if err := s.SetNodeReport(ctx, "nope", nil, seen); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetNodeReport(unknown) = %v, want ErrNotFound", err)
 	}
 }

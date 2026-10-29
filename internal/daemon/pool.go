@@ -28,6 +28,13 @@ type Node struct {
 	OS       string    `json:"os"`
 	Arch     string    `json:"arch"`
 	JoinedAt time.Time `json:"joined_at,omitzero"`
+	// State is ready, or unreachable while the node misses heartbeats.
+	// CPUs and MemoryMB are free for new sandboxes, as it last reported.
+	State    string    `json:"state"`
+	Labels   []string  `json:"labels"`
+	CPUs     int       `json:"cpu"`
+	MemoryMB int64     `json:"mem_mb"`
+	SeenAt   time.Time `json:"seen_at,omitzero"`
 }
 
 // JoinPoolRequest is the body of POST /v1/pool/join.
@@ -55,7 +62,9 @@ var validNodeField = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`).Mat
 func (s *server) poolHandler(ca *x509.Certificate, caKey crypto.Signer) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/nodes", s.registerNode(ca, caKey))
-	mux.Handle("GET /v1/nodes", requireNode(listNodes(s.info, s.st)))
+	mux.Handle("GET /v1/nodes", requireNode(s.listNodes))
+	mux.Handle("POST /v1/heartbeat", requireNode(s.receiveReport))
+	mux.Handle("GET /v1/tunnel", requireNode(s.tunnel))
 	return mux
 }
 
@@ -133,24 +142,32 @@ func (s *server) registerNode(ca *x509.Certificate, caKey crypto.Signer) http.Ha
 }
 
 // listNodes lists the head and the nodes that joined it.
-func listNodes(info Info, st *store.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if head, err := auth.Head(info.StateDir); err != nil || head != "" {
-			writeJoined(w, head, err, "run boxpool ls --nodes on the head")
-			return
-		}
-		host, _ := os.Hostname()
-		list := []Node{{Name: host, Role: "head", OS: info.OS, Arch: info.Arch}}
-		nodes, err := st.ListNodes(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		for _, n := range nodes {
-			list = append(list, Node{ID: n.ID, Name: n.Name, Role: "node", OS: n.OS, Arch: n.Arch, JoinedAt: n.JoinedAt})
-		}
-		writeJSON(w, list)
+func (s *server) listNodes(w http.ResponseWriter, r *http.Request) {
+	if head, err := auth.Head(s.info.StateDir); err != nil || head != "" {
+		writeJoined(w, head, err, "run boxpool ls --nodes on the head")
+		return
 	}
+	self, err := s.report(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	members, err := s.members(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	host, _ := os.Hostname()
+	list := []Node{{Name: host, Role: "head", OS: s.info.OS, Arch: s.info.Arch, State: "ready", Labels: self.Labels, CPUs: self.CPUs, MemoryMB: self.MemoryMB}}
+	for _, m := range members {
+		state := "ready"
+		if !m.ready {
+			state = string(StateUnreachable)
+		}
+		list = append(list, Node{ID: m.ID, Name: m.Name, Role: "node", OS: m.OS, Arch: m.Arch, JoinedAt: m.JoinedAt,
+			State: state, Labels: m.Labels, CPUs: m.CPUs, MemoryMB: m.MemoryMB, SeenAt: m.SeenAt})
+	}
+	writeJSON(w, list)
 }
 
 // notJoined returns true if this machine has not joined another pool, and
@@ -261,6 +278,7 @@ func (s *server) servePool() (stop func(), err error) {
 		return nil, err
 	}
 	srv := &http.Server{Handler: s.poolHandler(ca, key), ReadHeaderTimeout: 10 * time.Second}
+	srv.RegisterOnShutdown(func() { close(s.poolDone) }) // answers waiting tunnels
 	go srv.Serve(l)
 	slog.Info("serving the pool API", "addr", l.Addr())
 	return func() {

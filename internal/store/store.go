@@ -446,6 +446,10 @@ type Node struct {
 	OS       string
 	Arch     string
 	JoinedAt time.Time
+	// Report is the node's last heartbeat as it sent it, and SeenAt when it
+	// came: zero before the first.
+	Report []byte
+	SeenAt time.Time
 }
 
 // CreateNode stores n under a new ID and returns it with ID and JoinedAt
@@ -462,7 +466,7 @@ func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {
 
 // ListNodes returns every joined node, oldest first.
 func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, os, arch, joined_at FROM nodes ORDER BY joined_at, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, os, arch, joined_at, report, seen_at FROM nodes ORDER BY joined_at, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -470,14 +474,27 @@ func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
 	var list []Node
 	for rows.Next() {
 		var n Node
-		var joined string
-		if err := rows.Scan(&n.ID, &n.Name, &n.OS, &n.Arch, &joined); err != nil {
+		var joined, report, seen string
+		if err := rows.Scan(&n.ID, &n.Name, &n.OS, &n.Arch, &joined, &report, &seen); err != nil {
 			return nil, err
 		}
 		if n.JoinedAt, err = time.Parse(timeFormat, joined); err != nil {
 			return nil, err
 		}
+		if seen != "" {
+			if n.SeenAt, err = time.Parse(timeFormat, seen); err != nil {
+				return nil, err
+			}
+			n.Report = []byte(report)
+		}
 		list = append(list, n)
 	}
 	return list, rows.Err()
+}
+
+// SetNodeReport records the node's heartbeat report, received at seen. It
+// returns ErrNotFound for an unknown node.
+func (s *Store) SetNodeReport(ctx context.Context, id string, report []byte, seen time.Time) error {
+	return expectOne(s.db.ExecContext(ctx, `UPDATE nodes SET report = ?, seen_at = ? WHERE id = ?`,
+		string(report), seen.UTC().Format(timeFormat), id))
 }

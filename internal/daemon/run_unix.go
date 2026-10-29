@@ -142,6 +142,20 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 			h.ServeHTTP(w, r)
 		}),
 	}
+	// The head's requests, once this machine joins a pool, go through the
+	// same handler, so shutdown waits for them too.
+	fromHead := &http.Server{BaseContext: srv.BaseContext, Handler: srv.Handler, ReadHeaderTimeout: 10 * time.Second}
+	headCtx, stopHead := context.WithCancel(ctx)
+	headDone := make(chan struct{})
+	go func() {
+		defer close(headDone)
+		s.serveHead(headCtx, fromHead)
+	}()
+	defer func() {
+		stopHead()
+		fromHead.Close()
+		<-headDone
+	}()
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(l) }()
 	slog.Info("daemon started", "socket", sock, "version", info.Version, "backend", info.Backend)
@@ -152,11 +166,15 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	select {
 	case err = <-served:
 		srv.Close()
+		fromHead.Close()
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
 		if err = srv.Shutdown(shutdownCtx); err != nil {
 			srv.Close() // drop connections that did not finish in time
+		}
+		if fromHead.Shutdown(shutdownCtx) != nil {
+			fromHead.Close()
 		}
 		<-served
 	}

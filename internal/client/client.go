@@ -200,6 +200,14 @@ func (c *Client) ListNodes(ctx context.Context) ([]daemon.Node, error) {
 	return list, err
 }
 
+// SetLabels replaces this machine's labels and returns them as stored.
+func (c *Client) SetLabels(ctx context.Context, labels []string) ([]string, error) {
+	var out daemon.Labels
+	body, _ := json.Marshal(daemon.Labels{Labels: labels})
+	err := c.do(ctx, http.MethodPut, "/v1/labels", bytes.NewReader(body), &out)
+	return out.Labels, err
+}
+
 // Exec starts a command in the named sandbox through the daemon, which
 // relays the agent's exec protocol unchanged.
 func (c *Client) Exec(ctx context.Context, name string, req agent.ExecRequest, stdout, stderr io.Writer) (*agent.Session, error) {

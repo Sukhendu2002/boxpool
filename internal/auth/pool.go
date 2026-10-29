@@ -133,14 +133,7 @@ func Join(ctx context.Context, tok JoinToken, dir string, req JoinRequest) (stri
 	if err != nil || sha256.Sum256(out.CA) != tok.CA {
 		return "", errors.New("the head returned a CA that does not match the join token")
 	}
-	roots := x509.NewCertPool()
-	roots.AddCert(ca)
-	mtls := &tls.Config{
-		MinVersion:   tls.VersionTLS13,
-		Certificates: []tls.Certificate{{Certificate: [][]byte{out.Cert}, PrivateKey: key}},
-		RootCAs:      roots,
-		ServerName:   HeadName,
-	}
+	mtls := nodeTLS(tls.Certificate{Certificate: [][]byte{out.Cert}, PrivateKey: key}, ca)
 	if err := call(ctx, mtls, http.MethodGet, tok.Addr, nil, nil); err != nil {
 		return "", fmt.Errorf("check the signed certificate: %w", err)
 	}
@@ -169,6 +162,41 @@ func Join(ctx context.Context, tok JoinToken, dir string, req JoinRequest) (stri
 	// The rename makes the join visible at once: a node has all four files
 	// or none.
 	return out.ID, os.Rename(tmp, filepath.Join(dir, PoolDir))
+}
+
+// NodeTLS returns the client config of the node whose state directory is
+// dir, from the key and certificates Join saved there.
+func NodeTLS(dir string) (*tls.Config, error) {
+	d := filepath.Join(dir, PoolDir)
+	cert, err := tls.LoadX509KeyPair(filepath.Join(d, "cert.pem"), filepath.Join(d, "key.pem"))
+	if err != nil {
+		return nil, err
+	}
+	b, err := os.ReadFile(filepath.Join(d, "ca.pem"))
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return nil, fmt.Errorf("%s: no certificate", filepath.Join(d, "ca.pem"))
+	}
+	ca, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return nodeTLS(cert, ca), nil
+}
+
+// nodeTLS presents cert and trusts only a head certificate signed by ca.
+func nodeTLS(cert tls.Certificate, ca *x509.Certificate) *tls.Config {
+	roots := x509.NewCertPool()
+	roots.AddCert(ca)
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      roots,
+		ServerName:   HeadName,
+	}
 }
 
 // pinnedTLS trusts a head whose chain includes the CA with the SHA-256 fp

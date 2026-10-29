@@ -1,10 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -60,13 +62,14 @@ func lsNodes(ctx context.Context, c *client.Client, asJSON bool) int {
 		return 0
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tROLE\tOS\tARCH\tJOINED")
+	fmt.Fprintln(tw, "NAME\tROLE\tSTATE\tOS\tARCH\tFREE CPU\tFREE MEMORY\tLABELS\tJOINED")
 	for _, n := range list {
 		joined := "-"
 		if !n.JoinedAt.IsZero() {
 			joined = age(time.Since(n.JoinedAt))
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", n.Name, n.Role, n.OS, n.Arch, joined)
+		labels := cmp.Or(strings.Join(n.Labels, ","), "-")
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", n.Name, n.Role, n.State, n.OS, n.Arch, n.CPUs, mebibytes(int(n.MemoryMB)), labels, joined)
 	}
 	tw.Flush()
 	return 0

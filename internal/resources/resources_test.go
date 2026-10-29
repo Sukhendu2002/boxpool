@@ -225,3 +225,18 @@ func TestCPUSet(t *testing.T) {
 		}
 	}
 }
+
+func TestFree(t *testing.T) {
+	m := &Manager{StateDir: t.TempDir(), Probe: func(string) (Capacity, error) { return capacity(), nil }}
+	ctx := context.Background()
+	// 4 CPUs less 1 reserved, 8 GiB less the 1 GiB reserve.
+	if cpus, mem, err := m.Free(ctx); err != nil || cpus != 3 || mem != 7168 {
+		t.Errorf("Free() on an empty node = %d, %d, %v; want 3, 7168", cpus, mem, err)
+	}
+	if _, err := m.Create(ctx, "vz", "a", backend.Spec{CPUs: 2, MemoryMB: 2048, DiskGB: 1}, 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	if cpus, mem, err := m.Free(ctx); err != nil || cpus != 1 || mem != 5120 {
+		t.Errorf("Free() after a sandbox = %d, %d, %v; want 1, 5120", cpus, mem, err)
+	}
+}

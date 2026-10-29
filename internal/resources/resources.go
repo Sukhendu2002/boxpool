@@ -207,15 +207,9 @@ func Admit(c Capacity, existing []Allocation, spec backend.Spec, diskBytes int64
 	if err != nil {
 		return Allocation{}, err
 	}
-	reserve := max(int64(1024), (c.MemoryMB+9)/10)
-	cpuFree := max(0, len(c.CPUs)-1)
-	memFree := max(int64(0), min(c.MemoryMB, c.AvailableMB)-reserve)
-	diskFree := max(int64(0), c.DiskBytes)
+	cpuFree, memFree, diskFree, reserve := free(c, existing)
 	used := map[int]bool{}
 	for _, a := range existing {
-		cpuFree = max(0, cpuFree-a.Spec.CPUs)
-		memFree = max(int64(0), memFree-int64(a.Spec.MemoryMB))
-		diskFree = max(int64(0), diskFree-a.DiskBytes)
 		for _, cpu := range a.CPUs {
 			used[cpu] = true
 		}
@@ -244,6 +238,43 @@ func Admit(c Capacity, existing []Allocation, spec backend.Spec, diskBytes int64
 		return Allocation{}, fmt.Errorf("insufficient CPU affinity capacity: requested %d, available %d", spec.CPUs, len(cpus))
 	}
 	return Allocation{Spec: spec, CPUs: cpus, DiskBytes: diskBytes}, nil
+}
+
+// free is what Admit can give a new sandbox, after the host reserve and
+// existing commitments.
+func free(c Capacity, existing []Allocation) (cpus int, memMB, diskBytes, reserveMB int64) {
+	reserveMB = max(int64(1024), (c.MemoryMB+9)/10)
+	cpus = max(0, len(c.CPUs)-1)
+	memMB = max(int64(0), min(c.MemoryMB, c.AvailableMB)-reserveMB)
+	diskBytes = max(int64(0), c.DiskBytes)
+	for _, a := range existing {
+		cpus = max(0, cpus-a.Spec.CPUs)
+		memMB = max(int64(0), memMB-int64(a.Spec.MemoryMB))
+		diskBytes = max(int64(0), diskBytes-a.DiskBytes)
+	}
+	return cpus, memMB, diskBytes, reserveMB
+}
+
+// Free returns the CPUs and MiB of memory Create could admit now, as the
+// scheduler compares nodes.
+func (m *Manager) Free(ctx context.Context) (cpus int, memoryMB int64, err error) {
+	err = m.locked(ctx, func() error {
+		existing, err := m.allocations()
+		if err != nil {
+			return err
+		}
+		probe := m.Probe
+		if probe == nil {
+			probe = hostCapacity
+		}
+		c, err := probe(m.StateDir)
+		if err != nil {
+			return fmt.Errorf("read host capacity: %w", err)
+		}
+		cpus, memoryMB, _, _ = free(c, existing)
+		return nil
+	})
+	return cpus, memoryMB, err
 }
 
 // CPUSet is the Docker Engine's comma-separated list of logical CPU IDs.

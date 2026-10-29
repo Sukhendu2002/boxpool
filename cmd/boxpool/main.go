@@ -32,10 +32,13 @@ Commands:
   down      stop the daemon's service or launch agent, keeping its state
   join      install the daemon as up does and join the pool a token names
   token     create or revoke a single-use token to join this pool
-  sh        open a shell in a new or existing sandbox
+  node      set this machine's labels: node label gpu,always-on
+  sh        open a shell in a new or existing sandbox; on a head, on the
+            node --os, --arch and --node pick
   exec      run a command in a sandbox
   cp        copy files between this machine and a sandbox
-  ls        list this machine's sandboxes, or with --nodes the pool's machines
+  ls        list this machine's sandboxes, and a head's nodes'; or with
+            --nodes the pool's machines
   start     start a stopped sandbox with its disk
   stop      stop a sandbox
   pause     pause a running sandbox, keeping its memory (not on Docker)
@@ -87,6 +90,8 @@ func main() {
 		os.Exit(tokenCmd(os.Args[2:]))
 	case "join":
 		os.Exit(join(os.Args[2:]))
+	case "node":
+		os.Exit(nodeCmd(os.Args[2:]))
 	case "help", "--help", "-h":
 		fmt.Print(usage)
 	default:
