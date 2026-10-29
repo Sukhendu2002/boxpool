@@ -158,7 +158,9 @@ var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`).MatchString
 type server struct {
 	st        *store.Store
 	d         Driver     // nil when this node has no usable backend
-	mu        sync.Mutex // serialises changing sandboxes, snapshots, the CA and joining
+	mu        sync.Mutex // serialises changing sandboxes and snapshots
+	poolMu    sync.Mutex // guards joining, the CA, token issuance and node registration
+	joining   bool       // a role transition is in progress; guarded by poolMu
 	snapshots string     // directory of the snapshot files, named by ID
 	info      Info
 }
@@ -166,13 +168,20 @@ type server struct {
 // Handler returns the daemon's HTTP API. Without a driver, the sandbox
 // endpoints answer 503.
 func Handler(info Info, st *store.Store, d Driver) http.Handler {
-	s := &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), info: info}
+	return newServer(info, st, d).handler()
+}
+
+func newServer(info Info, st *store.Store, d Driver) *server {
+	return &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), info: info}
+}
+
+func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("GET /v1/info", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, info)
+		writeJSON(w, s.info)
 	})
 	mux.HandleFunc("POST /v1/sandboxes", s.backendOnly(s.create))
 	mux.HandleFunc("GET /v1/sandboxes", s.backendOnly(s.list))
@@ -190,7 +199,7 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.backendOnly(s.files))
 	mux.HandleFunc("POST /v1/tokens", s.createToken)
 	mux.HandleFunc("DELETE /v1/tokens/{hash}", s.revokeToken)
-	mux.HandleFunc("GET /v1/nodes", listNodes(info, st))
+	mux.HandleFunc("GET /v1/nodes", listNodes(s.info, s.st))
 	mux.HandleFunc("POST /v1/pool/join", s.joinPool)
 	return mux
 }
@@ -220,12 +229,12 @@ func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.poolMu.Lock()
+	defer s.poolMu.Unlock()
 	if !s.notJoined(w, "create join tokens on the head") {
 		return
 	}
-	s.mu.Lock()
 	ca, _, err := auth.LoadOrCreateCA(s.info.StateDir)
-	s.mu.Unlock()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("head CA: %w", err))
 		return

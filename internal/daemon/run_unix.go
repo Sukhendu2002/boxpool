@@ -105,7 +105,8 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	}
 	// Other machines joining is optional: a busy port must not stop the
 	// daemon serving this machine.
-	if stopPool, err := servePool(info, st); err != nil {
+	s := newServer(info, st, d)
+	if stopPool, err := s.servePool(); err != nil {
 		slog.Warn("not serving the pool API; other machines cannot join this one", "err", err)
 	} else {
 		defer stopPool()
@@ -119,7 +120,7 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	var mu sync.Mutex
 	var active sync.WaitGroup
 	requests := 0 // guarded by mu
-	h := Handler(info, st, d)
+	h := s.handler()
 	srv := &http.Server{
 		BaseContext: func(net.Listener) context.Context { return sessions },
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

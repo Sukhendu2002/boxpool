@@ -121,6 +121,10 @@ taken, the daemon logs a warning and runs without it.
   whose SHA-256 is in the token, so a token pins the head.
 - A node dials the head; the head never dials a node. In M4 the node must
   reach the head directly, over a LAN or a tailnet.
+- A machine cannot join its own pool or join another pool while it has
+  nodes. While joining, it refuses registrations and token creation.
+  Once joined, its old tokens cannot register nodes, even before the old
+  head listener closes on restart.
 
 Limits: node certificates last as long as the CA (10 years) and cannot be
 revoked yet. Anyone who can reach port 7443 can attempt a handshake;
