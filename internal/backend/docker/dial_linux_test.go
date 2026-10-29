@@ -44,7 +44,7 @@ func serveAgent(t *testing.T, path, version string) *countingListener {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		agent.Serve(ctx, cl, version)
+		agent.Serve(ctx, cl, version, nil)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
 	return cl

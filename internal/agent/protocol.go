@@ -30,8 +30,18 @@ type ExecRequest struct {
 
 // Version is the body of GET /v1/version.
 type Version struct {
-	Protocol int    `json:"protocol"`
-	Agent    string `json:"agent"`
+	Protocol int      `json:"protocol"`
+	Agent    string   `json:"agent"`
+	Features []string `json:"features,omitempty"`
+}
+
+// FeatureShutdown in Version.Features means the agent serves POST
+// /v1/shutdown. Agents older than it, and those in containers, lack it.
+const FeatureShutdown = "shutdown"
+
+// ShutdownRequest is the body of POST /v1/shutdown.
+type ShutdownRequest struct {
+	GraceMS int64 `json:"grace_ms,omitempty"`
 }
 
 // message is a JSON control message; Type says which other fields are set.

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,8 @@ var (
 	apiTimeout   = 5 * time.Second  // firecracker start to its API socket accepting
 	agentTimeout = 30 * time.Second // InstanceStart to the agent answering
 	stopTimeout  = 10 * time.Second // each stage of Stop before the next, harsher one
+	// shutdownGrace is how long guest processes get to exit after SIGTERM.
+	shutdownGrace = agent.DefaultShutdownGrace
 )
 
 // Driver is the Firecracker backend. All its state is in the sandbox
@@ -551,22 +554,41 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), stopTimeout)
 }
 
-// shutdownGuest flushes and freezes the guest's root filesystem, which
-// leaves it consistent on disk with a clean journal, and reboots the guest
-// with sysrq. It then waits for firecracker to exit, which reboot=k (x86_64)
-// or PSCI (arm64) makes it do.
-// shortcut: guest processes get no SIGTERM first (writers block on the frozen
-// filesystem and die with the VM), because SendCtrlAltDel needs an i8042
-// driver the pinned kernel lacks (CONFIG_SERIO is off) and the image has no
-// reboot command; add an agent shutdown endpoint for that.
+// shutdownGuest asks the guest agent to stop the guest's processes, SIGTERM
+// then SIGKILL after shutdownGrace, remount / read-only and reboot. It then
+// waits for firecracker to exit, which reboot=k (x86_64) or PSCI (arm64)
+// makes it do. Agents without the shutdown endpoint get freezeAndReboot.
 func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
-	ctx, cancel := context.WithTimeout(ctx, stopTimeout)
+	ctx, cancel := context.WithTimeout(ctx, shutdownGrace+stopTimeout)
 	defer cancel()
 	c := d.agent(l)
 	defer c.CloseIdleConnections()
-	run := func(script string) (*agent.Session, error) {
-		return c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", script}}, io.Discard, io.Discard)
+	v, err := c.Version(ctx)
+	if err != nil {
+		return err
 	}
+	if !slices.Contains(v.Features, agent.FeatureShutdown) {
+		return freezeAndReboot(ctx, c, l)
+	}
+	if err := c.Shutdown(ctx, shutdownGrace); err != nil {
+		// The reboot can cut the reply short.
+		if waitExit(ctx, l, time.Second) == nil {
+			return nil
+		}
+		// The agent is up but could not remount / read-only, for example
+		// because a process survived SIGKILL; the freeze still works.
+		slog.Warn("guest shutdown failed; freezing its disk instead", "err", err)
+		return freezeAndReboot(ctx, c, l)
+	}
+	return waitExit(ctx, l, stopTimeout)
+}
+
+// freezeAndReboot flushes and freezes the guest's root filesystem, which
+// leaves it consistent on disk with a clean journal, and reboots the guest
+// with sysrq, for images whose agent has no shutdown endpoint. Guest
+// processes get no signal first: writers block on the frozen filesystem and
+// die with the VM.
+func freezeAndReboot(ctx context.Context, c *agent.Client, l layout) error {
 	// Unlike a read-only remount, the freeze succeeds while guest processes
 	// have files open for writing.
 	var out bytes.Buffer
@@ -582,7 +604,7 @@ func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
 	// this command never exits. Keep ctx alive
 	// until firecracker does: cancelling it would close the session and could
 	// make the agent kill the command first.
-	if _, err := run("echo b > /proc/sysrq-trigger"); err != nil {
+	if _, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", "echo b > /proc/sysrq-trigger"}}, io.Discard, io.Discard); err != nil {
 		return err
 	}
 	return waitExit(ctx, l, stopTimeout)

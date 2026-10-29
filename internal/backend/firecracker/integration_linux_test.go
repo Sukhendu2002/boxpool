@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,6 +41,7 @@ func TestIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	d, id, l, run := newSandbox(t, ctx, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1})
+	shutdown := false // whether the guest agent serves POST /v1/shutdown
 	stop := func() {
 		t.Helper()
 		start := time.Now()
@@ -74,6 +76,12 @@ func TestIntegration(t *testing.T) {
 			t.Errorf("List does not show %s running: %+v", id, list)
 		}
 		if boot == 1 {
+			v, err := d.agent(l).Version(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			shutdown = slices.Contains(v.Features, agent.FeatureShutdown)
+			t.Logf("agent %s, shutdown endpoint: %v", v.Agent, shutdown)
 			// nproc follows the virtual CPU count. Linux reserves some of
 			// the configured 512 MiB for its kernel, so MemTotal is lower.
 			out := run(`test "$(nproc)" -eq 1 && awk '/^MemTotal:/ { print; if ($2 < 419430 || $2 > 524288) exit 1 }' /proc/meminfo && test "$(blockdev --getsize64 /dev/vda)" -eq 1073741824 && df -k /`)
@@ -112,11 +120,23 @@ func TestIntegration(t *testing.T) {
 		} else if got := run("cat /root/stop-test"); got != "kept\n" {
 			t.Errorf("file written before Stop: %q, want kept", got)
 		}
+		if boot == 3 && shutdown {
+			if got := run("cat /root/term-marker"); got != "done\n" {
+				t.Errorf("marker written on SIGTERM during Stop: %q, want done", got)
+			}
+		}
 		if boot == 2 {
 			// A process writing through an open file while Stop runs; it
 			// stays in the background after the exec session ends.
 			run("sh -c 'exec 3>>/root/busy; while :; do echo x >&3; done' >/dev/null 2>&1 &")
 			run("sleep 0.5; test -s /root/busy")
+			if shutdown {
+				// One writes a marker on SIGTERM; one ignores SIGTERM, so
+				// Stop must SIGKILL it after the grace period.
+				run(`sh -c 'trap "echo done > /root/term-marker; exit 0" TERM; while :; do sleep 0.1; done' >/dev/null 2>&1 &`)
+				run(`sh -c 'trap "" TERM; while :; do sleep 0.1; done' >/dev/null 2>&1 &`)
+				run("sleep 0.5")
+			}
 		}
 		if boot < 3 {
 			stop()
@@ -124,6 +144,9 @@ func TestIntegration(t *testing.T) {
 		if boot == 2 {
 			fsck(t, l.rootfs)
 		}
+	}
+	if shutdown {
+		return // fsfreeze is only the fallback for agents without shutdown
 	}
 	// Without fsfreeze, Stop still stops the VM but reports it as unclean.
 	run("mv /usr/sbin/fsfreeze /root/")
@@ -264,6 +287,11 @@ func newSandbox(t *testing.T, ctx context.Context, spec backend.Spec) (*Driver, 
 	paths, err := artifacts.Fetch(ctx, filepath.Join(home, artifacts.DirName))
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A locally built rootfs-<arch>.ext4.zst, to test an image before it is
+	// published and pinned; it is unpacked next to it.
+	if p := os.Getenv("BOXPOOL_TEST_ROOTFS"); p != "" {
+		paths.Rootfs = p
 	}
 	d, err := New(ctx, home, paths, nil)
 	if err != nil {

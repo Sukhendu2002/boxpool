@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,6 +24,12 @@ import (
 // about 104 bytes.
 func serve(t *testing.T) *Client {
 	t.Helper()
+	return serveShutdown(t, nil)
+}
+
+// serveShutdown is serve with POST /v1/shutdown served by shutdown.
+func serveShutdown(t *testing.T, shutdown *Shutdown) *Client {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "bpa")
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +42,7 @@ func serve(t *testing.T) *Client {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, l, "test") }()
+	go func() { done <- Serve(ctx, l, "test", shutdown) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -103,7 +110,7 @@ func run(t *testing.T, c *Client, req ExecRequest, stdin string) (stdout, stderr
 
 func TestVersion(t *testing.T) {
 	v, err := serve(t).Version(context.Background())
-	if err != nil || v != (Version{Protocol: ProtocolVersion, Agent: "test"}) {
+	if err != nil || !reflect.DeepEqual(v, Version{Protocol: ProtocolVersion, Agent: "test"}) {
 		t.Errorf("Version() = %+v, %v", v, err)
 	}
 }
@@ -289,7 +296,7 @@ func TestServeStopKillsSessions(t *testing.T) {
 	}
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, l, "test") }()
+	go func() { done <- Serve(ctx, l, "test", nil) }()
 	c := NewClient(func(ctx context.Context) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, "unix", sock)

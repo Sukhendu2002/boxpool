@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -179,8 +180,9 @@ func (l vsockListener) Accept() (net.Conn, error) {
 	return c, err
 }
 
-// fakeAgent serves a guest agent on l's vsock socket.
-func fakeAgent(t *testing.T, l layout) {
+// fakeAgent serves a guest agent on l's vsock socket, with POST
+// /v1/shutdown if shutdown is not nil.
+func fakeAgent(t *testing.T, l layout, shutdown *agent.Shutdown) {
 	t.Helper()
 	os.Remove(l.vsock)
 	ln, err := agent.Listen("unix:" + l.vsock)
@@ -189,8 +191,28 @@ func fakeAgent(t *testing.T, l layout) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	served := make(chan error, 1)
-	go func() { served <- agent.Serve(ctx, vsockListener{ln}, "test") }()
+	go func() { served <- agent.Serve(ctx, vsockListener{ln}, "test", shutdown) }()
 	t.Cleanup(func() { cancel(); <-served })
+}
+
+// TestShutdownGuest stops a VM through its agent's shutdown endpoint, whose
+// reboot ends the fake firecracker.
+func TestShutdownGuest(t *testing.T) {
+	root := t.TempDir()
+	d := &Driver{root: root}
+	fc, l := fakeFirecracker(t, root, "vm", "--api-sock", sandboxLayout(root, "vm").api)
+	fakeAgent(t, l, &agent.Shutdown{
+		Pids:    func() ([]int, error) { return nil, nil },
+		Kill:    func(int, syscall.Signal) error { return nil },
+		Remount: func() error { return nil },
+		Reboot:  func() error { return fc.Process.Kill() },
+	})
+	if err := d.shutdownGuest(context.Background(), l); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := running(l); ok {
+		t.Error("firecracker still runs after shutdownGuest")
+	}
 }
 
 func TestAdopt(t *testing.T) {
@@ -198,7 +220,7 @@ func TestAdopt(t *testing.T) {
 	d := &Driver{root: root}
 	// Its agent answers: a booted VM, adopted.
 	booted, bl := fakeFirecracker(t, root, "booted", "--api-sock", sandboxLayout(root, "booted").api)
-	fakeAgent(t, bl)
+	fakeAgent(t, bl, nil)
 	// No agent, as when the daemon died while the VM booted: killed.
 	orphan, ol := fakeFirecracker(t, root, "orphan", "--api-sock", sandboxLayout(root, "orphan").api)
 	// A pid file naming a process that is not this sandbox's firecracker,
@@ -252,7 +274,7 @@ func TestAdoptInterruptedProbe(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if mode == "cancelled" {
-				fakeAgent(t, l)
+				fakeAgent(t, l, nil)
 				if err := d.ping(ctx, l); err != nil {
 					t.Fatal(err)
 				}
@@ -288,7 +310,7 @@ func TestAdoptInterruptedProbe(t *testing.T) {
 				c.Close()
 				ln.Close()
 				if mode == "retry-agent" {
-					fakeAgent(t, l)
+					fakeAgent(t, l, nil)
 				}
 			}
 			select {

@@ -19,7 +19,7 @@ func TestAdoptUninitialized(t *testing.T) {
 	root := t.TempDir()
 	d := &Driver{root: root}
 	vm, l := fakeFirecracker(t, root, "fresh", "--api-sock", sandboxLayout(root, "fresh").api)
-	fakeAgent(t, l)
+	fakeAgent(t, l, nil)
 	if err := os.WriteFile(filepath.Join(l.dir, "fresh"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
