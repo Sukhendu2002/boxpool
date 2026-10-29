@@ -28,6 +28,7 @@ import (
 
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/backend"
+	"boxpool.run/boxpool/internal/resources"
 	"boxpool.run/boxpool/internal/store"
 )
 
@@ -84,6 +85,12 @@ type CreateRequest struct {
 	// From is a snapshot to copy a new sandbox's disk from. Its disk is at
 	// least the snapshot's size.
 	From string `json:"from,omitempty"`
+	// OS, Arch and Node constrain where the head places a new sandbox: the
+	// node's OS (linux, darwin or macos) and architecture (amd64, arm64),
+	// and a label it must have.
+	OS   string `json:"os,omitempty"`
+	Arch string `json:"arch,omitempty"`
+	Node string `json:"node,omitempty"`
 }
 
 // SnapshotRequest is the body of POST /v1/sandboxes/{name}/snapshot.
@@ -127,6 +134,9 @@ type Sandbox struct {
 	// cleanly (backend.ErrUncleanStop): it is stopped, but its disk may be
 	// inconsistent. Pause sets it when it stopped the sandbox instead.
 	Warning string `json:"warning,omitempty"`
+	// Node is the name of the node the sandbox is on, when the head lists
+	// another node's sandbox.
+	Node string `json:"node,omitempty"`
 }
 
 // DefaultTokenTTL is how long a join token is valid by default.
@@ -163,6 +173,11 @@ type server struct {
 	joining   bool       // a role transition is in progress; guarded by poolMu
 	snapshots string     // directory of the snapshot files, named by ID
 	info      Info
+	capacity  *resources.Manager
+	placeMu   sync.Mutex    // serialises placement and discovery of new names
+	reportMu  sync.Mutex    // serialises changing nodes' reports
+	tunnels   tunnels       // to the nodes, on a head
+	poolDone  chan struct{} // closed when the pool API shuts down
 }
 
 // Handler returns the daemon's HTTP API. Without a driver, the sandbox
@@ -172,7 +187,8 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 }
 
 func newServer(info Info, st *store.Store, d Driver) *server {
-	return &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), info: info}
+	return &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), info: info,
+		capacity: &resources.Manager{StateDir: info.StateDir}, poolDone: make(chan struct{})}
 }
 
 func (s *server) handler() http.Handler {
@@ -183,24 +199,26 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.info)
 	})
-	mux.HandleFunc("POST /v1/sandboxes", s.backendOnly(s.create))
-	mux.HandleFunc("GET /v1/sandboxes", s.backendOnly(s.list))
-	mux.HandleFunc("GET /v1/sandboxes/{name}", s.backendOnly(s.get))
-	mux.HandleFunc("POST /v1/sandboxes/{name}/start", s.backendOnly(s.start))
-	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.backendOnly(s.stop))
-	mux.HandleFunc("POST /v1/sandboxes/{name}/pause", s.backendOnly(s.pause))
-	mux.HandleFunc("POST /v1/sandboxes/{name}/resume", s.backendOnly(s.resume))
-	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.backendOnly(s.remove))
-	mux.HandleFunc("POST /v1/sandboxes/{name}/snapshot", s.backendOnly(s.snapshot))
+	// A head runs a sandbox it does not have on the node that has it.
+	mux.HandleFunc("POST /v1/sandboxes", s.place(s.backendOnly(s.create)))
+	mux.HandleFunc("GET /v1/sandboxes", s.list)
+	mux.HandleFunc("GET /v1/sandboxes/{name}", s.route(s.backendOnly(s.get)))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/start", s.route(s.backendOnly(s.start)))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.route(s.backendOnly(s.stop)))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/pause", s.route(s.backendOnly(s.pause)))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/resume", s.route(s.backendOnly(s.resume)))
+	mux.HandleFunc("DELETE /v1/sandboxes/{name}", s.route(s.backendOnly(s.remove)))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/snapshot", s.route(s.backendOnly(s.snapshot)))
 	mux.HandleFunc("GET /v1/snapshots", s.backendOnly(s.listSnapshots))
 	mux.HandleFunc("DELETE /v1/snapshots/{name}", s.backendOnly(s.removeSnapshot))
-	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.backendOnly(s.exec))
-	mux.HandleFunc("GET /v1/sandboxes/{name}/files", s.backendOnly(s.files))
-	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.backendOnly(s.files))
+	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.route(s.backendOnly(s.exec)))
+	mux.HandleFunc("GET /v1/sandboxes/{name}/files", s.route(s.backendOnly(s.files)))
+	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.route(s.backendOnly(s.files)))
 	mux.HandleFunc("POST /v1/tokens", s.createToken)
 	mux.HandleFunc("DELETE /v1/tokens/{hash}", s.revokeToken)
-	mux.HandleFunc("GET /v1/nodes", listNodes(s.info, s.st))
+	mux.HandleFunc("GET /v1/nodes", s.listNodes)
 	mux.HandleFunc("POST /v1/pool/join", s.joinPool)
+	mux.HandleFunc("PUT /v1/labels", s.setLabels)
 	return mux
 }
 
@@ -381,17 +399,39 @@ func (s *server) get(w http.ResponseWriter, r *http.Request) {
 }
 
 // list returns every sandbox in the store, oldest first, so a restarted
-// daemon still reports the sandboxes an earlier one created.
+// daemon still reports the sandboxes an earlier one created. A head then
+// lists its nodes' sandboxes as they last reported them, unreachable while
+// their node is.
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
-	records, err := s.st.List(r.Context())
-	if err == nil {
-		var list []Sandbox
-		if list, err = s.live(r.Context(), records); err == nil {
-			writeJSON(w, list)
+	members, err := s.members(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	list := []Sandbox{}
+	if s.d != nil {
+		records, err := s.st.List(r.Context())
+		if err == nil {
+			list, err = s.live(r.Context(), records)
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+	} else if len(members) == 0 {
+		s.backendOnly(nil)(w, r)
+		return
 	}
-	writeError(w, http.StatusInternalServerError, err)
+	for _, m := range members {
+		for _, sb := range m.Sandboxes {
+			sb.Node = m.Name
+			if !m.ready {
+				sb.State = StateUnreachable
+			}
+			list = append(list, sb)
+		}
+	}
+	writeJSON(w, list)
 }
 
 // live returns records as the API reports them, with the driver's live

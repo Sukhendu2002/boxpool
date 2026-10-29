@@ -140,3 +140,18 @@ func TestLsStopRm(t *testing.T) {
 		}
 	}
 }
+
+func TestLsTableNodes(t *testing.T) {
+	var b bytes.Buffer
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	writeTable(&b, []daemon.Sandbox{
+		{Name: "here", Backend: "firecracker", State: "running", CPUs: 1, MemoryMB: 512, CreatedAt: now},
+		{Name: "there", Backend: "virtualization framework", State: daemon.StateUnreachable, CPUs: 2, MemoryMB: 2048, CreatedAt: now, Node: "mac"},
+	}, now)
+	want := "NAME    BACKEND                    STATE         CPU   MEMORY   AGE   NODE\n" +
+		"here    firecracker                running       1     512m     0s    -\n" +
+		"there   virtualization framework   unreachable   2     2g       0s    mac\n"
+	if b.String() != want {
+		t.Errorf("table =\n%s\nwant\n%s", b.String(), want)
+	}
+}

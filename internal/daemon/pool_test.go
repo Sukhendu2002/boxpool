@@ -171,8 +171,21 @@ func TestJoinPool(t *testing.T) {
 	}
 	// Without a client certificate, only joining is open.
 	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
-	if resp, err := hc.Get(pool.URL + "/v1/nodes"); err != nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("GET /v1/nodes without a certificate = %v, %v", resp, err)
+	defer hc.CloseIdleConnections()
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/nodes"},
+		{http.MethodPost, "/v1/heartbeat"},
+		{http.MethodGet, "/v1/tunnel"},
+	} {
+		req, _ := http.NewRequest(tc.method, pool.URL+tc.path, nil)
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s without a certificate = %s", tc.method, tc.path, resp.Status)
+		}
 	}
 
 	// A node is in one pool and is not a head.

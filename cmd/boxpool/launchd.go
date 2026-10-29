@@ -488,7 +488,7 @@ func launchdOnly(cmd string) bool {
 
 func upLaunchd(args []string) int {
 	if len(args) != 0 {
-		fmt.Fprint(os.Stderr, "Usage: boxpool up\n\nInstalls this binary in the state directory and runs it as the launch\nagent "+agentLabel+", then waits until the daemon is healthy. The\nbinary must be signed with the virtualization entitlement\n(scripts/dev-sign.sh). Run it as yourself, not root.\n")
+		fmt.Fprint(os.Stderr, "Usage: boxpool up [--label LABEL,...]\n\nInstalls this binary in the state directory and runs it as the launch\nagent "+agentLabel+", then waits until the daemon is healthy. The\nbinary must be signed with the virtualization entitlement\n(scripts/dev-sign.sh). Run it as yourself, not root.\n"+labelUsage)
 		return 2
 	}
 	if !launchdOnly("up") {

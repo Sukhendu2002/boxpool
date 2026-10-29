@@ -49,11 +49,14 @@ func sh(args []string) int {
 	disk := fs.String("disk", "", "disk of a new sandbox, e.g. 20g (default 10g)")
 	from := fs.String("from", "", "snapshot to copy a new sandbox's disk from (see boxpool snapshot)")
 	restart := fs.String("restart", "no", "restart policy of a new sandbox: always boots it again if the daemon starts and finds it stopped, as after a host reboot")
+	osName := fs.String("os", "", "on a head, put a new sandbox on a node with this OS: linux or macos")
+	arch := fs.String("arch", "", "on a head, put a new sandbox on a node with this architecture: amd64 or arm64")
+	node := fs.String("node", "", "on a head, put a new sandbox on a node with this label (see boxpool node label)")
 	timing := fs.Bool("timing", false, "print the time from the command's start to the shell's first output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	req := daemon.CreateRequest{Name: *name, CPUs: *cpu, Restart: *restart, From: *from}
+	req := daemon.CreateRequest{Name: *name, CPUs: *cpu, Restart: *restart, From: *from, OS: *osName, Arch: *arch, Node: *node}
 	var err error
 	if req.MemoryMB, err = parseSize(*mem, 1); err == nil {
 		req.DiskGB, err = parseSize(*disk, 1024)

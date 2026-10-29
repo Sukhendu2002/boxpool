@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,12 +70,32 @@ func systemdOnly(cmd string) bool {
 	return false
 }
 
+// up installs and starts the daemon, then sets this machine's labels to
+// those --label gives, if any.
 func up(args []string) int {
-	if runtime.GOOS == "darwin" {
-		return upLaunchd(args)
+	fs := flag.NewFlagSet("up", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // the usage each installer prints covers it
+	labels := fs.String("label", "", "")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		args = []string{"-h"}
+	} else {
+		args = nil
 	}
+	labelsSet := false
+	fs.Visit(func(f *flag.Flag) { labelsSet = labelsSet || f.Name == "label" })
+	install := upSystemd
+	if runtime.GOOS == "darwin" {
+		install = upLaunchd
+	}
+	if code := install(args); code != 0 || !labelsSet {
+		return code
+	}
+	return setLabels("up", *labels)
+}
+
+func upSystemd(args []string) int {
 	if len(args) != 0 {
-		fmt.Fprint(os.Stderr, "Usage: boxpool up\n\nInstalls this binary as "+installPath+" and runs it as the systemd\nservice boxpool, then waits until the daemon is healthy. Needs root.\n")
+		fmt.Fprint(os.Stderr, "Usage: boxpool up [--label LABEL,...]\n\nInstalls this binary as "+installPath+" and runs it as the systemd\nservice boxpool, then waits until the daemon is healthy. Needs root.\n"+labelUsage)
 		return 2
 	}
 	if !systemdOnly("up") {

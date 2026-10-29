@@ -61,11 +61,15 @@ started without sudo is instead used by the same user, with the same
 ```sh
 boxpool up            # install and start the daemon on this machine
 boxpool down          # stop the daemon, keeping its state
-boxpool join <token>  # add another machine to the pool (planned)
+boxpool token create --join          # on the head: a token to add a machine
+boxpool join <token>  # add this machine to the head's pool
+boxpool node label gpu,always-on     # labels sh --node picks machines by
 boxpool sh            # open a shell in a new sandbox
+boxpool sh --os macos # on the head: on a node with this OS (or --arch, --node)
 boxpool exec box -- make test        # run a command in a sandbox
 boxpool cp ./src box:/root/          # copy files in or out
-boxpool ls            # list sandboxes (nodes too, once pools exist)
+boxpool ls            # list sandboxes; on the head, its nodes' too
+boxpool ls --nodes    # on the head: the pool's machines, ready or unreachable
 boxpool stop box      # stop a sandbox
 boxpool start box     # start it again, with its disk
 boxpool pause box     # pause a sandbox, keeping its memory
@@ -79,8 +83,25 @@ boxpool doctor        # check whether this machine can host sandboxes
 Working today, on one Linux machine: `boxpool doctor`, `boxpool daemon`,
 `boxpool up`, `boxpool down`, `boxpool sh`, `boxpool exec`, `boxpool cp`,
 `boxpool ls`, `boxpool start`, `boxpool stop`, `boxpool pause`, `boxpool resume`,
-`boxpool rm`, `boxpool snapshot` and `boxpool version`. `join` is
-not implemented yet.
+`boxpool rm`, `boxpool snapshot` and `boxpool version`. In a pool, `sh`,
+`exec`, `cp` and sandbox lifecycle commands on the head run on the node
+that owns the sandbox.
+
+Nodes report their capacity, labels and sandboxes to the head every five
+seconds over mutual TLS. After 30 seconds without a heartbeat, the head
+lists the node and its sandboxes as `unreachable`, keeping their records.
+The next heartbeat restores the node's actual sandbox states. Nodes open
+outbound connections to the head; they need no inbound pool port.
+
+Set labels with `boxpool up --label gpu,always-on` or replace them later
+with `boxpool node label gpu,always-on`; `boxpool node label ""` clears
+them. On the head, `boxpool sh --os macos`, `--arch arm64` and `--node gpu`
+filter where a new sandbox can run. Among matching nodes with enough CPU
+and memory after existing reservations and the host reserve (one CPU and
+the larger of 1 GiB or 10% of memory), the head picks the most free memory,
+then the fewest sandboxes. Existing sandbox names always return to their
+owning node. Snapshots stay on their original machine; list, remove and
+restore them using that machine's local CLI.
 
 `sudo boxpool up` installs the node on a Linux machine with systemd: it
 runs doctor's checks and refuses if they fail, copies the running binary

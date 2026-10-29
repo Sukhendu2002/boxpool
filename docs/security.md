@@ -120,7 +120,12 @@ taken, the daemon logs a warning and runs without it.
   request. It trusts the head only if the head's chain contains the CA
   whose SHA-256 is in the token, so a token pins the head.
 - A node dials the head; the head never dials a node. In M4 the node must
-  reach the head directly, over a LAN or a tailnet.
+  reach the head directly, over a LAN or a tailnet. The node reports to
+  the head every 5 seconds (`POST /v1/heartbeat`) and keeps four requests
+  to `GET /v1/tunnel` waiting there; the head answers one with 101 to send
+  the node a request for one of its sandboxes over that connection.
+- The head can therefore send a node any request of the node's local API,
+  as a local user of the node could: the head is trusted with every node.
 - A machine cannot join its own pool or join another pool while it has
   nodes. While joining, it refuses registrations and token creation.
   Once joined, its old tokens cannot register nodes, even before the old
