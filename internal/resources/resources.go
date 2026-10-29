@@ -258,6 +258,18 @@ func free(c Capacity, existing []Allocation) (cpus int, memMB, diskBytes, reserv
 // Free returns the CPUs and MiB of memory Create could admit now, as the
 // scheduler compares nodes.
 func (m *Manager) Free(ctx context.Context) (cpus int, memoryMB int64, err error) {
+	r, err := m.Summary(ctx)
+	return r.CPUs, r.MemoryMB, err
+}
+
+// Summary is admission capacity: totals exclude the host reserve; free
+// capacity also excludes commitments and memory in active use.
+type Summary struct {
+	CPUs, TotalCPUs         int
+	MemoryMB, TotalMemoryMB int64
+}
+
+func (m *Manager) Summary(ctx context.Context) (r Summary, err error) {
 	err = m.locked(ctx, func() error {
 		existing, err := m.allocations()
 		if err != nil {
@@ -271,10 +283,12 @@ func (m *Manager) Free(ctx context.Context) (cpus int, memoryMB int64, err error
 		if err != nil {
 			return fmt.Errorf("read host capacity: %w", err)
 		}
-		cpus, memoryMB, _, _ = free(c, existing)
+		r.CPUs, r.MemoryMB, _, _ = free(c, existing)
+		r.TotalCPUs = max(0, len(c.CPUs)-1)
+		r.TotalMemoryMB = max(0, c.MemoryMB-max(int64(1024), (c.MemoryMB+9)/10))
 		return nil
 	})
-	return cpus, memoryMB, err
+	return r, err
 }
 
 // CPUSet is the Docker Engine's comma-separated list of logical CPU IDs.

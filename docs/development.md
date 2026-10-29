@@ -86,6 +86,41 @@ Artifacts are cached in `~/Library/Caches/boxpool-test`, or
 growing ext4. CI builds and runs unit tests with cgo on macOS; Linux and
 Windows do not compile the framework binding.
 
+## Pool status, console logs and Mac power checks
+
+Use a signed binary and a scratch `BOXPOOL_HOME`, so these checks do not
+restart your installed daemon. Start `bin/boxpool daemon` in one terminal;
+use the same `BOXPOOL_HOME` in another:
+
+1. Create two VMs with `bin/boxpool sh --name power-a --cpu 1 --mem 512m --disk 1g`
+   and `power-b` with the same flags; exit each shell without stopping it.
+2. `pmset -g assertions | grep 'boxpool: running sandboxes'` must show one
+   `PreventUserIdleSystemSleep` assertion belonging to the daemon PID.
+3. `bin/boxpool logs -f power-a` must show a marker sent from another terminal:
+   `bin/boxpool exec power-a -- sh -c 'echo marker > /dev/console'`.
+   Ctrl-C must stop following. `bin/boxpool logs --daemon` must show startup.
+4. Stop `power-a`: the assertion must remain. Pause `power-b`: it must
+   disappear. Resume `power-b`: it must reappear. Stop it: it must disappear.
+5. Restart the scratch daemon with `--allow-sleep`, then start `power-a`:
+   no boxpool assertion should appear. Stop/remove the scratch VMs and daemon.
+   `boxpool up --allow-sleep` should put that flag in its launch agent's
+   `ProgramArguments`; plain `boxpool up` restores the default.
+6. Unplug the laptop: `bin/boxpool doctor` and `bin/boxpool ls --nodes`
+   must warn `on battery`; reconnect AC and the warning must disappear.
+   For a joined Mac, check on the head after the next heartbeat (five seconds).
+7. With a second node joined, compare `ls` and `ls --nodes` to each node's
+   local list, then disconnect that node for over 30 seconds: its sandboxes
+   must remain `unreachable`; its log requests must fail naming that node.
+
+On 2026-10-29, macOS/arm64 testing with two real 512 MiB VMs passed steps
+1–5's foreground-daemon checks, including console snapshot/follow, daemon
+logs, stop/pause/resume assertion transitions and `--allow-sleep`. The
+launch-agent flag has unit coverage. The machine was on AC: unplug/replug
+and a two-physical-node check were not run. The in-process mTLS/tunnel pool
+test covers remote log snapshot/follow and unreachable sandbox retention.
+Idle-sleep prevention does not prevent explicit or lid-close sleep; keep
+laptops plugged in with lids open unless macOS clamshell requirements are met.
+
 ## Releases
 
 Pushing a `vX.Y.Z` tag (or `vX.Y.Z-suffix`, published as a pre-release) on a

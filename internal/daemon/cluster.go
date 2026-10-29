@@ -23,6 +23,7 @@ import (
 
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/backend"
+	"boxpool.run/boxpool/internal/power"
 	"boxpool.run/boxpool/internal/store"
 )
 
@@ -42,10 +43,13 @@ const StateUnreachable backend.State = "unreachable"
 // CPUs and MemoryMB are what a new sandbox could have, after the host
 // reserve and existing sandboxes.
 type Report struct {
-	CPUs      int       `json:"cpu"`
-	MemoryMB  int64     `json:"mem_mb"`
-	Labels    []string  `json:"labels"`
-	Sandboxes []Sandbox `json:"sandboxes"`
+	CPUs          int       `json:"cpu"`
+	MemoryMB      int64     `json:"mem_mb"`
+	Labels        []string  `json:"labels"`
+	Sandboxes     []Sandbox `json:"sandboxes"`
+	TotalCPUs     int       `json:"total_cpu,omitempty"`
+	TotalMemoryMB int64     `json:"total_mem_mb,omitempty"`
+	Warning       string    `json:"warning,omitempty"`
 }
 
 // Labels is the body of PUT /v1/labels: this machine's labels, which
@@ -110,12 +114,15 @@ func saveLabels(dir string, data []byte) error {
 func (s *server) report(ctx context.Context) (Report, error) {
 	labels, err := readLabels(s.info.StateDir)
 	if err != nil || s.d == nil {
-		return Report{Labels: labels, Sandboxes: []Sandbox{}}, err
+		return Report{Labels: labels, Sandboxes: []Sandbox{}, Warning: power.BatteryWarning()}, err
 	}
-	r := Report{Labels: labels}
-	if r.CPUs, r.MemoryMB, err = s.capacity.Free(ctx); err != nil {
+	r := Report{Labels: labels, Warning: power.BatteryWarning()}
+	capacity, err := s.capacity.Summary(ctx)
+	if err != nil {
 		return r, err
 	}
+	r.CPUs, r.MemoryMB = capacity.CPUs, capacity.MemoryMB
+	r.TotalCPUs, r.TotalMemoryMB = capacity.TotalCPUs, capacity.TotalMemoryMB
 	records, err := s.st.List(ctx)
 	if err == nil {
 		r.Sandboxes, err = s.live(ctx, records)

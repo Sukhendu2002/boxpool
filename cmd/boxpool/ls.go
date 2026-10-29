@@ -84,13 +84,13 @@ func writeJSONList(w io.Writer, list []daemon.Sandbox) {
 func writeTable(w io.Writer, list []daemon.Sandbox, now time.Time) {
 	pool := slices.ContainsFunc(list, func(sb daemon.Sandbox) bool { return sb.Node != "" })
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	header := "NAME\tBACKEND\tSTATE\tCPU\tMEMORY\tAGE"
+	header := "NAME\tBACKEND\tOS\tSTATE\tCPU\tMEMORY\tAGE"
 	if pool {
 		header += "\tNODE"
 	}
 	fmt.Fprintln(tw, header)
 	for _, sb := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s", sb.Name, sb.Backend, sb.State, sb.CPUs, mebibytes(sb.MemoryMB), age(now.Sub(sb.CreatedAt)))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\t%s", sb.Name, sb.Backend, cmp.Or(sb.OS, "-"), sb.State, sb.CPUs, mebibytes(sb.MemoryMB), age(now.Sub(sb.CreatedAt)))
 		if pool {
 			fmt.Fprintf(tw, "\t%s", cmp.Or(sb.Node, "-"))
 		}

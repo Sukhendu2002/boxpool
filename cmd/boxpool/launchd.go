@@ -28,12 +28,13 @@ const exitTimeOut = 60 * time.Second
 // user: a launch agent in the gui/<uid> domain, which launchd starts at
 // every login.
 type launchAgent struct {
-	label string
-	plist string // the plist file
-	bin   string // the installed binary
-	log   string // the daemon's stdout and stderr
-	home  string // BOXPOOL_HOME for the daemon, or "" for the default
-	lock  string // serialises up and down
+	label      string
+	plist      string // the plist file
+	bin        string // the installed binary
+	log        string // the daemon's stdout and stderr
+	home       string // BOXPOOL_HOME for the daemon, or "" for the default
+	lock       string // serialises up and down
+	allowSleep bool
 }
 
 // userAgent returns the launch agent for this user. A BOXPOOL_HOME set at
@@ -93,8 +94,11 @@ func agentPlist(a launchAgent) []byte {
 	<array>
 		<string>` + esc(a.bin) + `</string>
 		<string>daemon</string>
-	</array>
 `)
+	if a.allowSleep {
+		b.WriteString("\t\t<string>--allow-sleep</string>\n")
+	}
+	b.WriteString("\t</array>\n")
 	if a.home != "" {
 		b.WriteString(`	<key>EnvironmentVariables</key>
 	<dict>
@@ -487,8 +491,9 @@ func launchdOnly(cmd string) bool {
 }
 
 func upLaunchd(args []string) int {
-	if len(args) != 0 {
-		fmt.Fprint(os.Stderr, "Usage: boxpool up [--label LABEL,...]\n\nInstalls this binary in the state directory and runs it as the launch\nagent "+agentLabel+", then waits until the daemon is healthy. The\nbinary must be signed with the virtualization entitlement\n(scripts/dev-sign.sh). Run it as yourself, not root.\n"+labelUsage)
+	allowSleep := len(args) == 1 && args[0] == "--allow-sleep"
+	if len(args) != 0 && !allowSleep {
+		fmt.Fprint(os.Stderr, "Usage: boxpool up [--allow-sleep] [--label LABEL,...]\n\nInstalls this binary in the state directory and runs it as the launch\nagent "+agentLabel+", then waits until the daemon is healthy. The\nbinary must be signed with the virtualization entitlement\n(scripts/dev-sign.sh). Run it as yourself, not root.\n"+labelUsage)
 		return 2
 	}
 	if !launchdOnly("up") {
@@ -510,6 +515,7 @@ func upLaunchd(args []string) int {
 		fmt.Fprintf(os.Stderr, "boxpool up: read this binary: %v\n", err)
 		return 1
 	}
+	a.allowSleep = allowSleep
 	if err := upAgent(a, exe, bin); err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool up: %v\n", err)
 		return 1

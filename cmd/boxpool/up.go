@@ -76,10 +76,14 @@ func up(args []string) int {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // the usage each installer prints covers it
 	labels := fs.String("label", "", "")
+	allowSleep := fs.Bool("allow-sleep", false, "")
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		args = []string{"-h"}
 	} else {
 		args = nil
+		if *allowSleep {
+			args = []string{"--allow-sleep"}
+		}
 	}
 	labelsSet := false
 	fs.Visit(func(f *flag.Flag) { labelsSet = labelsSet || f.Name == "label" })

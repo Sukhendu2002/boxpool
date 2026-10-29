@@ -130,6 +130,17 @@ unless the binary or the plist changed, in which case it restarts the
 daemon. `boxpool down` stops the agent, which stops its VMs, and removes
 the plist; the state directory and the installed binary are kept.
 
+While a Mac has running sandboxes, the daemon holds a `boxpool` IOKit
+`PreventUserIdleSystemSleep` assertion; stopping or pausing the last one
+releases it. VM exits outside the API are detected within a second.
+Use `boxpool up --allow-sleep` (saved in the launch agent) or
+`boxpool daemon --allow-sleep` to opt out. A later `boxpool up` without
+that flag restores sleep prevention. `doctor` and `ls --nodes` warn when a
+Mac is on battery; the head sees a node's power source at its next heartbeat.
+This prevents **idle sleep only**, not explicit sleep or lid-close sleep.
+Keep laptops plugged in and their lids open; closed-lid operation requires
+an external display and macOS's other clamshell requirements.
+
 `boxpool daemon` runs the node daemon in the foreground. It creates the state
 directory (below), takes `daemon.lock` there so only one daemon runs per state
 directory, and serves a local HTTP API on `boxpool.sock` (mode 0660) until
@@ -200,9 +211,31 @@ are refused, and set-user-ID and set-group-ID bits are dropped. The API is
 `GET` and `PUT /v1/sandboxes/{name}/files?path=`, which relay the agent's
 tar endpoints unchanged.
 
-`boxpool ls [--json]` lists this machine's sandboxes, oldest first, with
-their name, backend, state, CPUs, memory and age; the state is the
-backend's live one (`missing` if the backend no longer has the sandbox).
+`boxpool ls [--json]` lists local sandboxes followed by the head's nodes'
+sandboxes, with name, backend, host OS, state, CPUs, memory and age, plus a
+node column when remote sandboxes exist. Local state is live (`missing` if
+the backend no longer has the sandbox); remote state comes from heartbeats.
+An unreachable node's last-known sandboxes stay listed as `unreachable`.
+`boxpool ls --nodes [--json]` shows node health, labels and free CPU/memory
+capacity bars. Bars show free admission capacity against totals after the
+host reserve, not instantaneous CPU utilization; stopped sandboxes keep
+their reservations. Unreachable rows are last-known values; `?` means an
+older node did not report totals.
+
+`boxpool logs [-f] <sandbox>` reads the current sandbox console log, routed
+to its node. `boxpool logs [-f] --daemon` reads this node's daemon log.
+`-f` follows output until Ctrl-C. Flags precede the sandbox name. VM logs
+are serial-console output, not shell/exec session output; send an entry
+with `boxpool exec <sandbox> -- sh -c 'echo hello > /dev/console'`.
+Docker logs are the container's main process stdout/stderr, likewise not
+exec output. VM console and daemon files rotate at about 1 MiB, retaining
+one previous file; `logs` reads only the current file. Following handles
+renames and observed truncations, but copy-truncate rotation may lose
+output between polls; this is not a durable log delivery service.
+Daemon logs are also saved as `daemon.log` in the state directory, including
+foreground runs. The API is `GET /v1/sandboxes/{name}/logs` or `GET /v1/logs`,
+with `?follow=true` to stream.
+
 `boxpool stop <name>` shuts a sandbox down and keeps its disk and its
 resource reservation. `boxpool start <name>` boots a stopped sandbox from
 that disk, including after a daemon or host restart; on Docker only `/root`

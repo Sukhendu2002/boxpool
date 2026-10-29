@@ -1,0 +1,3 @@
+NAME    BACKEND                    OS       STATE         CPU   MEMORY   AGE   NODE
+here    firecracker                linux    running       1     512m     0s    -
+there   virtualization framework   darwin   unreachable   2     2g       0s    mac

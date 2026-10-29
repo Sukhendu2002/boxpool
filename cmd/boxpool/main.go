@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -37,8 +39,8 @@ Commands:
             node --os, --arch and --node pick
   exec      run a command in a sandbox
   cp        copy files between this machine and a sandbox
-  ls        list this machine's sandboxes, and a head's nodes'; or with
-            --nodes the pool's machines
+  ls        list pool sandboxes; --nodes shows node health and capacity
+  logs      show sandbox console or --daemon logs; -f follows output
   start     start a stopped sandbox with its disk
   stop      stop a sandbox
   pause     pause a running sandbox, keeping its memory (not on Docker)
@@ -70,6 +72,8 @@ func main() {
 		os.Exit(cp(os.Args[2:]))
 	case "ls":
 		os.Exit(ls(os.Args[2:]))
+	case "logs":
+		os.Exit(logsCmd(os.Args[2:]))
 	case "start":
 		os.Exit(start(os.Args[2:]))
 	case "stop":
@@ -127,16 +131,28 @@ func printReport(r preflight.Report) {
 }
 
 func runDaemon() int {
+	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	allowSleep := fs.Bool("allow-sleep", false, "allow idle sleep while sandboxes run (macOS)")
+	if err := fs.Parse(os.Args[2:]); err != nil || fs.NArg() != 0 {
+		return 2
+	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	dir, err := preflight.StateDir()
 	if err != nil {
 		slog.Error("could not find state directory", "err", err)
 		return 1
 	}
+	log, err := daemon.OpenLog(dir)
+	if err != nil {
+		slog.Error("could not open daemon log", "err", err)
+		return 1
+	}
+	defer log.Close()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, log), nil)))
 	r := preflight.Run()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	info := daemon.Info{Version: version, OS: r.OS, Arch: r.Arch, StateDir: dir, Backend: r.Backend, Warning: r.Warning}
+	info := daemon.Info{Version: version, OS: r.OS, Arch: r.Arch, StateDir: dir, Backend: r.Backend, Warning: r.Warning, AllowSleep: *allowSleep}
 	if err := daemon.Run(ctx, dir, info); err != nil {
 		slog.Error("daemon failed", "err", err)
 		return 1

@@ -30,11 +30,14 @@ type Node struct {
 	JoinedAt time.Time `json:"joined_at,omitzero"`
 	// State is ready, or unreachable while the node misses heartbeats.
 	// CPUs and MemoryMB are free for new sandboxes, as it last reported.
-	State    string    `json:"state"`
-	Labels   []string  `json:"labels"`
-	CPUs     int       `json:"cpu"`
-	MemoryMB int64     `json:"mem_mb"`
-	SeenAt   time.Time `json:"seen_at,omitzero"`
+	State         string    `json:"state"`
+	Labels        []string  `json:"labels"`
+	CPUs          int       `json:"cpu"`
+	MemoryMB      int64     `json:"mem_mb"`
+	SeenAt        time.Time `json:"seen_at,omitzero"`
+	TotalCPUs     int       `json:"total_cpu,omitempty"`
+	TotalMemoryMB int64     `json:"total_mem_mb,omitempty"`
+	Warning       string    `json:"warning,omitempty"`
 }
 
 // JoinPoolRequest is the body of POST /v1/pool/join.
@@ -158,14 +161,15 @@ func (s *server) listNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host, _ := os.Hostname()
-	list := []Node{{Name: host, Role: "head", OS: s.info.OS, Arch: s.info.Arch, State: "ready", Labels: self.Labels, CPUs: self.CPUs, MemoryMB: self.MemoryMB}}
+	list := []Node{{Name: host, Role: "head", OS: s.info.OS, Arch: s.info.Arch, State: "ready", Labels: self.Labels, CPUs: self.CPUs, MemoryMB: self.MemoryMB, TotalCPUs: self.TotalCPUs, TotalMemoryMB: self.TotalMemoryMB, Warning: self.Warning}}
 	for _, m := range members {
 		state := "ready"
 		if !m.ready {
 			state = string(StateUnreachable)
 		}
 		list = append(list, Node{ID: m.ID, Name: m.Name, Role: "node", OS: m.OS, Arch: m.Arch, JoinedAt: m.JoinedAt,
-			State: state, Labels: m.Labels, CPUs: m.CPUs, MemoryMB: m.MemoryMB, SeenAt: m.SeenAt})
+			State: state, Labels: m.Labels, CPUs: m.CPUs, MemoryMB: m.MemoryMB, SeenAt: m.SeenAt,
+			TotalCPUs: m.TotalCPUs, TotalMemoryMB: m.TotalMemoryMB, Warning: m.Warning})
 	}
 	writeJSON(w, list)
 }

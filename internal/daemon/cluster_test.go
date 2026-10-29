@@ -123,7 +123,8 @@ func TestReportsSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, _ := json.Marshal(Report{Sandboxes: []Sandbox{{ID: "a", Name: "kept", State: backend.StateRunning}}})
+	report, _ := json.Marshal(Report{CPUs: 3, MemoryMB: 2048, TotalCPUs: 7, TotalMemoryMB: 8192,
+		Warning: "on battery", Sandboxes: []Sandbox{{ID: "a", Name: "kept", State: backend.StateRunning}}})
 	if err := st.SetNodeReport(ctx, node.ID, report, time.Now().Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +140,14 @@ func TestReportsSurviveRestart(t *testing.T) {
 	defer srv.Close()
 	if got := states(list(t, srv)); got != "kept=unreachable" {
 		t.Errorf("list after head restart = %s", got)
+	}
+	_, body := call(t, srv, "GET", "/v1/nodes")
+	var nodes []Node
+	if err := json.Unmarshal([]byte(body), &nodes); err != nil || len(nodes) != 2 {
+		t.Fatalf("nodes after restart = %s, %v", body, err)
+	}
+	if n := nodes[1]; n.State != "unreachable" || n.TotalCPUs != 7 || n.TotalMemoryMB != 8192 || n.Warning != "on battery" {
+		t.Errorf("node report after restart = %+v", n)
 	}
 	// On reconnect, the node's new report is authoritative, including
 	// sandboxes removed or created while it was offline.
@@ -258,6 +267,11 @@ func TestPoolRouting(t *testing.T) {
 	head, headServer, headDriver := poolMachine(t, "linux")
 	pool := poolServer(t, headServer, nil)
 	node, nodeServer, nodeDriver := poolMachine(t, "darwin")
+	consolePath := filepath.Join(nodeServer.info.StateDir, "console.log")
+	if err := os.WriteFile(consolePath, []byte("remote console\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	nodeServer.d = &consoleDriver{nodeDriver, consolePath}
 	if code, body := send(t, node, "PUT", "/v1/labels", `{"labels":["gpu","always-on","gpu"]}`); code != http.StatusOK || body != `{"labels":["always-on","gpu"]}`+"\n" {
 		t.Fatalf("set labels = %d %s", code, body)
 	}
@@ -291,10 +305,31 @@ func TestPoolRouting(t *testing.T) {
 		t.Errorf("head list = %s", got)
 	}
 	for _, sb := range list(t, head) {
+		wantOS := "darwin"
+		if sb.Name == "local" {
+			wantOS = "linux"
+		}
+		if sb.OS != wantOS {
+			t.Errorf("sandbox %s OS = %q, want %q", sb.Name, sb.OS, wantOS)
+		}
 		if (sb.Node == "") != (sb.Name == "local") {
 			t.Errorf("head lists sandbox %s on node %q", sb.Name, sb.Node)
 		}
 	}
+
+	if code, body := call(t, head, "GET", "/v1/sandboxes/mac/logs"); code != http.StatusOK || body != "remote console\n" {
+		t.Errorf("logs through the head = %d %q", code, body)
+	}
+	reqLogs, _ := http.NewRequestWithContext(ctx, "GET", head.URL+"/v1/sandboxes/mac/logs?follow=true", nil)
+	respLogs, err := head.Client().Do(reqLogs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logBytes := make([]byte, len("remote console\n"))
+	if _, err := io.ReadFull(respLogs.Body, logBytes); err != nil || string(logBytes) != "remote console\n" {
+		t.Fatalf("follow through the head = %q, %v", logBytes, err)
+	}
+	respLogs.Body.Close()
 
 	// exec, over a WebSocket through the tunnel.
 	conn, _, err := execWS(ctx, t, head, "mac")

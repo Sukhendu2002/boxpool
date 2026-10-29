@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"boxpool.run/boxpool/internal/backend/docker"
+	"boxpool.run/boxpool/internal/power"
 )
 
 // Check is the result of one preflight check.
@@ -185,6 +186,9 @@ func darwinChecks() ([]Check, string) {
 		ver.Detail = v
 	}
 	checks = append(checks, ver)
+	if warning := power.BatteryWarning(); warning != "" {
+		checks = append(checks, Check{Name: "power source", Warn: true, Detail: warning})
+	}
 
 	if arch.OK && ver.OK {
 		return checks, "virtualization framework"

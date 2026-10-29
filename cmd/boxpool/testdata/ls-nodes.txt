@@ -1,0 +1,4 @@
+NAME      ROLE   STATE         OS       ARCH    FREE CPU           FREE MEMORY          LABELS   JOINED   WARNING
+head      head   ready         linux    amd64   [#####-----] 4/8   [#####-----] 4g/8g   -        -        -
+mac       node   ready         darwin   arm64   [#####-----] 3/6   [##--------] 2g/8g   gpu      1h       on battery: connect AC power for reliable long-running sandboxes
+offline   node   unreachable   linux    arm64   [??????????] 0/?   [??????????] 0g/?    -        3d       -
