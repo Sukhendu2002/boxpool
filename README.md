@@ -62,6 +62,7 @@ started without sudo is instead used by the same user, with the same
 boxpool up            # install and start the daemon on this machine
 boxpool down          # stop the daemon, keeping its state
 boxpool token create --join          # on the head: a token to add a machine
+boxpool token create --join --transport tailscale  # use the head's tailnet IP
 boxpool join <token>  # add this machine to the head's pool
 boxpool node label gpu,always-on     # labels sh --node picks machines by
 boxpool promote       # in a pool of two whose head is gone: become the head
@@ -91,8 +92,27 @@ that owns the sandbox.
 Nodes report their capacity, labels and sandboxes to the head every five
 seconds over mutual TLS. After 30 seconds without a heartbeat, the head
 lists the node and its sandboxes as `unreachable`, keeping their records.
-The next heartbeat restores the node's actual sandbox states. Nodes open
-outbound connections to the head; they need no inbound pool port.
+The next heartbeat restores the node's actual sandbox states. Joining,
+heartbeats and request tunnels use outbound connections to the head.
+Nodes selected as replicas also accept pool connections from their peers.
+
+For machines on different networks, connect each to the same Tailscale or
+Headscale tailnet using the system Tailscale client, then create the join
+token on the head with `boxpool token create --join --transport tailscale`.
+Use the printed token with the usual `boxpool join <token>`; `sh`, `exec`
+and the other commands stay the same. Tailnet policy and host firewalls
+must allow TCP port 7443 between pool machines, including replicas; no
+router port forwarding is needed. The head continues listening on its LAN
+and tailnet interfaces with pool authentication on both.
+
+`direct` remains the default transport. `--addr host:port` overrides
+automatic address discovery with either transport. Tailscale discovery
+times out after five seconds (plus up to one second closing inherited
+output pipes). Both transports use system sockets, with join pinning and
+mutual TLS layered above them. The system client must provide OS routing;
+userspace-only tailscaled networking is unsupported. See the
+[transport checks](docs/development.md#pool-transport) for automated and
+phone-hotspot verification steps.
 
 Set labels with `boxpool up --label gpu,always-on` or replace them later
 with `boxpool node label gpu,always-on`; `boxpool node label ""` clears

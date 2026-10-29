@@ -23,6 +23,7 @@ import (
 
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/store"
+	"boxpool.run/boxpool/internal/transport"
 )
 
 // The head's state, its nodes with their last reports and its join tokens,
@@ -556,7 +557,7 @@ func (s *server) peerStatus(ctx context.Context, addr string) (RaftStatus, error
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
+	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg, DialContext: transport.DialContext}}
 	defer hc.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+addr+"/v1/pool/raft", nil)
 	if err != nil {
@@ -685,7 +686,9 @@ func (l *raftLayer) Dial(addr raft.ServerAddress, timeout time.Duration) (net.Co
 		return nil, err
 	}
 	cfg.NextProtos = []string{raftProtocol}
-	c, err := tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", string(addr), cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c, err := transport.DialTLS(ctx, string(addr), cfg)
 	if err != nil {
 		return nil, err
 	}

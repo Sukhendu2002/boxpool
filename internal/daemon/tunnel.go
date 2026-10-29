@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"boxpool.run/boxpool/internal/auth"
+	"boxpool.run/boxpool/internal/transport"
 )
 
 // A node keeps tunnelsPerNode requests to GET /v1/tunnel waiting on the
@@ -145,7 +146,9 @@ func (l *headListener) open() (net.Conn, error) {
 	if head == "" {
 		return nil, errors.New("this machine is the head")
 	}
-	c, err := (&tls.Dialer{Config: l.cfg, NetDialer: &net.Dialer{Timeout: 10 * time.Second}}).DialContext(l.ctx, "tcp", head)
+	ctx, cancel := context.WithTimeout(l.ctx, 10*time.Second)
+	c, err := transport.DialTLS(ctx, head, l.cfg)
+	cancel()
 	if err != nil {
 		return nil, err
 	}

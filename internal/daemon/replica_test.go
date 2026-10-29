@@ -236,6 +236,38 @@ func revoke(t *testing.T, p *poolDaemon, tok string) (int, string) {
 	return send(t, p.local, "DELETE", "/v1/tokens/"+parsed.Hash(), "")
 }
 
+// TestHeadAddressAfterReplication models adding a tailnet node to a pool
+// originally bootstrapped with an address that node cannot reach.
+func TestHeadAddressAfterReplication(t *testing.T) {
+	fastPool(t)
+	head, node := startPoolDaemon(t, "head"), startPoolDaemon(t, "node")
+	if err := head.s.bootstrap(context.Background(), "192.0.2.1:7443"); err != nil {
+		t.Fatal(err)
+	}
+	joinTo(t, head, node)
+	waitFor(t, "the node to learn the advertised Raft leader", func() bool {
+		rep := node.s.raft.Load()
+		if rep == nil {
+			return false
+		}
+		addr, _ := rep.LeaderWithID()
+		return addr == "192.0.2.1:7443"
+	})
+	if got := node.s.reportTo(); got != head.s.poolAddr {
+		t.Fatalf("reporting to %s, want join address %s", got, head.s.poolAddr)
+	}
+	// New tunnels, not just those opened before replication, must keep
+	// using the reachable address. Restart the node to exercise saved state.
+	node.stop()
+	node = restart(t, node)
+	waitFor(t, "the restarted node's report", func() bool {
+		return nodeStates(t, head)[node.s.selfID()] == "ready"
+	})
+	if code, _, body := post(t, head.local, `{"name":"remote","node":"node"}`); code != http.StatusCreated {
+		t.Fatalf("create through the restarted node's tunnel = %d %s", code, body)
+	}
+}
+
 // TestFailover runs a pool of three in this process: they replicate the
 // head's state with votes, and when the head stops, a new one is elected
 // within 15 s with every sandbox and token.

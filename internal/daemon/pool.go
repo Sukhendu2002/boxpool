@@ -15,6 +15,7 @@ import (
 
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/store"
+	"boxpool.run/boxpool/internal/transport"
 )
 
 // Node is a machine in the pool as GET /v1/nodes reports it. The head
@@ -296,12 +297,13 @@ func (s *server) servePool() error {
 	if err := s.loadPoolTLS(); err != nil {
 		return err
 	}
-	l, err := tls.Listen("tcp", s.poolAddr, &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
-		return s.poolTLS.Load(), nil
-	}})
+	raw, err := transport.ForAddress(s.poolAddr).Listen(context.Background(), s.poolAddr)
 	if err != nil {
 		return err
 	}
+	l := tls.NewListener(raw, &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		return s.poolTLS.Load(), nil
+	}})
 	srv := &http.Server{Handler: s.poolHandler(), ReadHeaderTimeout: 10 * time.Second,
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){raftProtocol: s.acceptRaft}}
 	srv.RegisterOnShutdown(func() { close(s.poolDone) }) // answers waiting tunnels

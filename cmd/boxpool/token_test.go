@@ -4,15 +4,19 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/daemon"
+	"boxpool.run/boxpool/internal/transport"
 )
 
 func TestTokenCmd(t *testing.T) {
@@ -97,5 +101,39 @@ func TestTokenCreateTailscale(t *testing.T) {
 	}
 	if code, _, errOut := cli(t, dir, "", "token", "create", "--join", "--transport", "wireguard"); code != 2 || !strings.Contains(errOut, "unknown --transport") {
 		t.Errorf("token create --transport wireguard = %d %q", code, errOut)
+	}
+	// Explicit addresses and invalid arguments must not invoke discovery.
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 99\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := cli(t, dir, "", "token", "create", "--join", "--transport", "tailscale", "--addr", "head.example:7443")
+	tok, err := auth.ParseJoinToken(strings.TrimSpace(out))
+	if code != 0 || err != nil || tok.Addr != "head.example:7443" {
+		t.Errorf("explicit address override = %d %q %q, %v", code, out, errOut, err)
+	}
+	if code, _, errOut := cli(t, dir, "", "token", "create", "--join", "--transport", "tailscale", "--ttl", "0s"); code != 2 || !strings.Contains(errOut, "--ttl must be positive") {
+		t.Errorf("invalid ttl before discovery = %d %q", code, errOut)
+	}
+}
+
+func TestTailnetAddrTimeout(t *testing.T) {
+	bin := t.TempDir()
+	// exec lets CommandContext kill the sleeping process itself.
+	script := "#!/bin/sh\ntouch \"$0.started\"\nexec sleep 30\n"
+	fake := filepath.Join(bin, "tailscale")
+	if err := os.WriteFile(fake, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	start := time.Now()
+	addr, err := (transport.Tailscale{}).Address(context.Background(), auth.JoinPort)
+	if addr != "" || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("tailnetAddr = %q, %v; want deadline exceeded", addr, err)
+	}
+	if elapsed := time.Since(start); elapsed > 8*time.Second {
+		t.Fatalf("discovery took %v after its deadline", elapsed)
+	}
+	if _, err := os.Stat(fake + ".started"); err != nil {
+		t.Fatalf("fake tailscale did not start: %v", err)
 	}
 }
