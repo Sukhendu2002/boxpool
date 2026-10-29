@@ -138,30 +138,116 @@ func Join(ctx context.Context, tok JoinToken, dir string, req JoinRequest) (stri
 		return "", fmt.Errorf("check the signed certificate: %w", err)
 	}
 
+	return out.ID, save(dir, key, out.Cert, out.CA, tok.Addr)
+}
+
+// Enroll makes the head that holds ca and caKey a node of its own pool,
+// with ID id at addr, as Join does for other machines, so that it can
+// follow another head after a failover.
+func Enroll(dir string, ca *x509.Certificate, caKey crypto.Signer, id, addr string) error {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return err
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	if err != nil {
+		return err
+	}
+	csr, err := ParseCSR(der)
+	if err != nil {
+		return err
+	}
+	cert, err := SignNode(ca, caKey, csr, id)
+	if err != nil {
+		return err
+	}
+	return save(dir, key, cert, ca.Raw, addr)
+}
+
+// save writes a node's key, certificate, head CA and head address to
+// dir/PoolDir.
+func save(dir string, key *ecdsa.PrivateKey, cert, ca []byte, head string) error {
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return "", err
+		return err
 	}
 	tmp := filepath.Join(dir, PoolDir+".tmp")
 	if err := os.RemoveAll(tmp); err != nil {
-		return "", err
+		return err
 	}
 	if err := os.Mkdir(tmp, 0700); err != nil {
-		return "", err
+		return err
 	}
 	for name, data := range map[string][]byte{
 		"key.pem":  pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}),
-		"cert.pem": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: out.Cert}),
-		"ca.pem":   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: out.CA}),
-		"head":     []byte(tok.Addr + "\n"),
+		"cert.pem": pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert}),
+		"ca.pem":   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca}),
+		"head":     []byte(head + "\n"),
 	} {
 		if err := os.WriteFile(filepath.Join(tmp, name), data, 0600); err != nil {
-			return "", err
+			return err
 		}
 	}
 	// The rename makes the join visible at once: a node has all four files
 	// or none.
-	return out.ID, os.Rename(tmp, filepath.Join(dir, PoolDir))
+	return os.Rename(tmp, filepath.Join(dir, PoolDir))
+}
+
+// SetHead records addr as the head of the pool this node joined.
+func SetHead(dir, addr string) error {
+	return writeFile(filepath.Join(dir, PoolDir, "head"), []byte(addr+"\n"))
+}
+
+// Peers returns the addresses of the machines that keep a copy of the
+// pool's state, as the head last listed them: where a node looks for a new
+// head.
+func Peers(dir string) ([]string, error) {
+	b, err := os.ReadFile(filepath.Join(dir, PoolDir, "peers"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return strings.Fields(string(b)), err
+}
+
+// SetPeers records the addresses Peers returns.
+func SetPeers(dir string, addrs []string) error {
+	return writeFile(filepath.Join(dir, PoolDir, "peers"), []byte(strings.Join(addrs, "\n")+"\n"))
+}
+
+// writeFile replaces the file at path with data, whole.
+func writeFile(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// InstallCA saves the head CA's key, which a machine needs to keep a copy
+// of the pool's state and take over as head. The CA must be the one this
+// node joined with, so only a holder of that CA's key can install it.
+func InstallCA(dir string, certDER, keyDER []byte) error {
+	b, err := os.ReadFile(filepath.Join(dir, PoolDir, "ca.pem"))
+	if err != nil {
+		return err
+	}
+	if p, _ := pem.Decode(b); p == nil || !bytes.Equal(p.Bytes, certDER) {
+		return errors.New("not the CA of the pool this machine joined")
+	}
+	k, err := x509.ParsePKCS8PrivateKey(keyDER)
+	if err != nil {
+		return err
+	}
+	ca, _ := x509.ParseCertificate(certDER)
+	if signer, ok := k.(crypto.Signer); !ok || ca == nil || !publicKeyEqual(ca.PublicKey, signer.Public()) {
+		return errors.New("the key does not belong to the pool's CA")
+	}
+	return writeCA(dir, certDER, keyDER)
+}
+
+func publicKeyEqual(a, b crypto.PublicKey) bool {
+	k, ok := a.(interface{ Equal(crypto.PublicKey) bool })
+	return ok && k.Equal(b)
 }
 
 // NodeTLS returns the client config of the node whose state directory is

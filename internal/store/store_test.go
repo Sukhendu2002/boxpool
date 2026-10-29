@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/raft"
+
 	"boxpool.run/boxpool/internal/backend"
 )
 
@@ -297,5 +299,76 @@ func TestNodes(t *testing.T) {
 	}
 	if err := s.SetNodeReport(ctx, "nope", nil, seen); !errors.Is(err, ErrNotFound) {
 		t.Errorf("SetNodeReport(unknown) = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRaftStore(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), "state.db")).Raft()
+	if first, err := db.FirstIndex(); first != 0 || err != nil {
+		t.Errorf("FirstIndex() of an empty log = %d, %v", first, err)
+	}
+	logs := []*raft.Log{{Index: 1, Term: 1, Type: raft.LogConfiguration, Data: []byte("a")}, {Index: 2, Term: 1, Type: raft.LogCommand, Data: []byte("b"), Extensions: []byte("x")}, {Index: 3, Term: 2, Type: raft.LogCommand}}
+	if err := db.StoreLogs(logs); err != nil {
+		t.Fatal(err)
+	}
+	var got raft.Log
+	if err := db.GetLog(2, &got); err != nil || !reflect.DeepEqual(&got, logs[1]) {
+		t.Errorf("GetLog(2) = %+v, %v; want %+v", got, err, logs[1])
+	}
+	if err := db.DeleteRange(1, 2); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := db.FirstIndex()
+	last, _ := db.LastIndex()
+	if err := db.GetLog(1, &got); first != 3 || last != 3 || !errors.Is(err, raft.ErrLogNotFound) {
+		t.Errorf("after DeleteRange(1, 2): first %d, last %d, GetLog(1) = %v", first, last, err)
+	}
+
+	if _, err := db.Get([]byte("k")); err == nil || err.Error() != "not found" {
+		t.Errorf("Get() of a missing key = %v, want raft's \"not found\"", err)
+	}
+	if _, err := db.GetUint64([]byte("n")); err == nil || err.Error() != "not found" {
+		t.Errorf("GetUint64() of a missing key = %v, want raft's \"not found\"", err)
+	}
+	db.Set([]byte("k"), []byte("v"))
+	db.SetUint64([]byte("n"), 1<<40)
+	if v, err := db.Get([]byte("k")); string(v) != "v" || err != nil {
+		t.Errorf("Get() = %q, %v", v, err)
+	}
+	if n, err := db.GetUint64([]byte("n")); n != 1<<40 || err != nil {
+		t.Errorf("GetUint64() = %d, %v", n, err)
+	}
+	if err := db.ResetRaft(); err != nil {
+		t.Fatal(err)
+	}
+	if last, _ := db.LastIndex(); last != 0 {
+		t.Errorf("LastIndex() after ResetRaft = %d", last)
+	}
+	if _, err := db.Get([]byte("k")); err == nil {
+		t.Error("ResetRaft kept the stable state")
+	}
+}
+
+func TestPoolState(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "state.db"))
+	t0 := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	want := PoolState{
+		Nodes: []Node{
+			{ID: "a", Name: "head", OS: "linux", Arch: "amd64", JoinedAt: t0, Report: []byte(`{"cpu":1}`), SeenAt: t0.Add(time.Minute)},
+			{ID: "b", Name: "mac", OS: "darwin", Arch: "arm64", JoinedAt: t0.Add(time.Second)},
+		},
+		Tokens: []JoinToken{{Hash: "h1", ExpiresAt: t0.Add(time.Hour)}, {Hash: "h2", ExpiresAt: t0.Add(2 * time.Hour)}},
+	}
+	s.CreateJoinToken(ctx, "stale", t0)
+	s.CreateNode(ctx, Node{Name: "replaced"})
+	if err := s.SetPoolState(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.PoolState(ctx); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("PoolState() = %+v, %v; want %+v", got, err, want)
+	}
+	if err := s.UseJoinToken(ctx, "stale", t0); !errors.Is(err, ErrTokenInvalid) {
+		t.Errorf("a token SetPoolState replaced = %v, want ErrTokenInvalid", err)
 	}
 }

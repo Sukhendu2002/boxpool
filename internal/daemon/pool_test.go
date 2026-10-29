@@ -48,6 +48,7 @@ func machine(t *testing.T, osName string) (*httptest.Server, *server) {
 	}
 	t.Cleanup(func() { st.Close() })
 	s := newServer(info, st, nil)
+	t.Cleanup(s.closePool) // before the store closes
 	srv := httptest.NewServer(s.handler())
 	t.Cleanup(srv.Close)
 	return srv, s
@@ -63,7 +64,7 @@ func poolServer(t *testing.T, s *server, wrap func(http.Handler) http.Handler) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := s.poolHandler(ca, caKey)
+	h := s.poolHandler()
 	if wrap != nil {
 		h = wrap(h)
 	}
@@ -227,7 +228,7 @@ func TestRegisterNodeNames(t *testing.T) {
 			if code, body := registerThroughPool(t, s, pool, req); code != tc.want {
 				t.Fatalf("register = %d %s; want %d", code, body, tc.want)
 			}
-			nodes, err := s.st.ListNodes(context.Background())
+			nodes, err := s.members(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}

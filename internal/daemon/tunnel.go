@@ -108,11 +108,11 @@ type headListener struct {
 	ctx   context.Context
 	stop  context.CancelFunc
 	cfg   *tls.Config
-	head  string
+	head  func() string // "" while this machine is the head
 	conns chan net.Conn
 }
 
-func listenHead(ctx context.Context, cfg *tls.Config, head string) *headListener {
+func listenHead(ctx context.Context, cfg *tls.Config, head func() string) *headListener {
 	ctx, stop := context.WithCancel(ctx)
 	l := &headListener{ctx: ctx, stop: stop, cfg: cfg, head: head, conns: make(chan net.Conn)}
 	for range tunnelsPerNode {
@@ -141,7 +141,11 @@ func (l *headListener) poll() {
 
 // open dials the head and asks for a tunnel until the head switches one.
 func (l *headListener) open() (net.Conn, error) {
-	c, err := (&tls.Dialer{Config: l.cfg, NetDialer: &net.Dialer{Timeout: 10 * time.Second}}).DialContext(l.ctx, "tcp", l.head)
+	head := l.head()
+	if head == "" {
+		return nil, errors.New("this machine is the head")
+	}
+	c, err := (&tls.Dialer{Config: l.cfg, NetDialer: &net.Dialer{Timeout: 10 * time.Second}}).DialContext(l.ctx, "tcp", head)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +189,7 @@ func (l *headListener) Accept() (net.Conn, error) {
 }
 
 func (l *headListener) Close() error   { l.stop(); return nil }
-func (l *headListener) Addr() net.Addr { return headAddr(l.head) }
+func (l *headListener) Addr() net.Addr { return headAddr(l.head()) }
 
 type headAddr string
 

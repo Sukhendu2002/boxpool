@@ -119,11 +119,12 @@ taken, the daemon logs a warning and runs without it.
 - A joining node makes its key itself and sends only a certificate
   request. It trusts the head only if the head's chain contains the CA
   whose SHA-256 is in the token, so a token pins the head.
-- A node dials the head; the head never dials a node. In M4 the node must
-  reach the head directly, over a LAN or a tailnet. The node reports to
-  the head every 5 seconds (`POST /v1/heartbeat`) and keeps four requests
-  to `GET /v1/tunnel` waiting there; the head answers one with 101 to send
-  the node a request for one of its sandboxes over that connection.
+- A node dials the head; the head dials a node only for raft once it is a
+  replica (below). The node must reach the head directly, over a LAN or a
+  tailnet. The node reports to the head every 5 seconds
+  (`POST /v1/heartbeat`) and keeps four requests to `GET /v1/tunnel`
+  waiting there; the head answers one with 101 to send the node a request
+  for one of its sandboxes over that connection.
 - The head can therefore send a node any request of the node's local API,
   as a local user of the node could: the head is trusted with every node.
 - A machine cannot join its own pool or join another pool while it has
@@ -131,6 +132,42 @@ taken, the daemon logs a warning and runs without it.
   Once joined, its old tokens cannot register nodes, even before the old
   head listener closes on restart.
 
+### Replicas and failover
+
+From the pool's second machine on, the head replicates its state (nodes,
+their last reports, and join tokens) with raft to up to three machines,
+itself included: always-on nodes first, then the oldest. With three or
+more machines the replicas vote and elect a new head when the head goes;
+with two, the second keeps a copy without a vote and `boxpool promote`
+makes it the head.
+
+- The head gives each replica the head CA's key, over the node's tunnel,
+  only if it matches the CA the node joined with. A replica is therefore
+  trusted as the head is, and serves port 7443 with the same CA.
+- Raft runs on port 7443: a TLS connection that negotiates the ALPN
+  protocol `boxpool-raft`. Each side presents its node certificate. A
+  replica accepts raft only from a node in its raft configuration, or,
+  before it has one, from the head that made it a replica. Only a holder
+  of the CA serves the head's name, so a node without the key cannot pose
+  as a replica.
+- The head dials replicas for raft, so replicas need port 7443 reachable
+  from the other replicas. Other nodes still only dial out.
+- A node keeps the replicas' addresses (`pool/peers`) and, when the head
+  stops answering, reports to the first one that answers as head.
+  Replicas use Raft's elected leader for their reports and tunnels, so a
+  returning head can follow it even without saved peers.
+- The head commits its local sandbox inventory through Raft before
+  acknowledging a create, start, stop, pause, resume or delete. If it loses
+  leadership during the operation, the local change may have happened,
+  but the request fails rather than acknowledge an unreplicated change.
+- `boxpool promote` refuses while it can reach any other replica. An old
+  head that comes back after a promotion asks the other replicas, finds
+  one leading without it, drops its raft state, and follows that head as
+  a node. The promoted head does not accept its raft connections meanwhile.
+
 Limits: node certificates last as long as the CA (10 years) and cannot be
-revoked yet. Anyone who can reach port 7443 can attempt a handshake;
-restrict it with a host firewall if the network is untrusted.
+revoked yet; a replica keeps the CA key after it stops being one. Anyone
+who can reach port 7443 can attempt a handshake; restrict it with a host
+firewall if the network is untrusted. Join tokens name the head that
+issued them, so a token from before a failover does not reach the new
+head; issue a new one there.

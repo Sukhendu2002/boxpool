@@ -146,7 +146,7 @@ func (s *Store) Create(ctx context.Context, sb Sandbox) (Sandbox, error) {
 	if sb.Spec, err = sb.Spec.WithDefaults(); err != nil {
 		return Sandbox{}, err
 	}
-	sb.ID, sb.CreatedAt = newID(), time.Now().UTC()
+	sb.ID, sb.CreatedAt = NewID(), time.Now().UTC()
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sandboxes (id, name, backend, image, cpus, memory_mb, disk_gb, state, created_at, restart)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -228,7 +228,7 @@ func scan(row interface{ Scan(...any) error }) (Sandbox, error) {
 	return sb, err
 }
 
-func newID() string {
+func NewID() string {
 	id := make([]byte, 6)
 	rand.Read(id)
 	return hex.EncodeToString(id)
@@ -249,7 +249,7 @@ type Snapshot struct {
 // CreateSnapshot stores snap under a new ID and returns it with ID and
 // CreatedAt set.
 func (s *Store) CreateSnapshot(ctx context.Context, snap Snapshot) (Snapshot, error) {
-	snap.ID, snap.CreatedAt = newID(), time.Now().UTC()
+	snap.ID, snap.CreatedAt = NewID(), time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO snapshots (id, name, backend, sandbox, disk_gb, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		snap.ID, snap.Name, snap.Backend, snap.Sandbox, snap.DiskGB, snap.CreatedAt.Format(timeFormat))
@@ -452,10 +452,12 @@ type Node struct {
 	SeenAt time.Time
 }
 
-// CreateNode stores n under a new ID and returns it with ID and JoinedAt
-// set.
+// CreateNode stores n, under a new ID and join time unless it has an ID,
+// and returns it with ID and JoinedAt set.
 func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {
-	n.ID, n.JoinedAt = newID(), time.Now().UTC()
+	if n.ID == "" {
+		n.ID, n.JoinedAt = NewID(), time.Now().UTC()
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO nodes (id, name, os, arch, joined_at) VALUES (?, ?, ?, ?, ?)`,
 		n.ID, n.Name, n.OS, n.Arch, n.JoinedAt.Format(timeFormat))
 	if err != nil {

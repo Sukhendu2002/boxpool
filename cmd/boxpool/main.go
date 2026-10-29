@@ -35,6 +35,7 @@ Commands:
   join      install the daemon as up does and join the pool a token names
   token     create or revoke a single-use token to join this pool
   node      set this machine's labels: node label gpu,always-on
+  promote   make this machine the head of a pool of two whose head is gone
   sh        open a shell in a new or existing sandbox; on a head, on the
             node --os, --arch and --node pick
   exec      run a command in a sandbox
@@ -94,6 +95,8 @@ func main() {
 		os.Exit(tokenCmd(os.Args[2:]))
 	case "join":
 		os.Exit(join(os.Args[2:]))
+	case "promote":
+		os.Exit(promote(os.Args[2:]))
 	case "node":
 		os.Exit(nodeCmd(os.Args[2:]))
 	case "help", "--help", "-h":
