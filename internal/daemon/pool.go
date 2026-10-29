@@ -2,10 +2,8 @@ package daemon
 
 import (
 	"context"
-	"crypto"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -61,14 +59,25 @@ var validNodeField = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`).Mat
 // poolHandler is the head's API for other machines, served with
 // auth.HeadTLS: POST /v1/nodes joins with a token, and every other
 // endpoint needs a client certificate from the head CA. It shares role
-// state with this server's local API.
-func (s *server) poolHandler(ca *x509.Certificate, caKey crypto.Signer) http.Handler {
+// state with this server's local API. A replica that is not the head
+// answers only GET /v1/pool/raft.
+func (s *server) poolHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/nodes", s.registerNode(ca, caKey))
+	mux.HandleFunc("POST /v1/nodes", s.registerNode)
 	mux.Handle("GET /v1/nodes", requireNode(s.listNodes))
 	mux.Handle("POST /v1/heartbeat", requireNode(s.receiveReport))
 	mux.Handle("GET /v1/tunnel", requireNode(s.tunnel))
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/pool/raft" {
+			requireNode(s.raftStatus)(w, r)
+			return
+		}
+		if head, err := s.poolHead(); err != nil || head != "" {
+			writeJoined(w, head, err, "reach the head there instead")
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func requireNode(h http.HandlerFunc) http.HandlerFunc {
@@ -85,68 +94,79 @@ func requireNode(h http.HandlerFunc) http.HandlerFunc {
 
 // registerNode consumes a join token and signs the joining node's
 // certificate request.
-func (s *server) registerNode(ca *x509.Certificate, caKey crypto.Signer) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req auth.JoinRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
-			return
-		}
-		tok, err := auth.ParseJoinToken(req.Token)
-		if err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		if !validNodeName(req.Name) {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid node name %q", req.Name))
-			return
-		}
-		for _, f := range []string{req.OS, req.Arch} {
-			if !validNodeField(f) {
-				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid node name, OS or arch %q", f))
-				return
-			}
-		}
-		csr, err := auth.ParseCSR(req.CSR)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		// Registration and role changes must agree on whether this machine
-		// is still a head, before consuming a token or adding a node.
-		s.poolMu.Lock()
-		defer s.poolMu.Unlock()
-		if !s.notJoined(w, "join nodes through the head instead") {
-			return
-		}
-		// Only now, so a malformed request does not burn the token.
-		err = s.st.UseJoinToken(r.Context(), tok.Hash(), time.Now())
-		if errors.Is(err, store.ErrTokenInvalid) || errors.Is(err, store.ErrTokenExpired) {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		n, err := s.st.CreateNode(context.WithoutCancel(r.Context()), store.Node{Name: req.Name, OS: req.OS, Arch: req.Arch})
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		cert, err := auth.SignNode(ca, caKey, csr, n.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		slog.Info("node joined", "id", n.ID, "name", n.Name, "os", n.OS, "arch", n.Arch)
-		writeJSON(w, auth.JoinResponse{ID: n.ID, Cert: cert, CA: ca.Raw})
+func (s *server) registerNode(w http.ResponseWriter, r *http.Request) {
+	var req auth.JoinRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return
 	}
+	tok, err := auth.ParseJoinToken(req.Token)
+	if err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if !validNodeName(req.Name) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid node name %q", req.Name))
+		return
+	}
+	for _, f := range []string{req.OS, req.Arch} {
+		if !validNodeField(f) {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid node name, OS or arch %q", f))
+			return
+		}
+	}
+	csr, err := auth.ParseCSR(req.CSR)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// Registration and role changes must agree on whether this machine
+	// is still a head, before consuming a token or adding a node.
+	s.poolMu.Lock()
+	defer s.poolMu.Unlock()
+	if !s.notJoined(w, "join nodes through the head instead") {
+		return
+	}
+	// Only now, so a malformed request does not burn the token.
+	ctx := context.WithoutCancel(r.Context())
+	err = s.apply(ctx, command{Op: "use", Hash: tok.Hash(), Time: time.Now()})
+	if errors.Is(err, store.ErrTokenInvalid) || errors.Is(err, store.ErrTokenExpired) {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	// The pool's second machine starts replicating the head's state.
+	if s.raft.Load() == nil {
+		if err := s.bootstrap(ctx, tok.Addr); err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("replicate the head's state: %w", err))
+			return
+		}
+	}
+	n := store.Node{ID: store.NewID(), Name: req.Name, OS: req.OS, Arch: req.Arch, JoinedAt: time.Now().UTC()}
+	if err := s.apply(ctx, command{Op: "node", Node: &n}); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	ca, caKey, err := auth.LoadOrCreateCA(s.info.StateDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	cert, err := auth.SignNode(ca, caKey, csr, n.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	slog.Info("node joined", "id", n.ID, "name", n.Name, "os", n.OS, "arch", n.Arch)
+	writeJSON(w, auth.JoinResponse{ID: n.ID, Cert: cert, CA: ca.Raw})
 }
 
 // listNodes lists the head and the nodes that joined it.
 func (s *server) listNodes(w http.ResponseWriter, r *http.Request) {
-	if head, err := auth.Head(s.info.StateDir); err != nil || head != "" {
+	if head, err := s.poolHead(); err != nil || head != "" {
 		writeJoined(w, head, err, "run boxpool ls --nodes on the head")
 		return
 	}
@@ -182,7 +202,7 @@ func (s *server) notJoined(w http.ResponseWriter, instead string) bool {
 		writeError(w, http.StatusConflict, errors.New("this machine is joining another pool; try again after the join finishes"))
 		return false
 	}
-	head, err := auth.Head(s.info.StateDir)
+	head, err := s.poolHead()
 	if err != nil || head != "" {
 		writeJoined(w, head, err, instead)
 		return false
@@ -191,6 +211,10 @@ func (s *server) notJoined(w http.ResponseWriter, instead string) bool {
 }
 
 func writeJoined(w http.ResponseWriter, head string, err error, instead string) {
+	if errors.Is(err, errNoHead) {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -207,7 +231,7 @@ func (s *server) beginJoin(w http.ResponseWriter, ctx context.Context, tok auth.
 		return false
 	}
 	// Its nodes would be left with a head that no longer serves them.
-	if nodes, err := s.st.ListNodes(ctx); err != nil {
+	if nodes, err := s.members(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return false
 	} else if len(nodes) > 0 {
@@ -262,34 +286,63 @@ func (s *server) joinPool(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, JoinPoolResponse{ID: id, Head: tok.Addr})
 }
 
-// servePool serves poolHandler on auth.JoinPort, creating the head CA
-// first if there is none, unless this machine joined another pool. The
-// returned stop shuts it down.
-func (s *server) servePool() (stop func(), err error) {
-	if head, err := auth.Head(s.info.StateDir); err != nil || head != "" {
-		return func() {}, err
+// servePool serves poolHandler, and raft, on s.poolAddr, creating the
+// head CA first if there is none, until closePool. It does nothing if it
+// is already serving. The caller must hold poolMu or be starting up.
+func (s *server) servePool() error {
+	if s.stopPool != nil {
+		return nil
 	}
-	ca, key, err := auth.LoadOrCreateCA(s.info.StateDir)
+	if err := s.loadPoolTLS(); err != nil {
+		return err
+	}
+	l, err := tls.Listen("tcp", s.poolAddr, &tls.Config{GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		return s.poolTLS.Load(), nil
+	}})
 	if err != nil {
-		return nil, fmt.Errorf("head CA: %w", err)
+		return err
 	}
-	cfg, err := auth.HeadTLS(ca, key)
-	if err != nil {
-		return nil, err
-	}
-	l, err := tls.Listen("tcp", ":"+auth.JoinPort, cfg)
-	if err != nil {
-		return nil, err
-	}
-	srv := &http.Server{Handler: s.poolHandler(ca, key), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: s.poolHandler(), ReadHeaderTimeout: 10 * time.Second,
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){raftProtocol: s.acceptRaft}}
 	srv.RegisterOnShutdown(func() { close(s.poolDone) }) // answers waiting tunnels
 	go srv.Serve(l)
 	slog.Info("serving the pool API", "addr", l.Addr())
-	return func() {
+	s.stopPool = func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if srv.Shutdown(ctx) != nil {
 			srv.Close()
 		}
-	}, nil
+	}
+	return nil
+}
+
+// loadPoolTLS sets the pool port's TLS from the head CA, creating it if
+// there is none. A node that becomes a replica serves the pool's CA from
+// then on.
+func (s *server) loadPoolTLS() error {
+	ca, key, err := auth.LoadOrCreateCA(s.info.StateDir)
+	if err != nil {
+		return fmt.Errorf("head CA: %w", err)
+	}
+	cfg, err := auth.HeadTLS(ca, key)
+	if err != nil {
+		return err
+	}
+	cfg.NextProtos = []string{raftProtocol, "http/1.1"}
+	s.poolTLS.Store(cfg)
+	return nil
+}
+
+// closePool stops raft, then the pool API.
+func (s *server) closePool() {
+	if err := s.stopRaft(); err != nil {
+		slog.Warn("raft shutdown", "err", err)
+	}
+	s.poolMu.Lock()
+	defer s.poolMu.Unlock()
+	if s.stopPool != nil {
+		s.stopPool()
+		s.stopPool = nil
+	}
 }

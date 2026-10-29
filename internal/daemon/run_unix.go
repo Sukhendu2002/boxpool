@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/store"
 )
 
@@ -108,12 +109,23 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	if err := removePartialSnapshots(dir); err != nil {
 		return err
 	}
+	// A replica of the head's state resumes it, and serves the pool port
+	// as a head does, for raft and in case it becomes the head.
+	if me, ok := s.storedIdentity(); ok {
+		if err := s.startRaft(me, raftResume); err != nil {
+			slog.Error("cannot resume the replica of the pool's state; this machine cannot be the head", "err", err)
+		}
+	}
+	defer s.closePool()
 	// Other machines joining is optional: a busy port must not stop the
 	// daemon serving this machine.
-	if stopPool, err := s.servePool(); err != nil {
-		slog.Warn("not serving the pool API; other machines cannot join this one", "err", err)
-	} else {
-		defer stopPool()
+	if head, err := auth.Head(dir); err != nil || head == "" || s.raft.Load() != nil {
+		if err == nil {
+			err = s.servePool()
+		}
+		if err != nil {
+			slog.Warn("not serving the pool API; other machines cannot join this one", "err", err)
+		}
 	}
 
 	// Shutdown ignores hijacked connections, so exec sessions would outlive

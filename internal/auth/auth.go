@@ -113,19 +113,21 @@ func LoadOrCreateCA(dir string) (*x509.Certificate, crypto.Signer, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	// The key first: a key without a certificate is regenerated next time.
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
-		return nil, nil, err
-	}
-	tmp := certPath + ".tmp"
-	if err := os.WriteFile(tmp, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
-		return nil, nil, err
-	}
-	if err := os.Rename(tmp, certPath); err != nil {
+	if err := writeCA(dir, der, keyDER); err != nil {
 		return nil, nil, err
 	}
 	ca, err := x509.ParseCertificate(der)
 	return ca, key, err
+}
+
+// writeCA saves the head CA certificate and key in dir.
+func writeCA(dir string, der, keyDER []byte) error {
+	certPath, keyPath := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")
+	// The key first: a key without a certificate is regenerated next time.
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		return err
+	}
+	return writeFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
 func loadCA(certPath string, certPEM []byte, keyPath string) (*x509.Certificate, crypto.Signer, error) {

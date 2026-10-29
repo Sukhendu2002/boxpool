@@ -216,6 +216,7 @@ func poolMachine(t *testing.T, osName string) (*httptest.Server, *server, *fakeD
 	t.Cleanup(func() { st.Close() })
 	d := newFakeDriver(t, dir)
 	s := newServer(Info{OS: osName, Arch: "arm64", StateDir: dir}, st, d)
+	t.Cleanup(s.closePool) // before the store closes
 	s.capacity.Probe = func(string) (resources.Capacity, error) {
 		return resources.Capacity{CPUs: []int{0, 1, 2, 3, 4, 5, 6, 7}, MemoryMB: 16384, AvailableMB: 16384}, nil
 	}

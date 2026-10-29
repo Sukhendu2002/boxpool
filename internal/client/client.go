@@ -193,6 +193,14 @@ func (c *Client) JoinPool(ctx context.Context, token string) (daemon.JoinPoolRes
 	return out, err
 }
 
+// Promote makes this machine its pool's head, from its replica of the
+// pool's state, once the old head is gone.
+func (c *Client) Promote(ctx context.Context) (daemon.PromoteResponse, error) {
+	var out daemon.PromoteResponse
+	err := c.do(ctx, http.MethodPost, "/v1/pool/promote", nil, &out)
+	return out, err
+}
+
 // ListNodes returns the head of this machine's pool and its nodes.
 func (c *Client) ListNodes(ctx context.Context) ([]daemon.Node, error) {
 	var list []daemon.Node

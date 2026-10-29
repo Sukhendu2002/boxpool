@@ -64,11 +64,12 @@ boxpool down          # stop the daemon, keeping its state
 boxpool token create --join          # on the head: a token to add a machine
 boxpool join <token>  # add this machine to the head's pool
 boxpool node label gpu,always-on     # labels sh --node picks machines by
+boxpool promote       # in a pool of two whose head is gone: become the head
 boxpool sh            # open a shell in a new sandbox
 boxpool sh --os macos # on the head: on a node with this OS (or --arch, --node)
 boxpool exec box -- make test        # run a command in a sandbox
 boxpool cp ./src box:/root/          # copy files in or out
-boxpool ls            # list sandboxes; on the head, its nodes' too
+boxpool ls            # list sandboxes; on the head or a replica, the pool's too
 boxpool ls --nodes    # on the head: the pool's machines, ready or unreachable
 boxpool stop box      # stop a sandbox
 boxpool start box     # start it again, with its disk

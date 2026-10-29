@@ -50,7 +50,15 @@ type Report struct {
 	TotalCPUs     int       `json:"total_cpu,omitempty"`
 	TotalMemoryMB int64     `json:"total_mem_mb,omitempty"`
 	Warning       string    `json:"warning,omitempty"`
+	// Port is the node's pool port, which the head sets Addr from, with the
+	// host the report came from, for the node to serve as a replica.
+	Port string `json:"pool_port,omitempty"`
+	Addr string `json:"addr,omitempty"`
 }
+
+// peersHeader, on the head's answer to a heartbeat, lists the replicas'
+// addresses: where the node looks for a new head.
+const peersHeader = "Boxpool-Peers"
 
 // Labels is the body of PUT /v1/labels: this machine's labels, which
 // boxpool sh --node picks nodes by.
@@ -116,7 +124,8 @@ func (s *server) report(ctx context.Context) (Report, error) {
 	if err != nil || s.d == nil {
 		return Report{Labels: labels, Sandboxes: []Sandbox{}, Warning: power.BatteryWarning()}, err
 	}
-	r := Report{Labels: labels, Warning: power.BatteryWarning()}
+	_, port, _ := net.SplitHostPort(s.poolAddr)
+	r := Report{Labels: labels, Warning: power.BatteryWarning(), Port: port}
 	capacity, err := s.capacity.Summary(ctx)
 	if err != nil {
 		return r, err
@@ -131,7 +140,8 @@ func (s *server) report(ctx context.Context) (Report, error) {
 }
 
 // serveHead waits until this machine joins a pool, then reports to the
-// head and serves the head's requests with srv, until ctx ends.
+// head and serves the head's requests with srv, until ctx ends. It pauses
+// while this machine is the head.
 func (s *server) serveHead(ctx context.Context, srv *http.Server) {
 	t := time.NewTicker(heartbeatInterval)
 	defer t.Stop()
@@ -152,28 +162,65 @@ func (s *server) serveHead(ctx context.Context, srv *http.Server) {
 		slog.Error("cannot load this node's pool certificate; the head cannot reach it", "err", err)
 		return
 	}
+	s.id.Store(cfg.Certificates[0].Leaf.Subject.CommonName)
+	s.head.Store(head)
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.heartbeat(ctx, cfg, head)
+		s.heartbeat(ctx, cfg)
 	}()
-	srv.Serve(listenHead(ctx, cfg, head))
+	srv.Serve(listenHead(ctx, cfg, s.reportTo))
 	stop()
 	<-done
 }
 
+// reportTo returns the head this node reports to, or "" while it is the
+// head.
+func (s *server) reportTo() string {
+	if s.leading.Load() {
+		return ""
+	}
+	head, _ := s.head.Load().(string)
+	return head
+}
+
 // heartbeat sends this node's report to the head every heartbeatInterval
-// until ctx ends, logging when the head stops and starts answering.
-func (s *server) heartbeat(ctx context.Context, cfg *tls.Config, head string) {
+// until ctx ends, logging when the head stops and starts answering. When
+// the head does not answer, the first replica that answers as head is the
+// new head.
+func (s *server) heartbeat(ctx context.Context, cfg *tls.Config) {
 	hc := &http.Client{Timeout: heartbeatInterval, Transport: &http.Transport{TLSClientConfig: cfg}}
 	defer hc.CloseIdleConnections()
 	t := time.NewTicker(heartbeatInterval)
 	defer t.Stop()
 	reached := true
 	for {
+		head := s.reportTo()
+		if head == "" {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				continue
+			}
+		}
 		err := s.sendReport(ctx, hc, head)
+		if err != nil && ctx.Err() == nil {
+			peers, _ := auth.Peers(s.info.StateDir)
+			for _, p := range peers {
+				if p != head && s.reportTo() != "" && s.sendReport(ctx, hc, p) == nil {
+					slog.Info("following a new head", "head", p, "old", head)
+					s.head.Store(p)
+					if err = auth.SetHead(s.info.StateDir, p); err != nil {
+						slog.Warn("cannot record the new head", "err", err)
+					}
+					head, err = p, nil
+					break
+				}
+			}
+		}
 		if ctx.Err() != nil {
 			return
 		}
@@ -211,6 +258,11 @@ func (s *server) sendReport(ctx context.Context, hc *http.Client, head string) e
 	if resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("the head answered %s", resp.Status)
 	}
+	if peers := strings.Fields(resp.Header.Get(peersHeader)); len(peers) > 0 {
+		if old, _ := auth.Peers(s.info.StateDir); !slices.Equal(old, peers) {
+			return auth.SetPeers(s.info.StateDir, peers)
+		}
+	}
 	return nil
 }
 
@@ -221,9 +273,12 @@ func (s *server) receiveReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
 		return
 	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && rep.Port != "" {
+		rep.Addr = net.JoinHostPort(host, rep.Port)
+	}
 	b, _ := json.Marshal(rep)
 	s.reportMu.Lock()
-	err := s.st.SetNodeReport(r.Context(), nodeID(r), b, time.Now())
+	err := s.apply(r.Context(), command{Op: "report", Node: &store.Node{ID: nodeID(r), Report: b, SeenAt: time.Now()}})
 	s.reportMu.Unlock()
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusForbidden, errors.New("this node is not in the pool"))
@@ -232,6 +287,13 @@ func (s *server) receiveReport(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	if rep := s.raft.Load(); rep != nil {
+		peers := s.otherServers(rep)
+		if me, ok := s.storedIdentity(); ok {
+			peers = append(peers, me.Addr)
+		}
+		w.Header().Set(peersHeader, strings.Join(peers, " "))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -248,8 +310,14 @@ func ready(seen, now time.Time) bool {
 	return !seen.IsZero() && now.Sub(seen) < unreachableAfter
 }
 
-// members returns the nodes that joined this head; none on a node.
+// members returns the other machines in this head's or replica's pool,
+// as the head last heard from them; none on a node.
 func (s *server) members(ctx context.Context) ([]member, error) {
+	if s.raft.Load() == nil {
+		if head, err := auth.Head(s.info.StateDir); err != nil || head != "" {
+			return nil, err
+		}
+	}
 	nodes, err := s.st.ListNodes(ctx)
 	if err != nil {
 		return nil, err
@@ -257,6 +325,9 @@ func (s *server) members(ctx context.Context) ([]member, error) {
 	now := time.Now()
 	list := make([]member, 0, len(nodes))
 	for _, n := range nodes {
+		if n.ID == s.selfID() {
+			continue
+		}
 		m := member{Node: n, ready: ready(n.SeenAt, now)}
 		if n.Report != nil {
 			if err := json.Unmarshal(n.Report, &m.Report); err != nil {
@@ -278,11 +349,11 @@ func owner(members []member, name string) (member, bool) {
 	return member{}, false
 }
 
-// route serves h for a sandbox in this machine's store, and forwards the
-// request to the node that reported one by that name otherwise.
+// route serves h for a sandbox in this machine's store, and on the head
+// forwards the request to the node that reported one by that name.
 func (s *server) route(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := s.st.GetByName(r.Context(), r.PathValue("name")); !errors.Is(err, store.ErrNotFound) {
+		if _, err := s.st.GetByName(r.Context(), r.PathValue("name")); !errors.Is(err, store.ErrNotFound) || !s.isHead() {
 			h(w, r)
 			return
 		}
@@ -317,8 +388,8 @@ func (s *server) place(h http.HandlerFunc) http.HandlerFunc {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		var req CreateRequest
-		if json.Unmarshal(body, &req) != nil {
-			h(w, r) // which reports the error
+		if json.Unmarshal(body, &req) != nil || !s.isHead() {
+			h(w, r) // which reports any error
 			return
 		}
 		spec, err := (backend.Spec{CPUs: req.CPUs, MemoryMB: req.MemoryMB, DiskGB: req.DiskGB}).WithDefaults()
@@ -487,5 +558,11 @@ func (s *server) track(resp *http.Response, id string) error {
 		m.Sandboxes = append(m.Sandboxes, sb)
 	}
 	rep, _ := json.Marshal(m.Report)
-	return s.st.SetNodeReport(ctx, id, rep, m.SeenAt)
+	return s.apply(ctx, command{Op: "report", Node: &store.Node{ID: id, Report: rep, SeenAt: m.SeenAt}})
+}
+
+// isHead reports whether this machine is its pool's head, or has no pool.
+func (s *server) isHead() bool {
+	head, err := s.poolHead()
+	return err == nil && head == ""
 }

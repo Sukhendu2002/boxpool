@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -185,6 +187,13 @@ type server struct {
 	logShutdown  context.Context              // cancels followers before HTTP shutdown waits
 	preventSleep func() (func() error, error) // set before serving
 	releaseSleep func() error                 // guarded by mu
+	poolAddr     string                       // where servePool listens
+	stopPool     func()                       // stops servePool's server; guarded by poolMu
+	poolTLS      atomic.Pointer[tls.Config]   // the pool port's, from the head CA
+	raft         atomic.Pointer[replica]      // this machine's replica of the head's state, if it keeps one
+	leading      atomic.Bool                  // raft elected this machine head, and its state is current
+	id           atomic.Value                 // string: this machine's node ID, once in a pool
+	head         atomic.Value                 // string: the head a node reports to
 }
 
 // prepareStateDir checks permissions before opening a lock, log or socket.
@@ -210,7 +219,8 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 
 func newServer(info Info, st *store.Store, d Driver) *server {
 	return &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), info: info,
-		capacity: &resources.Manager{StateDir: info.StateDir}, poolDone: make(chan struct{}), logShutdown: context.Background()}
+		capacity: &resources.Manager{StateDir: info.StateDir}, poolDone: make(chan struct{}), logShutdown: context.Background(),
+		poolAddr: ":" + auth.JoinPort}
 }
 
 func (s *server) handler() http.Handler {
@@ -242,6 +252,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/tokens/{hash}", s.revokeToken)
 	mux.HandleFunc("GET /v1/nodes", s.listNodes)
 	mux.HandleFunc("POST /v1/pool/join", s.joinPool)
+	mux.HandleFunc("POST /v1/pool/promote", s.promote)
+	mux.HandleFunc("POST /v1/pool/replica", s.becomeReplica)
 	mux.HandleFunc("PUT /v1/labels", s.setLabels)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (r.Method == http.MethodPost || r.Method == http.MethodDelete) && strings.HasPrefix(r.URL.Path, "/v1/sandboxes") {
@@ -288,7 +300,7 @@ func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := auth.NewJoinToken(req.Addr, sha256.Sum256(ca.Raw))
 	expires := time.Now().Add(req.TTL)
-	if err := s.st.CreateJoinToken(r.Context(), tok.Hash(), expires); err != nil {
+	if err := s.apply(r.Context(), command{Op: "token", Hash: tok.Hash(), Time: expires}); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -298,7 +310,12 @@ func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
-	err := s.st.RevokeJoinToken(r.Context(), r.PathValue("hash"))
+	s.poolMu.Lock()
+	defer s.poolMu.Unlock()
+	if !s.notJoined(w, "revoke join tokens on the head") {
+		return
+	}
+	err := s.apply(r.Context(), command{Op: "revoke", Hash: r.PathValue("hash")})
 	if errors.Is(err, store.ErrTokenInvalid) {
 		writeError(w, http.StatusNotFound, err)
 		return
