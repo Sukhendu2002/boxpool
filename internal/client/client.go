@@ -208,6 +208,23 @@ func (c *Client) SetLabels(ctx context.Context, labels []string) ([]string, erro
 	return out.Labels, err
 }
 
+// Logs reads a sandbox's console, or this daemon's log when name is empty.
+// Close the returned stream to stop following it.
+func (c *Client) Logs(ctx context.Context, name string, follow bool) (io.ReadCloser, error) {
+	path := "/v1/logs"
+	if name != "" {
+		path = "/v1/sandboxes/" + url.PathEscape(name) + "/logs"
+	}
+	if follow {
+		path += "?follow=true"
+	}
+	resp, err := c.send(ctx, http.MethodGet, path, "", nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 // Exec starts a command in the named sandbox through the daemon, which
 // relays the agent's exec protocol unchanged.
 func (c *Client) Exec(ctx context.Context, name string, req agent.ExecRequest, stdout, stderr io.Writer) (*agent.Session, error) {

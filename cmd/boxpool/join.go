@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -12,6 +13,7 @@ import (
 
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/client"
+	"boxpool.run/boxpool/internal/daemon"
 )
 
 const joinUsage = `Usage: boxpool join <token>
@@ -61,16 +63,41 @@ func lsNodes(ctx context.Context, c *client.Client, asJSON bool) int {
 		enc.Encode(list)
 		return 0
 	}
-	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tROLE\tSTATE\tOS\tARCH\tFREE CPU\tFREE MEMORY\tLABELS\tJOINED")
+	writeNodes(os.Stdout, list, time.Now())
+	return 0
+}
+
+func writeNodes(w io.Writer, list []daemon.Node, now time.Time) {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tROLE\tSTATE\tOS\tARCH\tFREE CPU\tFREE MEMORY\tLABELS\tJOINED\tWARNING")
 	for _, n := range list {
 		joined := "-"
 		if !n.JoinedAt.IsZero() {
-			joined = age(time.Since(n.JoinedAt))
+			joined = age(now.Sub(n.JoinedAt))
 		}
 		labels := cmp.Or(strings.Join(n.Labels, ","), "-")
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n", n.Name, n.Role, n.State, n.OS, n.Arch, n.CPUs, mebibytes(int(n.MemoryMB)), labels, joined)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s %d/%s\t%s %s/%s\t%s\t%s\t%s\n", n.Name, n.Role, n.State, n.OS, n.Arch,
+			capacityBar(int64(n.CPUs), int64(n.TotalCPUs)), n.CPUs, capacityTotal(int64(n.TotalCPUs), false),
+			capacityBar(n.MemoryMB, n.TotalMemoryMB), mebibytes(int(n.MemoryMB)), capacityTotal(n.TotalMemoryMB, true), labels, joined, cmp.Or(n.Warning, "-"))
 	}
 	tw.Flush()
-	return 0
+}
+
+// Older nodes omit totals; do not turn unknown capacity into a full bar.
+func capacityBar(free, total int64) string {
+	if total <= 0 {
+		return "[??????????]"
+	}
+	filled := int(float64(max(0, min(free, total))) / float64(total) * 10)
+	return "[" + strings.Repeat("#", filled) + strings.Repeat("-", 10-filled) + "]"
+}
+
+func capacityTotal(n int64, memory bool) string {
+	if n <= 0 {
+		return "?"
+	}
+	if memory {
+		return mebibytes(int(n))
+	}
+	return fmt.Sprint(n)
 }

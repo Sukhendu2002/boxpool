@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +63,8 @@ type Info struct {
 	// Warning, if set, is about the backend, e.g. that it is a fallback with
 	// weaker isolation. Commands that create sandboxes print it.
 	Warning string `json:"warning,omitempty"`
+	// AllowSleep opts out of macOS idle-sleep prevention.
+	AllowSleep bool `json:"allow_sleep,omitempty"`
 }
 
 // Driver is a backend that can also connect to the agent in a running
@@ -137,6 +140,7 @@ type Sandbox struct {
 	// Node is the name of the node the sandbox is on, when the head lists
 	// another node's sandbox.
 	Node string `json:"node,omitempty"`
+	OS   string `json:"os,omitempty"`
 }
 
 // DefaultTokenTTL is how long a join token is valid by default.
@@ -166,18 +170,36 @@ type Error struct {
 var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`).MatchString
 
 type server struct {
-	st        *store.Store
-	d         Driver     // nil when this node has no usable backend
-	mu        sync.Mutex // serialises changing sandboxes and snapshots
-	poolMu    sync.Mutex // guards joining, the CA, token issuance and node registration
-	joining   bool       // a role transition is in progress; guarded by poolMu
-	snapshots string     // directory of the snapshot files, named by ID
-	info      Info
-	capacity  *resources.Manager
-	placeMu   sync.Mutex    // serialises placement and discovery of new names
-	reportMu  sync.Mutex    // serialises changing nodes' reports
-	tunnels   tunnels       // to the nodes, on a head
-	poolDone  chan struct{} // closed when the pool API shuts down
+	st           *store.Store
+	d            Driver     // nil when this node has no usable backend
+	mu           sync.Mutex // serialises changing sandboxes and snapshots
+	poolMu       sync.Mutex // guards joining, the CA, token issuance and node registration
+	joining      bool       // a role transition is in progress; guarded by poolMu
+	snapshots    string     // directory of the snapshot files, named by ID
+	info         Info
+	capacity     *resources.Manager
+	placeMu      sync.Mutex                   // serialises placement and discovery of new names
+	reportMu     sync.Mutex                   // serialises changing nodes' reports
+	tunnels      tunnels                      // to the nodes, on a head
+	poolDone     chan struct{}                // closed when the pool API shuts down
+	logShutdown  context.Context              // cancels followers before HTTP shutdown waits
+	preventSleep func() (func() error, error) // set before serving
+	releaseSleep func() error                 // guarded by mu
+}
+
+// prepareStateDir checks permissions before opening a lock, log or socket.
+func prepareStateDir(dir string) error {
+	if err := os.MkdirAll(dir, 0750); err != nil {
+		return err
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("state directory %s is writable by group or others (mode %v): run chmod go-w on it", dir, fi.Mode().Perm())
+	}
+	return nil
 }
 
 // Handler returns the daemon's HTTP API. Without a driver, the sandbox
@@ -188,7 +210,7 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 
 func newServer(info Info, st *store.Store, d Driver) *server {
 	return &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), info: info,
-		capacity: &resources.Manager{StateDir: info.StateDir}, poolDone: make(chan struct{})}
+		capacity: &resources.Manager{StateDir: info.StateDir}, poolDone: make(chan struct{}), logShutdown: context.Background()}
 }
 
 func (s *server) handler() http.Handler {
@@ -203,6 +225,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /v1/sandboxes", s.place(s.backendOnly(s.create)))
 	mux.HandleFunc("GET /v1/sandboxes", s.list)
 	mux.HandleFunc("GET /v1/sandboxes/{name}", s.route(s.backendOnly(s.get)))
+	mux.HandleFunc("GET /v1/sandboxes/{name}/logs", s.logSession(s.route(s.backendOnly(s.sandboxLogs))))
+	mux.HandleFunc("GET /v1/logs", s.logSession(s.daemonLogs))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/start", s.route(s.backendOnly(s.start)))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.route(s.backendOnly(s.stop)))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/pause", s.route(s.backendOnly(s.pause)))
@@ -219,7 +243,12 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/nodes", s.listNodes)
 	mux.HandleFunc("POST /v1/pool/join", s.joinPool)
 	mux.HandleFunc("PUT /v1/labels", s.setLabels)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method == http.MethodPost || r.Method == http.MethodDelete) && strings.HasPrefix(r.URL.Path, "/v1/sandboxes") {
+			defer s.refreshSleep(context.WithoutCancel(r.Context()))
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 // createToken issues a single-use join token naming this node as the head,
@@ -371,6 +400,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	// Start does nothing if it runs, and the record can be stale: the VM
 	// may have died since.
+	s.holdSleep()
 	if err := s.d.Start(ctx, sb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -424,7 +454,7 @@ func (s *server) list(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range members {
 		for _, sb := range m.Sandboxes {
-			sb.Node = m.Name
+			sb.Node, sb.OS = m.Name, m.OS
 			if !m.ready {
 				sb.State = StateUnreachable
 			}
@@ -450,7 +480,9 @@ func (s *server) live(ctx context.Context, records []store.Sandbox) ([]Sandbox, 
 		if sb.Backend == s.d.Name() {
 			sb.State = cmp.Or(state[sb.ID], StateMissing)
 		}
-		list = append(list, apiSandbox(sb))
+		out := apiSandbox(sb)
+		out.OS = s.info.OS
+		list = append(list, out)
 	}
 	return list, nil
 }
@@ -487,6 +519,7 @@ func (s *server) boot(w http.ResponseWriter, r *http.Request, resume bool) {
 			start = s.d.Resume
 		}
 	}
+	s.holdSleep()
 	if err := start(r.Context(), sb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -652,6 +685,7 @@ func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
 		// Whatever became of the stop or the copy, the sandbox was running;
 		// Start does nothing if it still is.
 		ctx := context.WithoutCancel(ctx)
+		s.holdSleep()
 		startErr := s.d.Start(ctx, sb.ID)
 		if startErr == nil {
 			startErr = s.st.SetState(ctx, sb.ID, backend.StateRunning)

@@ -33,16 +33,8 @@ var openBackend = openDriver
 // releasing the store and lock. Cleanup may outlast shutdownTimeout when a
 // backend operation cannot finish immediately after cancellation.
 func Run(ctx context.Context, dir string, info Info) (err error) {
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if err := prepareStateDir(dir); err != nil {
 		return err
-	}
-	fi, err := os.Stat(dir)
-	if err != nil {
-		return err
-	}
-	// Anyone who can write here could replace the lock or the socket.
-	if fi.Mode().Perm()&0022 != 0 {
-		return fmt.Errorf("state directory %s is writable by group or others (mode %v): run chmod go-w on it", dir, fi.Mode().Perm())
 	}
 	lock, err := os.OpenFile(filepath.Join(dir, LockName), os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
@@ -66,6 +58,13 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 		return fmt.Errorf("open the %s backend: %w", info.Backend, err)
 	}
 
+	s := newServer(info, st, d)
+	s.logShutdown = ctx
+	defer func() {
+		if s.releaseSleep != nil {
+			err = errors.Join(err, s.releaseSleep())
+		}
+	}() // after the backend has stopped its VMs
 	if closer, ok := d.(interface{ Close() error }); ok {
 		defer func() { err = errors.Join(err, closer.Close()) }()
 	}
@@ -87,8 +86,14 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	}
 	// Before serving, so no request sees the state the daemon died with;
 	// clients connecting meanwhile wait in the listen backlog.
+	defer s.watchSleep(ctx)()
 	if d != nil {
-		if err := reconcile(ctx, st, d); err != nil {
+		s.mu.Lock()
+		s.holdSleep()
+		err := reconcile(ctx, st, d)
+		s.mu.Unlock()
+		s.refreshSleep(ctx)
+		if err != nil {
 			return fmt.Errorf("reconcile sandboxes with the %s backend: %w", info.Backend, err)
 		}
 	}
@@ -105,7 +110,6 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	}
 	// Other machines joining is optional: a busy port must not stop the
 	// daemon serving this machine.
-	s := newServer(info, st, d)
 	if stopPool, err := s.servePool(); err != nil {
 		slog.Warn("not serving the pool API; other machines cannot join this one", "err", err)
 	} else {

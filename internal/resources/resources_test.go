@@ -239,4 +239,7 @@ func TestFree(t *testing.T) {
 	if cpus, mem, err := m.Free(ctx); err != nil || cpus != 1 || mem != 5120 {
 		t.Errorf("Free() after a sandbox = %d, %d, %v; want 1, 5120", cpus, mem, err)
 	}
+	if got, err := m.Summary(ctx); err != nil || got != (Summary{CPUs: 1, MemoryMB: 5120, TotalCPUs: 3, TotalMemoryMB: 7168}) {
+		t.Errorf("Summary() after a sandbox = %+v, %v", got, err)
+	}
 }

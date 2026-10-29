@@ -68,9 +68,9 @@ func testDaemon(t *testing.T) string {
 var lsFixture = func() []daemon.Sandbox {
 	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	return []daemon.Sandbox{
-		{ID: "0a1b2c", Name: "web", Backend: "firecracker", State: "running", CPUs: 2, MemoryMB: 2048, DiskGB: 10, CreatedAt: created},
-		{ID: "3d4e5f", Name: "sb-0c9a7e", Backend: "firecracker", State: "stopped", CPUs: 1, MemoryMB: 512, DiskGB: 1, CreatedAt: created.Add(3*24*time.Hour + 5*time.Hour)},
-		{ID: "6a7b8c", Name: "old-docker-box", Backend: "docker", State: daemon.StateMissing, CPUs: 4, MemoryMB: 1536, DiskGB: 20, CreatedAt: created.Add(4*24*time.Hour - 90*time.Second)},
+		{ID: "0a1b2c", Name: "web", Backend: "firecracker", OS: "linux", State: "running", CPUs: 2, MemoryMB: 2048, DiskGB: 10, CreatedAt: created},
+		{ID: "3d4e5f", Name: "sb-0c9a7e", Backend: "firecracker", OS: "linux", State: "stopped", CPUs: 1, MemoryMB: 512, DiskGB: 1, CreatedAt: created.Add(3*24*time.Hour + 5*time.Hour)},
+		{ID: "6a7b8c", Name: "old-docker-box", Backend: "docker", OS: "linux", State: daemon.StateMissing, CPUs: 4, MemoryMB: 1536, DiskGB: 20, CreatedAt: created.Add(4*24*time.Hour - 90*time.Second)},
 	}
 }()
 
@@ -113,7 +113,7 @@ func TestLsStopRm(t *testing.T) {
 		}
 	}
 	code, out, errOut := cli(t, dir, "", "ls")
-	if code != 0 || !strings.HasPrefix(out, "NAME   BACKEND   STATE     CPU   MEMORY   AGE\na      fake      running   1     512m     ") || !strings.Contains(out, "\nb      fake      running") {
+	if code != 0 || !strings.HasPrefix(out, "NAME   BACKEND   OS   STATE     CPU   MEMORY   AGE\na      fake      -    running   1     512m     ") || !strings.Contains(out, "\nb      fake      -    running") {
 		t.Errorf("ls = %d %q %q", code, out, errOut)
 	}
 
@@ -145,13 +145,8 @@ func TestLsTableNodes(t *testing.T) {
 	var b bytes.Buffer
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	writeTable(&b, []daemon.Sandbox{
-		{Name: "here", Backend: "firecracker", State: "running", CPUs: 1, MemoryMB: 512, CreatedAt: now},
-		{Name: "there", Backend: "virtualization framework", State: daemon.StateUnreachable, CPUs: 2, MemoryMB: 2048, CreatedAt: now, Node: "mac"},
+		{Name: "here", Backend: "firecracker", OS: "linux", State: "running", CPUs: 1, MemoryMB: 512, CreatedAt: now},
+		{Name: "there", Backend: "virtualization framework", OS: "darwin", State: daemon.StateUnreachable, CPUs: 2, MemoryMB: 2048, CreatedAt: now, Node: "mac"},
 	}, now)
-	want := "NAME    BACKEND                    STATE         CPU   MEMORY   AGE   NODE\n" +
-		"here    firecracker                running       1     512m     0s    -\n" +
-		"there   virtualization framework   unreachable   2     2g       0s    mac\n"
-	if b.String() != want {
-		t.Errorf("table =\n%s\nwant\n%s", b.String(), want)
-	}
+	golden(t, "ls-pool.txt", b.Bytes())
 }
