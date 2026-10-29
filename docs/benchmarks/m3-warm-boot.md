@@ -14,6 +14,12 @@ sizes and networking availability; macOS also includes the OS build. An
 image upgrade rebuilds it on the next daemon start. A failed build is
 cleaned up and logged, and the daemon serves the existing cold-boot path.
 
+The base filesystem is flushed and frozen before saving memory, so in-flight
+disk writes cannot race the snapshot or its later clone. Each fresh restore
+thaws its private filesystem before resizing or writing to it. A durable
+readiness marker keeps concurrent exec/file requests out until identity
+initialization finishes; Firecracker adoption kills unfinished fresh VMs.
+
 New default-size sandboxes clone both disk and memory. Firecracker overrides
 the template's TAP and vsock paths and redirects its root drive before resuming
 vCPUs. macOS retains the virtual device identifiers required by saved state,
@@ -90,8 +96,8 @@ base preparation and removal are outside each sample:
 
 - Baseline `main` (`f7bb63f`): 838, 611, 606, 606, 581, 558, 600, 592, 576, 562.
   Median: **596 ms**.
-- Warm: 608, 569, 562, 548, 537, 577, 549, 541, 537, 540.
-  Median: **548.5 ms**.
+- Warm: 579, 568, 552, 541, 535, 653, 586, 577, 552, 494.
+  Median: **560 ms**.
 
 **The reference Linux median-under-1-second acceptance criterion is still
 unverified.** No reference Linux host was configured in this session. Hosted

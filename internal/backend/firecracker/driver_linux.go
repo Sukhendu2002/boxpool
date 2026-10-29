@@ -224,6 +224,13 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 		err = os.WriteFile(filepath.Join(l.dir, "fresh"), nil, 0600)
 	}
 	if err == nil {
+		// Persist the readiness gate before publishing a restorable sandbox.
+		err = syncPath(filepath.Join(l.dir, "fresh"))
+	}
+	if err == nil {
+		err = syncPath(l.dir)
+	}
+	if err == nil {
 		// Written last: List and Start ignore a directory without it.
 		err = os.WriteFile(l.spec, b, 0600)
 	}
@@ -410,6 +417,11 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, 
 	if err != nil {
 		return err
 	}
+	if fresh && restore {
+		if err := backend.FreezeGuest(ctx, ag, false); err != nil {
+			return err
+		}
+	}
 	var network backend.GuestNetwork
 	if n != nil {
 		network.Resolvers = n.resolvConf()
@@ -421,7 +433,10 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, 
 		return err
 	}
 	if fresh {
-		return os.Remove(filepath.Join(l.dir, "fresh"))
+		if err := os.Remove(filepath.Join(l.dir, "fresh")); err != nil {
+			return err
+		}
+		return syncPath(l.dir)
 	}
 	return nil
 }

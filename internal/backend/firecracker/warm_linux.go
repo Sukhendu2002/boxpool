@@ -21,10 +21,15 @@ func (d *Driver) Warm(ctx context.Context) error {
 		return err
 	}
 	base.store, base.networkRoot = d.store, d.root
-	if err := backend.PrepareWarm(ctx, base, dir, fmt.Sprintf("network=%t", d.store != nil), d.paths.Firecracker, d.paths.Kernel, d.paths.Rootfs); err != nil {
+	l := sandboxLayout(base.root, backend.WarmID)
+	freeze := func(ctx context.Context) error {
+		ag := base.agent(l)
+		defer ag.CloseIdleConnections()
+		return backend.FreezeGuest(ctx, ag, true)
+	}
+	if err := backend.PrepareWarm(ctx, base, dir, fmt.Sprintf("network=%t", d.store != nil), freeze, d.paths.Firecracker, d.paths.Kernel, d.paths.Rootfs); err != nil {
 		return err
 	}
-	l := sandboxLayout(base.root, backend.WarmID)
 	d.warm = &l
 	return nil
 }

@@ -23,9 +23,9 @@ func WarmSpec(s Spec) bool {
 // PrepareWarm boots and pauses a private base VM, or reuses its complete cache.
 // The separate driver keeps it out of sandbox listings and user reservations.
 // Hash the published artifacts, not the mutable disk, to invalidate on upgrades.
-func PrepareWarm(ctx context.Context, d Driver, dir, configuration string, artifacts ...string) error {
+func PrepareWarm(ctx context.Context, d Driver, dir, configuration string, quiesce func(context.Context) error, artifacts ...string) error {
 	h := sha256.New()
-	fmt.Fprintf(h, "boxpool-warm-v1\n%d/%d/%d\n%s\n", DefaultCPUs, DefaultMemoryMB, DefaultDiskGB, configuration)
+	fmt.Fprintf(h, "boxpool-warm-v2\n%d/%d/%d\n%s\n", DefaultCPUs, DefaultMemoryMB, DefaultDiskGB, configuration)
 	for _, path := range artifacts {
 		f, err := os.Open(path)
 		if err != nil {
@@ -55,6 +55,11 @@ func PrepareWarm(ctx context.Context, d Driver, dir, configuration string, artif
 		return err
 	}
 	if err := d.Start(ctx, WarmID); err != nil {
+		return errors.Join(err, d.Remove(context.WithoutCancel(ctx), WarmID))
+	}
+	// Freeze the filesystem before saving memory: in-flight disk writes
+	// must not race the snapshot or the later copy-on-write disk clone.
+	if err := quiesce(ctx); err != nil {
 		return errors.Join(err, d.Remove(context.WithoutCancel(ctx), WarmID))
 	}
 	if err := d.Pause(ctx, WarmID); err != nil {

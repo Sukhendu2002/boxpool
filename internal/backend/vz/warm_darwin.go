@@ -4,6 +4,7 @@ package vz
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -24,7 +25,19 @@ func (d *Driver) Warm(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := backend.PrepareWarm(ctx, base, dir, fmt.Sprintf("network=%t;os=%s", d.isolated, osBuild), d.paths.Kernel, d.paths.Rootfs); err != nil {
+	freeze := func(ctx context.Context) error {
+		m := base.running(backend.WarmID)
+		if m == nil {
+			return errors.New("warm base stopped before filesystem freeze")
+		}
+		if m.saveRestoreErr != nil {
+			return m.saveRestoreErr
+		}
+		ag := m.agent()
+		defer ag.CloseIdleConnections()
+		return backend.FreezeGuest(ctx, ag, true)
+	}
+	if err := backend.PrepareWarm(ctx, base, dir, fmt.Sprintf("network=%t;os=%s", d.isolated, osBuild), freeze, d.paths.Kernel, d.paths.Rootfs); err != nil {
 		return err
 	}
 	l := sandboxLayout(base.root, backend.WarmID)

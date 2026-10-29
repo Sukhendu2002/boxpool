@@ -14,6 +14,22 @@ import (
 	"boxpool.run/boxpool/internal/resources"
 )
 
+func TestAdoptUninitialized(t *testing.T) {
+	root := t.TempDir()
+	d := &Driver{root: root}
+	vm, l := fakeFirecracker(t, root, "fresh", "--api-sock", sandboxLayout(root, "fresh").api)
+	fakeAgent(t, l)
+	if err := os.WriteFile(filepath.Join(l.dir, "fresh"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan error, 1)
+	go func() { exited <- vm.Wait() }()
+	if err := d.adopt(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertKilled(t, exited, l)
+}
+
 func TestCreateWarmClone(t *testing.T) {
 	dir := t.TempDir()
 	base := sandboxLayout(filepath.Join(dir, "cache"), "base")

@@ -148,6 +148,13 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 		err = os.WriteFile(filepath.Join(l.dir, "fresh"), nil, 0600)
 	}
 	if err == nil {
+		// Persist the readiness gate before publishing a restorable sandbox.
+		err = syncPath(filepath.Join(l.dir, "fresh"))
+	}
+	if err == nil {
+		err = syncPath(l.dir)
+	}
+	if err == nil {
 		// Written last: List and Start ignore a directory without it.
 		err = writeSpec(l, b)
 	}
@@ -292,7 +299,7 @@ func (d *Driver) startLocked(ctx context.Context, id string, resume bool) error 
 	if err != nil {
 		return fmt.Errorf("start sandbox %s: %w", id, err)
 	}
-	bootErr := d.boot(ctx, m)
+	bootErr := d.boot(ctx, m, fresh && restore)
 	if bootErr == nil {
 		var netConfig backend.GuestNetwork
 		if warmClone && restore && d.isolated {
@@ -305,6 +312,9 @@ func (d *Driver) startLocked(ctx context.Context, id string, resume bool) error 
 		}
 		if bootErr == nil && fresh {
 			bootErr = os.Remove(filepath.Join(l.dir, "fresh"))
+			if bootErr == nil {
+				bootErr = syncPath(l.dir)
+			}
 		}
 	}
 	if err := bootErr; err != nil {
@@ -505,7 +515,7 @@ func entitlementHint(err error) error {
 	return err
 }
 
-func (d *Driver) boot(ctx context.Context, m *machine) error {
+func (d *Driver) boot(ctx context.Context, m *machine, frozen bool) error {
 	ctx, cancel := context.WithTimeout(ctx, agentTimeout)
 	defer cancel()
 	ag := m.agent()
@@ -521,6 +531,11 @@ func (d *Driver) boot(ctx context.Context, m *machine) error {
 		case <-ctx.Done():
 			return fmt.Errorf("waiting for the guest agent: %w (last error: %v)", ctx.Err(), err)
 		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if frozen {
+		if err := backend.FreezeGuest(ctx, ag, false); err != nil {
+			return err
 		}
 	}
 	// The disk image is Spec.DiskGB GiB but the file system is the base

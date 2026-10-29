@@ -38,14 +38,19 @@ func TestPrepareWarm(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &warmDriver{}
+	freezes := 0
+	freeze := func(context.Context) error { freezes++; return nil }
 	prepare := func(config string) {
 		t.Helper()
-		if err := PrepareWarm(ctx, d, dir, config, artifact); err != nil {
+		if err := PrepareWarm(ctx, d, dir, config, freeze, artifact); err != nil {
 			t.Fatal(err)
 		}
 	}
 	prepare("network=false")
 	prepare("network=false")
+	if freezes != 1 {
+		t.Fatalf("base frozen %d times, want once before caching", freezes)
+	}
 	if d.creates != 1 {
 		t.Fatalf("cache rebuilt: %d creates", d.creates)
 	}
@@ -66,7 +71,7 @@ func TestPrepareWarm(t *testing.T) {
 		t.Fatal("partial cache reused")
 	}
 	d.state, d.pauseErr = StateStopped, errors.New("save failed")
-	if err := PrepareWarm(ctx, d, dir, "network=true", artifact); !errors.Is(err, d.pauseErr) {
+	if err := PrepareWarm(ctx, d, dir, "network=true", freeze, artifact); !errors.Is(err, d.pauseErr) {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ready")); !os.IsNotExist(err) {
@@ -74,6 +79,17 @@ func TestPrepareWarm(t *testing.T) {
 	}
 	if d.state != "" {
 		t.Fatal("failed base VM was not removed")
+	}
+	d.pauseErr = nil
+	freezeErr := errors.New("freeze failed")
+	if err := PrepareWarm(ctx, d, dir, "network=true", func(context.Context) error { return freezeErr }, artifact); !errors.Is(err, freezeErr) {
+		t.Fatal(err)
+	}
+	if d.state != "" {
+		t.Fatal("unquiesced base was not removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ready")); !os.IsNotExist(err) {
+		t.Fatal("unquiesced base was published")
 	}
 }
 

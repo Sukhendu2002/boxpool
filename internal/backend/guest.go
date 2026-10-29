@@ -28,6 +28,16 @@ func GuestReady(dir string) error {
 	return err
 }
 
+// FreezeGuest quiesces the private base before saving it, or thaws a clone
+// immediately after restore, before any disk writes or filesystem resizing.
+func FreezeGuest(ctx context.Context, c *agent.Client, freeze bool) error {
+	script := "fsfreeze --unfreeze /"
+	if freeze {
+		script = "sync && fsfreeze --freeze /"
+	}
+	return runGuest(ctx, c, []string{"sh", "-eu", "-c", script})
+}
+
 // GuestNetwork replaces the network identity captured in a warm snapshot.
 // Empty fields leave the kernel's cold-boot configuration alone.
 type GuestNetwork struct {
@@ -52,6 +62,10 @@ func ConfigureGuest(ctx context.Context, c *agent.Client, id, name string, fresh
 	}
 	args := []string{"sh", "-eu", "-c", configureGuest, "sh", name, hex.EncodeToString(machineID[:16]), flag(fresh), flag(restore),
 		hex.EncodeToString(seed), fmt.Sprintf("%d.%09d", now.Unix(), now.Nanosecond()), network.Address, network.Mask, network.Gateway, network.Resolvers}
+	return runGuest(ctx, c, args)
+}
+
+func runGuest(ctx context.Context, c *agent.Client, args []string) error {
 	var out bytes.Buffer
 	s, err := c.Exec(ctx, agent.ExecRequest{Argv: args}, &out, &out)
 	if err != nil {
