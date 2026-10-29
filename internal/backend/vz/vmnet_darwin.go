@@ -7,6 +7,7 @@ package vz
 #cgo LDFLAGS: -framework Foundation -framework Virtualization -framework vmnet
 #import <Virtualization/Virtualization.h>
 #import <vmnet/vmnet.h>
+#import <arpa/inet.h>
 
 // An SDK older than macOS 26's builds a binary whose sandboxes have no network.
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
@@ -45,6 +46,19 @@ static void *newNetwork(int *status) {
 	return NULL;
 }
 
+static int networkIPv4(void *network, uint32_t *subnet, uint32_t *mask) {
+#ifdef HAVE_VMNET_NETWORK
+	if (@available(macOS 26, *)) {
+		struct in_addr s, m;
+		vmnet_network_get_ipv4_subnet((vmnet_network_ref)network, &s, &m);
+		*subnet = ntohl(s.s_addr);
+		*mask = ntohl(m.s_addr);
+		return 1;
+	}
+#endif
+	return 0;
+}
+
 // attach replaces the network device's attachment with one on network.
 static int attach(void *nic, void *network) {
 #ifdef HAVE_VMNET_NETWORK
@@ -66,11 +80,14 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 	"unsafe"
 
 	virt "github.com/Code-Hex/vz/v3"
+
+	"boxpool.run/boxpool/internal/backend"
 )
 
 // NoNetworkWarning is the daemon's warning when sandboxes start without a
@@ -135,6 +152,24 @@ func putNetwork(net unsafe.Pointer) {
 	networks.Lock()
 	networks.idle = append(networks.idle, idleNetwork{net, time.Now()})
 	networks.Unlock()
+}
+
+// networkConfig assigns the sole guest .2 on its private /24; vmnet's NAT
+// gateway and DNS proxy are .1. No DHCP lease from the template is reused.
+func networkConfig(network unsafe.Pointer) (backend.GuestNetwork, error) {
+	var subnet, mask C.uint32_t
+	if C.networkIPv4(network, &subnet, &mask) == 0 || uint32(mask) != 0xffffff00 {
+		return backend.GuestNetwork{}, errors.New("warm restore needs a vmnet IPv4 /24")
+	}
+	addr := func(n uint32) string {
+		return netip.AddrFrom4([4]byte{byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}).String()
+	}
+	base := uint32(subnet) & uint32(mask)
+	gateway := addr(base + 1)
+	return backend.GuestNetwork{
+		Address: addr(base + 2), Mask: "255.255.255.0", Gateway: gateway,
+		Resolvers: "nameserver " + gateway + "\n",
+	}, nil
 }
 
 // attachNetwork moves nic onto the vmnet network.

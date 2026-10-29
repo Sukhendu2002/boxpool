@@ -131,7 +131,11 @@ func (d *Driver) sweepNetwork(ctx context.Context) error {
 // tapAlias binds the kernel device to the durable allocation and state root.
 // The full hash also distinguishes sandbox IDs with colliding short tap names.
 func (d *Driver) tapAlias(id string, slot int) string {
-	return fmt.Sprintf("boxpool:%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", d.root, id, slot))))
+	root := d.networkRoot
+	if root == "" {
+		root = d.root
+	}
+	return fmt.Sprintf("boxpool:%x", sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", root, id, slot))))
 }
 
 type networkLink struct {

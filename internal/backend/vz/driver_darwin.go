@@ -46,6 +46,8 @@ type Driver struct {
 	closed               bool         // protected by lifetime
 	isolated             bool         // sandboxes get networks of their own; without them, no network
 	networks             sync.Map     // sandbox ID → its vmnet network, from its first Start until Remove
+	paths                artifacts.Paths
+	warm                 *layout // immutable default-size base
 }
 
 var _ backend.Driver = (*Driver)(nil)
@@ -89,6 +91,7 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths) (*Driver, 
 		},
 		admission: &resources.Manager{StateDir: stateDir},
 		isolated:  IsolatedNetworks(),
+		paths:     paths,
 	}, nil
 }
 
@@ -119,13 +122,30 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	l := sandboxLayout(d.root, id)
 	b, _ := json.Marshal(spec)
 	src := d.rootfs
+	warm := d.warm != nil && backend.WarmSpec(spec)
 	if spec.From != "" {
 		src = spec.From
+	} else if warm {
+		src = d.warm.rootfs
 	}
 	// clonefile keeps the base image shared until the guest writes.
 	err = unix.Clonefile(src, l.rootfs, 0)
-	if err == nil {
+	if err == nil && warm {
+		for _, pair := range [][2]string{{d.warm.state, l.state}, {d.warm.machineID, l.machineID}} {
+			if err = unix.Clonefile(pair[0], pair[1], 0); err != nil {
+				break
+			}
+		}
+		if err == nil {
+			// Saved state requires the same virtual device identifiers.
+			err = os.WriteFile(filepath.Join(l.dir, "warm-mac"), []byte(macAddress(backend.WarmID)), 0600)
+		}
+	}
+	if err == nil && !warm {
 		err = growDisk(l.rootfs, int64(spec.DiskGB)<<30)
+	}
+	if err == nil {
+		err = os.WriteFile(filepath.Join(l.dir, "fresh"), nil, 0600)
 	}
 	if err == nil {
 		// Written last: List and Start ignore a directory without it.
@@ -242,6 +262,18 @@ func (d *Driver) startLocked(ctx context.Context, id string, resume bool) error 
 	if err != nil {
 		return err
 	}
+	warmClone := false
+	if mac, err := os.ReadFile(filepath.Join(l.dir, "warm-mac")); err == nil {
+		cfg.MAC = string(mac)
+		warmClone = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	_, freshErr := os.Stat(filepath.Join(l.dir, "fresh"))
+	fresh := freshErr == nil
+	if freshErr != nil && !errors.Is(freshErr, fs.ErrNotExist) {
+		return freshErr
+	}
 	if err := os.WriteFile(l.console, nil, 0600); err != nil {
 		return err
 	}
@@ -260,7 +292,22 @@ func (d *Driver) startLocked(ctx context.Context, id string, resume bool) error 
 	if err != nil {
 		return fmt.Errorf("start sandbox %s: %w", id, err)
 	}
-	if err := d.boot(ctx, m); err != nil {
+	bootErr := d.boot(ctx, m)
+	if bootErr == nil {
+		var netConfig backend.GuestNetwork
+		if warmClone && restore && d.isolated {
+			netConfig, bootErr = networkConfig(network)
+		}
+		if bootErr == nil {
+			ag := m.agent()
+			bootErr = backend.ConfigureGuest(ctx, ag, id, spec.Name, fresh, restore, netConfig)
+			ag.CloseIdleConnections()
+		}
+		if bootErr == nil && fresh {
+			bootErr = os.Remove(filepath.Join(l.dir, "fresh"))
+		}
+	}
+	if err := bootErr; err != nil {
 		if serr := forceStop(m); serr != nil {
 			d.machines.Store(id, m) // still running: Stop and Remove retry
 			err = errors.Join(err, serr)

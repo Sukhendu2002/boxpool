@@ -45,6 +45,9 @@ type Driver struct {
 	store                       *store.Store // network slots; nil without networking
 	netMu                       sync.Mutex   // held while changing tap devices and firewall rules
 	admission                   *resources.Manager
+	paths                       artifacts.Paths
+	warm                        *layout // immutable base disk and saved memory
+	networkRoot                 string  // warm builder shares the node's network ownership
 }
 
 var _ backend.Driver = (*Driver)(nil)
@@ -85,7 +88,7 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths, st *store.
 	if err != nil {
 		return nil, err
 	}
-	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs, store: st, admission: &resources.Manager{StateDir: state}}
+	d := &Driver{root: root, firecracker: fc, kernel: paths.Kernel, rootfs: rootfs, store: st, admission: &resources.Manager{StateDir: state}, paths: paths}
 	if err := d.adopt(ctx); err != nil || st == nil {
 		return d, err
 	}
@@ -198,12 +201,24 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	}
 	b, _ := json.Marshal(spec)
 	src := d.rootfs
+	warm := d.warm != nil && backend.WarmSpec(spec)
 	if spec.From != "" {
 		src = spec.From
+	} else if warm {
+		src = d.warm.rootfs
 	}
 	err = copyRootfs(l.rootfs, src)
-	if err == nil {
+	if err == nil && warm {
+		err = copyRootfs(l.mem, d.warm.mem)
+		if err == nil {
+			err = copyRootfs(l.vmstate, d.warm.vmstate)
+		}
+	}
+	if err == nil && !warm {
 		err = growRootfs(ctx, l.rootfs, int64(spec.DiskGB)<<30)
+	}
+	if err == nil {
+		err = os.WriteFile(filepath.Join(l.dir, "fresh"), nil, 0600)
 	}
 	if err == nil {
 		// Written last: List and Start ignore a directory without it.
@@ -340,10 +355,28 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, 
 		return err
 	}
 	restore := paused(l)
+	_, freshErr := os.Stat(filepath.Join(l.dir, "fresh"))
+	fresh := freshErr == nil
+	if freshErr != nil && !errors.Is(freshErr, fs.ErrNotExist) {
+		return freshErr
+	}
 	if restore {
 		// Deleted before the guest runs on, because from then on its memory
 		// and disk no longer match the snapshot.
-		err := send(ctx, api, http.MethodPut, loadSnapshot(l))
+		call := loadSnapshot(l)
+		if fresh {
+			body := call.body.(map[string]any)
+			body["vsock_override"] = map[string]any{"uds_path": l.vsock}
+			if n != nil {
+				body["network_overrides"] = []map[string]any{{"iface_id": "eth0", "host_dev_name": n.tap}}
+			}
+		}
+		err := send(ctx, api, http.MethodPut, call)
+		if err == nil && fresh {
+			// The snapshot initially opens the immutable base disk; redirect
+			// it to the matching private clone before any vCPU can run.
+			err = send(ctx, api, http.MethodPatch, apiCall{"/drives/rootfs", map[string]any{"drive_id": "rootfs", "path_on_host": l.rootfs}})
+		}
 		if err == nil {
 			err = removeSnapshot(l)
 		}
@@ -374,29 +407,20 @@ func (d *Driver) boot(ctx context.Context, l layout, spec backend.Spec, n *nic, 
 	if err != nil {
 		return err
 	}
-	guest := func(what, script string, args ...string) error {
-		var out bytes.Buffer
-		s, err := ag.Exec(ctx, agent.ExecRequest{Argv: append([]string{"sh", "-c", script, "sh"}, args...)}, &out, &out)
-		if err != nil {
-			return err
-		}
-		if code, err := s.Wait(); err != nil || code != 0 {
-			return fmt.Errorf("%s: exit status %d, %v: %s", what, code, err, bytes.TrimSpace(out.Bytes()))
-		}
-		return nil
-	}
-	if restore {
-		// A restored guest's clock stands where it was paused.
-		now := time.Now()
-		if err := guest("set the guest's clock", `date -u -s "@$1" >/dev/null`, fmt.Sprintf("%d.%09d", now.Unix(), now.Nanosecond())); err != nil {
-			return err
+	var network backend.GuestNetwork
+	if n != nil {
+		network.Resolvers = n.resolvConf()
+		if fresh && restore {
+			network.Address, network.Mask, network.Gateway = n.guest.String(), "255.255.255.252", n.gateway.String()
 		}
 	}
-	if n == nil {
-		return nil
+	if err := backend.ConfigureGuest(ctx, ag, filepath.Base(l.dir), spec.Name, fresh, restore, network); err != nil {
+		return err
 	}
-	// Written on every boot: the host's resolvers may have changed.
-	return guest("write the guest's /etc/resolv.conf", `printf %s "$1" > /etc/resolv.conf`, n.resolvConf())
+	if fresh {
+		return os.Remove(filepath.Join(l.dir, "fresh"))
+	}
+	return nil
 }
 
 func send(ctx context.Context, c *http.Client, method string, call apiCall) error {
