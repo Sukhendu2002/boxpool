@@ -63,3 +63,39 @@ func TestTokenCmd(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenCreateTailscale(t *testing.T) {
+	dir := testDaemon(t)
+	bin := t.TempDir()
+	fake := filepath.Join(bin, "tailscale")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, tc := range []struct {
+		script string
+		code   int
+		addr   string
+		err    string
+	}{
+		{"echo 100.64.0.7", 0, "100.64.0.7:7443", ""},
+		{"echo fd7a:115c:a1e0::7", 0, "[fd7a:115c:a1e0::7]:7443", ""},
+		{"echo 'Tailscale is stopped.' >&2; exit 1", 1, "", "run tailscale up"},
+		{"echo stopped", 1, "", "not an address"},
+	} {
+		if err := os.WriteFile(fake, []byte("#!/bin/sh\n[ \"$*\" = 'ip -1' ] || exit 2\n"+tc.script+"\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		code, out, errOut := cli(t, dir, "", "token", "create", "--join", "--transport", "tailscale")
+		if code != tc.code || !strings.Contains(errOut, tc.err) {
+			t.Errorf("%s: token create = %d %q %q, want %d and %q", tc.script, code, out, errOut, tc.code, tc.err)
+			continue
+		}
+		if tc.addr == "" {
+			continue
+		}
+		if tok, err := auth.ParseJoinToken(strings.TrimSpace(out)); err != nil || tok.Addr != tc.addr {
+			t.Errorf("%s: token %q: %+v, %v, want address %s", tc.script, out, tok, err, tc.addr)
+		}
+	}
+	if code, _, errOut := cli(t, dir, "", "token", "create", "--join", "--transport", "wireguard"); code != 2 || !strings.Contains(errOut, "unknown --transport") {
+		t.Errorf("token create --transport wireguard = %d %q", code, errOut)
+	}
+}
