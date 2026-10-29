@@ -6,11 +6,27 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"boxpool.run/boxpool/internal/agent"
 )
+
+// GuestReady keeps concurrent API requests out of a fresh VM until its
+// cloned identity and RNG have been replaced. Host-side setup bypasses Dial.
+func GuestReady(dir string) error {
+	_, err := os.Stat(filepath.Join(dir, "fresh"))
+	if err == nil {
+		return errors.New("guest identity initialization is incomplete")
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
 
 // GuestNetwork replaces the network identity captured in a warm snapshot.
 // Empty fields leave the kernel's cold-boot configuration alone.

@@ -113,7 +113,10 @@ func (d *Driver) adopt(ctx context.Context) error {
 		}
 		l := sandboxLayout(d.root, e.Name())
 		if pid, ok := running(l); ok {
-			err := d.ping(ctx, l)
+			err := backend.GuestReady(l.dir)
+			if err == nil {
+				err = d.ping(ctx, l)
+			}
 			if err == nil {
 				slog.Info("adopting running sandbox", "sandbox", e.Name(), "pid", pid)
 				d.watchConsole(e.Name(), l)
@@ -252,7 +255,7 @@ func (d *Driver) start(ctx context.Context, id string, resume bool) error {
 		return err
 	}
 	if _, ok := running(l); ok {
-		return nil
+		return backend.GuestReady(l.dir)
 	}
 	if resume && !paused(l) {
 		return fmt.Errorf("resume sandbox %s: it is not paused", id)
@@ -717,7 +720,11 @@ func (d *Driver) Dial(ctx context.Context, id string) (net.Conn, error) {
 	if err := validID(id); err != nil {
 		return nil, err
 	}
-	return dialAgent(ctx, sandboxLayout(d.root, id).vsock)
+	l := sandboxLayout(d.root, id)
+	if err := backend.GuestReady(l.dir); err != nil {
+		return nil, err
+	}
+	return dialAgent(ctx, l.vsock)
 }
 
 // boundConsole rotates the console log at path once a second until exited

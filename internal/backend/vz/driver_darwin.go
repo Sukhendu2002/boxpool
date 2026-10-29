@@ -251,7 +251,7 @@ func (d *Driver) startLocked(ctx context.Context, id string, resume bool) error 
 		return err
 	}
 	if d.running(id) != nil {
-		return nil
+		return backend.GuestReady(l.dir)
 	}
 	restore := savedState(l)
 	if resume && !restore {
@@ -935,6 +935,9 @@ func (d *Driver) List(ctx context.Context) ([]backend.Sandbox, error) {
 // Dial connects to the agent in a running sandbox, for agent.NewClient.
 func (d *Driver) Dial(ctx context.Context, id string) (net.Conn, error) {
 	if err := validID(id); err != nil {
+		return nil, err
+	}
+	if err := backend.GuestReady(sandboxLayout(d.root, id).dir); err != nil {
 		return nil, err
 	}
 	m := d.running(id)

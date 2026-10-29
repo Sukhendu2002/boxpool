@@ -8,6 +8,23 @@ import (
 	"testing"
 )
 
+func TestGuestReady(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "fresh")
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := GuestReady(dir); err == nil {
+		t.Fatal("uninitialized guest is accessible")
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := GuestReady(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGuestIdentity(t *testing.T) {
 	dir := t.TempDir()
 	script := configureGuest

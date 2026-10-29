@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"boxpool.run/boxpool/internal/backend"
@@ -32,6 +33,9 @@ func TestCreateWarmClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := sandboxLayout(d.root, "clone")
+	if _, err := d.Dial(context.Background(), "clone"); err == nil || !strings.Contains(err.Error(), "initialization") {
+		t.Fatalf("Dial exposed a clone before identity setup: %v", err)
+	}
 	for path, want := range map[string]string{l.rootfs: "disk", l.vmstate: "state", l.mem: "memory"} {
 		if got, err := os.ReadFile(path); err != nil || string(got) != want {
 			t.Fatalf("%s: %q, %v", path, got, err)
