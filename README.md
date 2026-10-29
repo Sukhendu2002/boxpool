@@ -114,7 +114,8 @@ access token on the head with `boxpool token create --scope cli` and run
 `boxpool login <head> <token>` there; `sh`, `exec`, `cp`, `ls` and the
 lifecycle commands then go to the head over TLS on port 7443, which the
 token pins, until `boxpool logout`. `--sandbox name` limits a token to one
-sandbox and `--ttl` makes it expire. `expose` tokens are for the URLs
+sandbox and `--ttl` makes it expire. Restoring a snapshot with `--from`
+requires a token without `--sandbox`. `expose` tokens are for the URLs
 `boxpool expose` will make and cannot run commands. Tokens are stored
 hashed on the head and are not replicated: after a failover, create new
 ones on the new head.

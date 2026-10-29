@@ -30,6 +30,7 @@ boxpool login on another machine saves. cli and api tokens run sandbox
 commands and boxpool ls; expose tokens only open the URLs boxpool expose
 makes. --sandbox limits a token to one sandbox. It never expires unless
 --ttl is given. ls lists access tokens and when each was last used.
+Restoring a snapshot with --from requires a token without --sandbox.
 
 revoke makes an unused join token, or an access token, invalid at once.
 

@@ -138,11 +138,7 @@ func (s *server) remote(api http.Handler) http.HandlerFunc {
 			writeTokenError(w, err)
 			return
 		}
-		if err := allowed(tok, r); err != nil {
-			writeError(w, http.StatusForbidden, err)
-			return
-		}
-		ctx, cancel := context.WithCancel(r.Context())
+		ctx, cancel := context.WithCancelCause(r.Context())
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
@@ -155,14 +151,35 @@ func (s *server) remote(api http.Handler) http.HandlerFunc {
 				case <-t.C:
 				}
 				if _, err := s.st.UseAccessToken(ctx, hash, time.Now()); errors.Is(err, store.ErrTokenInvalid) || errors.Is(err, store.ErrTokenExpired) {
-					cancel()
+					cancel(err)
+					// Context cancellation alone cannot interrupt a net/http
+					// body read. Retire this connection as well as its request.
+					http.NewResponseController(w).SetReadDeadline(time.Now())
 					return
 				}
 			}
 		}()
-		defer func() { cancel(); <-done }() // before Run closes the store
-		r.Header.Del("Authorization")       // not forwarded to nodes
-		api.ServeHTTP(w, r.WithContext(ctx))
+		defer func() { cancel(nil); <-done }() // before Run closes the store
+		r = r.WithContext(ctx)
+		scopeErr := allowed(tok, r)
+		if err := context.Cause(ctx); err != nil {
+			w.Header().Set("Connection", "close") // do not drain an interrupted upload
+			writeTokenError(w, err)
+			return
+		}
+		if scopeErr != nil {
+			writeError(w, http.StatusForbidden, scopeErr)
+			return
+		}
+		// Authorization may have waited for the body. Close the gap before
+		// the next periodic check by checking again before any API effect.
+		if _, err := s.st.UseAccessToken(ctx, hash, time.Now()); err != nil {
+			w.Header().Set("Connection", "close")
+			writeTokenError(w, err)
+			return
+		}
+		r.Header.Del("Authorization") // not forwarded to nodes
+		api.ServeHTTP(w, r)
 	}
 }
 
@@ -217,6 +234,11 @@ func allowed(tok store.AccessToken, r *http.Request) error {
 	var req CreateRequest
 	if json.Unmarshal(body, &req) != nil || req.Name != tok.Sandbox {
 		return other
+	}
+	if req.From != "" {
+		// Snapshots are global objects that outlive their source sandbox;
+		// its historical name does not grant this token access to them.
+		return errors.New("restoring a snapshot requires a token without a sandbox restriction")
 	}
 	return nil
 }

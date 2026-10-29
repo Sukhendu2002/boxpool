@@ -4,13 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
+	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/store"
 )
@@ -45,6 +50,13 @@ func TestAllowed(t *testing.T) {
 		{web, "GET", "/v1/sandboxes/web", "", true},
 		{web, "GET", "/v1/sandboxes/web/files", "", true},
 		{web, "POST", "/v1/sandboxes", `{"name":"web","cpu":2}`, true},
+		{web, "POST", "/v1/sandboxes", `{"name":"web","from":"private-backup"}`, false},
+		{web, "POST", "/v1/sandboxes", `{"name":"web","From":"private-backup"}`, false},
+		{web, "POST", "/v1/sandboxes", `{"name":"web","\u0066rom":"private-backup"}`, false},
+		{web, "POST", "/v1/sandboxes", `{"name":"web","from":"","from":"private-backup"}`, false},
+		{web, "POST", "/v1/sandboxes", `{"name":"web","from":"private-backup","from":""}`, true},
+		{web, "POST", "/v1/sandboxes", `{"name":"web","from":null}`, true},
+		{cli, "POST", "/v1/sandboxes", `{"name":"web","from":"private-backup"}`, true},
 		{web, "POST", "/v1/sandboxes", `{"name":"other"}`, false},
 		{web, "POST", "/v1/sandboxes", `{}`, false},
 		{web, "POST", "/v1/sandboxes", `nonsense`, false},
@@ -67,6 +79,196 @@ func TestAllowed(t *testing.T) {
 		if b, _ := io.ReadAll(r.Body); string(b) != tc.body {
 			t.Errorf("%s %s: body after the check = %q, want %q", tc.method, tc.path, b, tc.body)
 		}
+	}
+}
+
+// Snapshot imports refer to a global namespace, outside a bound token's sandbox.
+func TestAccessTokenSnapshotImport(t *testing.T) {
+	local, d, st := newAPIStore(t)
+	_, private, _ := post(t, local, `{"name":"private"}`)
+	d.mu.Lock()
+	d.disk[private.ID] = "private credentials"
+	d.mu.Unlock()
+	if code, _, out := postSnapshot(t, local, "private", "private-backup"); code != http.StatusCreated {
+		t.Fatalf("snapshot = %d %s", code, out)
+	}
+	s := newServer(Info{StateDir: filepath.Dir(d.sock)}, st, d)
+	for _, scope := range []string{"cli", "api"} {
+		t.Run(scope, func(t *testing.T) {
+			tok := auth.NewAccessToken([32]byte{})
+			rec := store.AccessToken{Hash: tok.Hash(), Scope: scope, Sandbox: "web", CreatedAt: time.Now()}
+			if err := st.CreateAccessToken(context.Background(), rec); err != nil {
+				t.Fatal(err)
+			}
+			request := func(body string) *httptest.ResponseRecorder {
+				t.Helper()
+				r := httptest.NewRequest("POST", "/v1/sandboxes", strings.NewReader(body))
+				r.Header.Set("Authorization", "Bearer "+tok.String())
+				w := httptest.NewRecorder()
+				s.remote(s.handler()).ServeHTTP(w, r)
+				return w
+			}
+			w := request(`{"name":"web","from":"private-backup"}`)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("bound snapshot import = %d %s", w.Code, w.Body.String())
+			}
+			if _, err := st.GetByName(context.Background(), "web"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("rejected import created web: %v", err)
+			}
+			if w = request(`{"name":"web"}`); w.Code != http.StatusCreated {
+				t.Fatalf("bound create = %d %s", w.Code, w.Body.String())
+			}
+			if w = request(`{"name":"web"}`); w.Code != http.StatusOK {
+				t.Fatalf("bound start = %d %s", w.Code, w.Body.String())
+			}
+			// A token without a sandbox restriction can still clone snapshots.
+			rec.Sandbox = ""
+			if err := st.RevokeAccessToken(context.Background(), rec.ID()); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.CreateAccessToken(context.Background(), rec); err != nil {
+				t.Fatal(err)
+			}
+			w = request(`{"name":"copy-` + scope + `","from":"private-backup"}`)
+			if w.Code != http.StatusCreated {
+				t.Fatalf("unbound snapshot import = %d %s", w.Code, w.Body.String())
+			}
+			copy, err := st.GetByName(context.Background(), "copy-"+scope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.mu.Lock()
+			contents := d.disk[copy.ID]
+			d.mu.Unlock()
+			if contents != "private credentials" {
+				t.Fatalf("clone contents = %q", contents)
+			}
+			if code, out := call(t, local, "DELETE", "/v1/sandboxes/web?force=1"); code != http.StatusOK {
+				t.Fatalf("remove web = %d %s", code, out)
+			}
+		})
+	}
+}
+
+type accessBody struct {
+	io.ReadCloser
+	read func()
+}
+
+func (b *accessBody) Read(p []byte) (int, error) {
+	if b.read != nil {
+		b.read()
+		b.read = nil
+	}
+	return b.ReadCloser.Read(p)
+}
+
+// A token may be revoked while allowed reads the scoped create request, even
+// before the next periodic check. It must be checked again before dispatch.
+func TestAccessTokenRevokedDuringAuthorization(t *testing.T) {
+	old := revokeCheck
+	revokeCheck = time.Hour
+	t.Cleanup(func() { revokeCheck = old })
+	_, s := machine(t, "linux")
+	tok := auth.NewAccessToken([32]byte{})
+	rec := store.AccessToken{Hash: tok.Hash(), Scope: "cli", Sandbox: "web", CreatedAt: time.Now()}
+	if err := s.st.CreateAccessToken(context.Background(), rec); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/v1/sandboxes", strings.NewReader(`{"name":"web"}`))
+	r.Header.Set("Authorization", "Bearer "+tok.String())
+	r.Body = &accessBody{ReadCloser: r.Body, read: func() {
+		if err := s.st.RevokeAccessToken(context.Background(), rec.ID()); err != nil {
+			t.Fatal(err)
+		}
+	}}
+	w := httptest.NewRecorder()
+	s.remote(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("revoked request reached the API")
+	})).ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("revoked upload = %d %s", w.Code, w.Body.String())
+	}
+}
+
+// Use a real TLS connection: cancelling a context alone cannot unblock a
+// net/http request body read while the client withholds the rest of its upload.
+func TestAccessTokenEndsUpload(t *testing.T) {
+	old := revokeCheck
+	revokeCheck = 20 * time.Millisecond
+	t.Cleanup(func() { revokeCheck = old })
+	for _, action := range []string{"revoke", "expire"} {
+		t.Run(action, func(t *testing.T) {
+			_, s := machine(t, "linux")
+			reading := make(chan struct{})
+			pool := poolServer(t, s, func(next http.Handler) http.Handler {
+				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					r.Body = &accessBody{ReadCloser: r.Body, read: func() { close(reading) }}
+					next.ServeHTTP(w, r)
+				})
+			})
+			ca, _, err := auth.LoadOrCreateCA(s.info.StateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tok := auth.NewAccessToken(sha256.Sum256(ca.Raw))
+			rec := store.AccessToken{Hash: tok.Hash(), Scope: "cli", Sandbox: "web", CreatedAt: time.Now()}
+			if action == "expire" {
+				rec.ExpiresAt = time.Now().Add(time.Second)
+			}
+			if err := s.st.CreateAccessToken(context.Background(), rec); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			reader, writer := io.Pipe()
+			defer writer.Close()
+			defer reader.Close()
+			r, err := http.NewRequestWithContext(ctx, "POST", pool.URL+"/v1/sandboxes", reader)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r.Header.Set("Authorization", "Bearer "+tok.String())
+			hc := &http.Client{Transport: &http.Transport{TLSClientConfig: tok.TLS()}}
+			defer hc.CloseIdleConnections()
+			type result struct {
+				status int
+				body   string
+				err    error
+			}
+			finished := make(chan result, 1)
+			go func() {
+				resp, err := hc.Do(r)
+				if err != nil {
+					finished <- result{err: err}
+					return
+				}
+				defer resp.Body.Close()
+				body, err := io.ReadAll(resp.Body)
+				finished <- result{status: resp.StatusCode, body: string(body), err: err}
+			}()
+			select {
+			case <-reading:
+			case <-ctx.Done():
+				t.Fatal("server did not start reading upload")
+			}
+			if action == "revoke" {
+				if err := s.st.RevokeAccessToken(ctx, rec.ID()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case got := <-finished:
+				if got.err != nil || got.status != http.StatusUnauthorized {
+					t.Fatalf("%s during upload = %+v", action, got)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("upload outlived its revoked or expired token by 5 seconds")
+			}
+			if _, err := s.st.GetByName(ctx, "web"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatalf("unauthorized upload created web: %v", err)
+			}
+		})
 	}
 }
 
@@ -194,5 +396,52 @@ func TestRevokeEndsSessions(t *testing.T) {
 	case <-ended:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the session outlived its revoked token by 5 seconds")
+	}
+}
+
+func TestRevokeEndsExec(t *testing.T) {
+	old := revokeCheck
+	revokeCheck = 20 * time.Millisecond
+	t.Cleanup(func() { revokeCheck = old })
+	local, d, st := newAPIStore(t)
+	post(t, local, `{"name":"web"}`)
+	s := newServer(Info{StateDir: filepath.Dir(d.sock)}, st, d)
+	pool := poolServer(t, s, nil)
+	code, body := send(t, local, "POST", "/v1/access-tokens", `{"scope":"cli","sandbox":"web"}`)
+	var access AccessToken
+	if err := json.Unmarshal([]byte(body), &access); err != nil || code != http.StatusCreated {
+		t.Fatalf("create token = %d %s: %v", code, body, err)
+	}
+	tok, err := auth.ParseAccessToken(access.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: tok.TLS()}}
+	defer hc.CloseIdleConnections()
+	conn, _, err := websocket.Dial(ctx, pool.URL+"/v1/sandboxes/web/exec", &websocket.DialOptions{
+		HTTPClient: hc, HTTPHeader: http.Header{"Authorization": {"Bearer " + access.Token}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	session, err := agent.Start(ctx, conn, agent.ExecRequest{Argv: []string{"sleep", "30"}}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RevokeAccessToken(ctx, access.ID); err != nil {
+		t.Fatal(err)
+	}
+	ended := make(chan error, 1)
+	go func() { _, err := session.Wait(); ended <- err }()
+	select {
+	case err := <-ended:
+		if err == nil {
+			t.Fatal("revoked exec completed normally")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("exec outlived its revoked token by 5 seconds")
 	}
 }
