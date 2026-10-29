@@ -1,9 +1,11 @@
 package docker
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -50,6 +52,7 @@ type fakeContainer struct {
 	exit    int
 	stop    context.CancelFunc // stops the agent
 	done    chan struct{}
+	files   map[string]string // /root's files, by path relative to it
 }
 
 func newFakeEngine(t *testing.T) *fakeEngine {
@@ -284,6 +287,40 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			f.halt(c)
 			w.WriteHeader(204)
+		case "GET archive":
+			if r.URL.Query().Get("path") != "/root" {
+				errorf(w, 400, "unexpected path %s", r.URL.Query().Get("path"))
+				return
+			}
+			// As Docker does: rooted at the path's base name.
+			tw := tar.NewWriter(w)
+			tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: "root/", Mode: 0700})
+			for name, data := range c.files {
+				tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "root/" + name, Mode: 0644, Size: int64(len(data))})
+				io.WriteString(tw, data)
+			}
+			tw.Close()
+		case "PUT archive":
+			if r.URL.Query().Get("path") != "/root" || r.Header.Get("Content-Type") != "application/x-tar" {
+				errorf(w, 400, "unexpected path %s or content type", r.URL.Query().Get("path"))
+				return
+			}
+			tr := tar.NewReader(r.Body)
+			for {
+				h, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					errorf(w, 400, "%v", err)
+					return
+				}
+				b, _ := io.ReadAll(tr)
+				if c.files == nil {
+					c.files = map[string]string{}
+				}
+				c.files[h.Name] = string(b)
+			}
 		case "DELETE ":
 			if c.running && r.URL.Query().Get("force") != "1" {
 				errorf(w, 409, "container is running")

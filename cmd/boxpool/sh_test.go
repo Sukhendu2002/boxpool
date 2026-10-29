@@ -59,6 +59,9 @@ func (d *fakeDriver) Start(_ context.Context, id string) error { d.set(id, true)
 func (d *fakeDriver) Stop(_ context.Context, id string) error  { d.set(id, false); return nil }
 func (d *fakeDriver) Pause(context.Context, string) error      { return nil }
 func (d *fakeDriver) Resume(context.Context, string) error     { return nil }
+func (d *fakeDriver) Snapshot(_ context.Context, _, path string) error {
+	return os.WriteFile(path, nil, 0600)
+}
 func (d *fakeDriver) Remove(_ context.Context, id string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -142,7 +145,7 @@ func startDaemon(t *testing.T, dir string) (kill func()) {
 		t.Fatal(err)
 	}
 	cl := &connListener{Listener: l}
-	info := daemon.Info{Backend: "fake", Warning: "test warning"}
+	info := daemon.Info{Backend: "fake", Warning: "test warning", StateDir: dir}
 	h := daemon.Handler(info, st, &fakeDriver{sock: sock, up: map[string]bool{}})
 	go http.Serve(cl, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if f := beforeExec.Load(); f != nil && strings.HasSuffix(r.URL.Path, "/exec") {
@@ -345,6 +348,20 @@ func TestSh(t *testing.T) {
 		tm.expect("40 120")
 		tm.send("exit\r")
 		r.wait(t, 0)
+	})
+
+	t.Run("from a snapshot, with a command", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := client.New(tmp).SnapshotSandbox(ctx, "web", "snap"); err != nil {
+			t.Fatal(err)
+		}
+		r, tm := boxpool(t, tmp, "sh", "--from", "snap", "--name", "copy", "--", "/bin/echo", "from-snapshot")
+		tm.expect("from-snapshot")
+		r.wait(t, 0)
+		if r, _ := boxpool(t, tmp, "sh", "--from", "snap", "web"); !strings.Contains(r.wait(t, 2), "cannot attach") {
+			t.Error("sh --from with an existing sandbox did not refuse")
+		}
 	})
 
 	t.Run("unknown name", func(t *testing.T) {

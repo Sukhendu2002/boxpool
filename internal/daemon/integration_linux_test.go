@@ -146,6 +146,7 @@ printf '%s\n' "$limit"`))
 		t.Errorf("exit 7 = %d, %v", code, err)
 	}
 	copyRoundTrip(t, ctx, c, sb.Name)
+	snapshotRoundTrip(t, ctx, c, sb.Name, backend)
 
 	// ls, stop and rm, across a daemon restart.
 	other, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "other", CPUs: 1, MemoryMB: 512, DiskGB: 1})
@@ -298,6 +299,64 @@ func copyRoundTrip(t *testing.T, ctx context.Context, c *client.Client, name str
 		if err != nil || a.Mode() != b.Mode() || !a.ModTime().Equal(b.ModTime()) {
 			t.Errorf("%s: %v %v, want %v %v (%v)", f, b.Mode(), b.ModTime(), a.Mode(), a.ModTime(), err)
 		}
+	}
+}
+
+// snapshotRoundTrip snapshots the running sandbox, starts two sandboxes
+// from the snapshot, changes one and checks the other, then removes both
+// and the snapshot.
+func snapshotRoundTrip(t *testing.T, ctx context.Context, c *client.Client, name, backend string) {
+	t.Helper()
+	run := func(sandbox, script string) string {
+		t.Helper()
+		var out bytes.Buffer
+		s, err := c.Exec(ctx, sandbox, agent.ExecRequest{Argv: []string{"sh", "-c", script}}, &out, &out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code, err := s.Wait(); code != 0 || err != nil {
+			t.Fatalf("%s in %s: exit %d, %v: %s", script, sandbox, code, err, out.String())
+		}
+		return out.String()
+	}
+	// Docker keeps only /root; a VM keeps its whole disk, packages too.
+	files := map[string]string{"/root/installed": "jq\n"}
+	if backend == "firecracker" {
+		files["/usr/local/bin/installed"] = "jq\n"
+	}
+	for f := range files {
+		run(name, "echo jq > "+f)
+	}
+	snap, err := c.SnapshotSandbox(ctx, name, "it-snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Warning != "" {
+		t.Logf("snapshot warning: %s", snap.Warning)
+	}
+	// The source runs again, with its disk.
+	if got := run(name, "cat /root/installed"); got != "jq\n" {
+		t.Errorf("source after snapshot: %q", got)
+	}
+	run(name, "echo source > /root/installed")
+	for _, n := range []string{"from-a", "from-b"} {
+		if _, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: n, From: "it-snap", CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("from-a", "echo changed > /root/installed")
+	for f, want := range files {
+		if got := run("from-b", "cat "+f); got != want {
+			t.Errorf("%s in from-b = %q, want %q", f, got, want)
+		}
+	}
+	for _, n := range []string{"from-a", "from-b"} {
+		if _, err := c.RemoveSandbox(ctx, n, true); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, err := c.RemoveSnapshot(ctx, "it-snap"); err != nil {
+		t.Error(err)
 	}
 }
 

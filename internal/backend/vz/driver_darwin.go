@@ -95,7 +95,7 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths) (*Driver, 
 func (d *Driver) Name() string { return "vz" }
 
 // Create reserves capacity and makes the sandbox's disk an APFS clone of the
-// base rootfs, sized to Spec.DiskGB GiB; Start grows the file system into
+// base rootfs, or of the disk snapshot Spec.From, sized to Spec.DiskGB GiB; Start grows the file system into
 // it. Spec.Image is ignored (there is one image).
 func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
 	if err := validID(id); err != nil {
@@ -118,8 +118,12 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	}
 	l := sandboxLayout(d.root, id)
 	b, _ := json.Marshal(spec)
+	src := d.rootfs
+	if spec.From != "" {
+		src = spec.From
+	}
 	// clonefile keeps the base image shared until the guest writes.
-	err = unix.Clonefile(d.rootfs, l.rootfs, 0)
+	err = unix.Clonefile(src, l.rootfs, 0)
 	if err == nil {
 		err = growDisk(l.rootfs, int64(spec.DiskGB)<<30)
 	}
@@ -165,6 +169,30 @@ func growDisk(path string, size int64) error {
 		return fmt.Errorf("requested disk is smaller than base image (%d bytes)", fi.Size())
 	}
 	return os.Truncate(path, size)
+}
+
+// Snapshot makes path an APFS clone of a stopped sandbox's disk. A running
+// or paused sandbox is refused: its disk may lag what the guest has written.
+func (d *Driver) Snapshot(ctx context.Context, id, path string) error {
+	if err := validID(id); err != nil {
+		return err
+	}
+	unlock, err := d.admission.LockSandbox(ctx, "vz", id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	l, _, err := d.load(id)
+	if err != nil {
+		return err
+	}
+	if d.running(id) != nil || savedState(l) {
+		return fmt.Errorf("snapshot sandbox %s: it is not stopped", id)
+	}
+	if err := unix.Clonefile(l.rootfs, path, 0); err != nil {
+		return fmt.Errorf("snapshot sandbox %s: %w", id, err)
+	}
+	return nil
 }
 
 // Start boots the sandbox, or restores a saved machine state, and returns

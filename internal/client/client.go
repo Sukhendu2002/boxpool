@@ -137,6 +137,31 @@ func (c *Client) RemoveSandbox(ctx context.Context, name string, force bool) (da
 	return sb, err
 }
 
+// SnapshotSandbox copies the named sandbox's disk to a new snapshot called
+// snapshot. The daemon stops a running sandbox for the copy and starts it
+// again. The result's Warning is set if it did not stop cleanly.
+func (c *Client) SnapshotSandbox(ctx context.Context, name, snapshot string) (daemon.Snapshot, error) {
+	var snap daemon.Snapshot
+	body, _ := json.Marshal(daemon.SnapshotRequest{Name: snapshot})
+	err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(name)+"/snapshot", bytes.NewReader(body), &snap)
+	return snap, err
+}
+
+// ListSnapshots returns every snapshot on this node, oldest first.
+func (c *Client) ListSnapshots(ctx context.Context) ([]daemon.Snapshot, error) {
+	var list []daemon.Snapshot
+	err := c.get(ctx, "/v1/snapshots", &list)
+	return list, err
+}
+
+// RemoveSnapshot deletes the named snapshot. Sandboxes started from it are
+// not affected.
+func (c *Client) RemoveSnapshot(ctx context.Context, name string) (daemon.Snapshot, error) {
+	var snap daemon.Snapshot
+	err := c.do(ctx, http.MethodDelete, "/v1/snapshots/"+url.PathEscape(name), nil, &snap)
+	return snap, err
+}
+
 // Exec starts a command in the named sandbox through the daemon, which
 // relays the agent's exec protocol unchanged.
 func (c *Client) Exec(ctx context.Context, name string, req agent.ExecRequest, stdout, stderr io.Writer) (*agent.Session, error) {

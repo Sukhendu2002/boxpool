@@ -24,7 +24,8 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("sandbox not found")
+	ErrNotFound         = errors.New("sandbox not found")
+	ErrSnapshotNotFound = errors.New("snapshot not found")
 	// ErrNameTaken is wrapped as `sandbox name "web" already exists`.
 	ErrNameTaken = errors.New("already exists")
 )
@@ -145,10 +146,7 @@ func (s *Store) Create(ctx context.Context, sb Sandbox) (Sandbox, error) {
 	if sb.Spec, err = sb.Spec.WithDefaults(); err != nil {
 		return Sandbox{}, err
 	}
-	id := make([]byte, 6)
-	rand.Read(id)
-	sb.ID = hex.EncodeToString(id)
-	sb.CreatedAt = time.Now().UTC()
+	sb.ID, sb.CreatedAt = newID(), time.Now().UTC()
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO sandboxes (id, name, backend, image, cpus, memory_mb, disk_gb, state, created_at, restart)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -228,6 +226,89 @@ func scan(row interface{ Scan(...any) error }) (Sandbox, error) {
 	}
 	sb.CreatedAt, err = time.Parse(timeFormat, created)
 	return sb, err
+}
+
+func newID() string {
+	id := make([]byte, 6)
+	rand.Read(id)
+	return hex.EncodeToString(id)
+}
+
+// Snapshot is a named copy of a sandbox's disk, which new sandboxes on the
+// same backend can start from. Sandbox is the source's name when it was
+// taken.
+type Snapshot struct {
+	ID        string
+	Name      string
+	Backend   string
+	Sandbox   string
+	DiskGB    int
+	CreatedAt time.Time
+}
+
+// CreateSnapshot stores snap under a new ID and returns it with ID and
+// CreatedAt set.
+func (s *Store) CreateSnapshot(ctx context.Context, snap Snapshot) (Snapshot, error) {
+	snap.ID, snap.CreatedAt = newID(), time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO snapshots (id, name, backend, sandbox, disk_gb, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		snap.ID, snap.Name, snap.Backend, snap.Sandbox, snap.DiskGB, snap.CreatedAt.Format(timeFormat))
+	var serr *sqlite.Error
+	if errors.As(err, &serr) && serr.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+		return Snapshot{}, fmt.Errorf("snapshot name %q %w", snap.Name, ErrNameTaken)
+	}
+	if err != nil {
+		return Snapshot{}, err
+	}
+	return snap, nil
+}
+
+const selectSnapshot = `SELECT id, name, backend, sandbox, disk_gb, created_at FROM snapshots`
+
+// GetSnapshot returns the snapshot with the given name.
+func (s *Store) GetSnapshot(ctx context.Context, name string) (Snapshot, error) {
+	return scanSnapshot(s.db.QueryRowContext(ctx, selectSnapshot+` WHERE name = ?`, name))
+}
+
+// ListSnapshots returns all snapshots, oldest first.
+func (s *Store) ListSnapshots(ctx context.Context) ([]Snapshot, error) {
+	rows, err := s.db.QueryContext(ctx, selectSnapshot+` ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []Snapshot
+	for rows.Next() {
+		snap, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, err
+		}
+		list = append(list, snap)
+	}
+	return list, rows.Err()
+}
+
+// DeleteSnapshot removes the snapshot with the given ID.
+func (s *Store) DeleteSnapshot(ctx context.Context, id string) error {
+	err := expectOne(s.db.ExecContext(ctx, `DELETE FROM snapshots WHERE id = ?`, id))
+	if errors.Is(err, ErrNotFound) {
+		return ErrSnapshotNotFound
+	}
+	return err
+}
+
+func scanSnapshot(row interface{ Scan(...any) error }) (Snapshot, error) {
+	var snap Snapshot
+	var created string
+	err := row.Scan(&snap.ID, &snap.Name, &snap.Backend, &snap.Sandbox, &snap.DiskGB, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Snapshot{}, ErrSnapshotNotFound
+	}
+	if err != nil {
+		return Snapshot{}, err
+	}
+	snap.CreatedAt, err = time.Parse(timeFormat, created)
+	return snap, err
 }
 
 // ErrNoSlots is returned by NetSlot when every slot is taken.

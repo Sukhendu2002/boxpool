@@ -512,3 +512,44 @@ func TestEngineErrorBody(t *testing.T) {
 		t.Errorf("List: %v", err)
 	}
 }
+
+// TestSnapshot checks that a sandbox created from a snapshot starts with the
+// source's /root, and that a running sandbox is refused.
+func TestSnapshot(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeEngine(t)
+	d := f.driver(ctx, f.serve())
+	if _, err := d.Create(ctx, "abc", spec); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.containers[d.name("abc")].files = map[string]string{".bashrc": "alias ll='ls -l'", "bin/jq": "jq"}
+	f.mu.Unlock()
+	path := filepath.Join(t.TempDir(), "snap")
+	if err := d.Start(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Snapshot(ctx, "abc", path); err == nil || !strings.Contains(err.Error(), "not stopped") {
+		t.Errorf("Snapshot of a running sandbox = %v", err)
+	}
+	if err := d.Stop(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Snapshot(ctx, "abc", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Snapshot(ctx, "abc", path); err == nil {
+		t.Error("Snapshot over an existing file succeeded")
+	}
+	from := spec
+	from.From = path
+	if _, err := d.Create(ctx, "def", from); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	got := f.containers[d.name("def")].files
+	if len(got) != 2 || got[".bashrc"] != "alias ll='ls -l'" || got["bin/jq"] != "jq" {
+		t.Errorf("/root from the snapshot = %q", got)
+	}
+}

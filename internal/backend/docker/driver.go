@@ -1,10 +1,12 @@
 package docker
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"time"
 
 	"boxpool.run/boxpool/internal/agent"
@@ -104,7 +107,8 @@ func (d *Driver) name(id string) string { return d.prefix + id }
 
 // Create makes the sandbox's directory, volume, network and container,
 // pulling the image if the engine lacks it. Spec.Image, if set, must pin a
-// tag or digest; the default is DefaultImage. On failure it removes what it
+// tag or digest; the default is DefaultImage. With Spec.From, /root starts
+// as the snapshot's instead of the image's. On failure it removes what it
 // made, and never touches resources that already existed.
 func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ backend.Sandbox, err error) {
 	if err := checkID(id); err != nil {
@@ -193,8 +197,16 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 	made = append(made, func(ctx context.Context) error { return d.removeContainer(ctx, id) })
 	cfg := newContainerConfig(d.root, id, spec, image, name, l)
 	cfg.HostConfig.CpusetCpus = allocation.CPUSet()
-	if err := d.e.do(ctx, http.MethodPost, "/containers/create", url.Values{"name": {name}}, cfg, nil); err != nil {
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := d.e.do(ctx, http.MethodPost, "/containers/create", url.Values{"name": {name}}, cfg, &created); err != nil {
 		return backend.Sandbox{}, err
+	}
+	if spec.From != "" {
+		if err := d.restore(ctx, created.ID, spec.From); err != nil {
+			return backend.Sandbox{}, err
+		}
 	}
 	return backend.Sandbox{ID: id, Name: spec.Name, State: backend.StateStopped}, nil
 }
@@ -511,6 +523,96 @@ func (d *Driver) Pause(ctx context.Context, id string) error {
 
 func (d *Driver) Resume(ctx context.Context, id string) error {
 	return fmt.Errorf("resume: %w: docker cannot save a container's memory", backend.ErrNotSupported)
+}
+
+// Snapshot saves /root of a stopped sandbox, the only path that persists,
+// to path as a tar of its contents. The root file system is read-only, so
+// docker commit would save nothing the guest changed. A running sandbox is
+// refused: its files may be mid-write.
+func (d *Driver) Snapshot(ctx context.Context, id, path string) (err error) {
+	if err := checkID(id); err != nil {
+		return err
+	}
+	unlock, err := d.admission.LockSandbox(ctx, "docker", id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	c, err := d.inspect(ctx, id)
+	if err != nil {
+		return err
+	}
+	if c.State.Running {
+		return fmt.Errorf("snapshot sandbox %s: it is not stopped", id)
+	}
+	ctx, cancel := context.WithTimeout(ctx, archiveTimeout)
+	defer cancel()
+	resp, err := d.e.send(ctx, http.MethodGet, "/containers/"+c.ID+"/archive", url.Values{"path": {"/root"}}, nil)
+	if err != nil {
+		return fmt.Errorf("snapshot sandbox %s: %w", id, err)
+	}
+	defer resp.Body.Close()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			os.Remove(path)
+			err = fmt.Errorf("snapshot sandbox %s: %w", id, err)
+		}
+	}()
+	err = rebase(f, resp.Body, "root/")
+	if err == nil {
+		err = f.Sync()
+	}
+	return errors.Join(err, f.Close())
+}
+
+// rebase copies the tar in to out with prefix cut from every name, dropping
+// the entry for the prefix itself, so it extracts into the prefix's
+// directory.
+func rebase(out io.Writer, in io.Reader, prefix string) error {
+	tr, tw := tar.NewReader(in), tar.NewWriter(out)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return tw.Close()
+		}
+		if err != nil {
+			return err
+		}
+		name, ok := strings.CutPrefix(h.Name, prefix)
+		if !ok || name == "" {
+			continue
+		}
+		h.Name = name
+		if h.Typeflag == tar.TypeLink {
+			h.Linkname = strings.TrimPrefix(h.Linkname, prefix)
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			return err
+		}
+		if _, err := io.Copy(tw, tr); err != nil {
+			return err
+		}
+	}
+}
+
+// restore extracts the snapshot at path into /root of the container cid.
+func (d *Driver) restore(ctx context.Context, cid, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	ctx, cancel := context.WithTimeout(ctx, archiveTimeout)
+	defer cancel()
+	resp, err := d.e.send(ctx, http.MethodPut, "/containers/"+cid+"/archive", url.Values{"path": {"/root"}}, f)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
 }
 
 // List returns the driver's sandboxes, running or not, found by their

@@ -33,6 +33,9 @@ type Spec struct {
 	CPUs     int
 	MemoryMB int
 	DiskGB   int
+	// From, if set, is a snapshot that Snapshot wrote, to copy the disk
+	// from instead of the base image. DiskGB must be at least its size.
+	From string `json:"-"`
 }
 
 // WithDefaults fills unspecified limits. MemoryMB is in MiB and DiskGB in
@@ -85,4 +88,7 @@ type Driver interface {
 	Stop(ctx context.Context, id string) error
 	Remove(ctx context.Context, id string) error
 	List(ctx context.Context) ([]Sandbox, error)
+	// Snapshot copies the disk of a stopped sandbox to path, a new file in
+	// the state directory, for Spec.From. The sandbox stays usable.
+	Snapshot(ctx context.Context, id, path string) error
 }
