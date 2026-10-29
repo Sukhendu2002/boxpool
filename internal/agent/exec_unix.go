@@ -55,9 +55,10 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 		stdin io.WriteCloser
 		outs  map[byte]*os.File
 		tty   *os.File
+		slave *os.File
 	)
 	if req.TTY {
-		tty, err = startPTY(cmd, req.Rows, req.Cols)
+		tty, slave, err = startPTY(cmd, req.Rows, req.Cols)
 		stdin, outs = tty, map[byte]*os.File{Stdout: tty}
 	} else {
 		stdin, outs, err = startPipes(cmd)
@@ -113,6 +114,12 @@ func runExec(ctx context.Context, c *websocket.Conn) {
 		})
 	}
 	cmd.Wait()
+	// Held until now: on macOS, output still unread when the last slave
+	// descriptor closes is lost, as with a command that exits at once.
+	// Before stopClose, so an abort still unblocks a close that drains.
+	if slave != nil {
+		slave.Close()
+	}
 	stopClose()
 	close(exited)
 	for _, f := range outs {
@@ -157,13 +164,17 @@ func startPipes(cmd *exec.Cmd) (io.WriteCloser, map[byte]*os.File, error) {
 }
 
 // startPTY starts cmd in a new session on a new PTY and returns the PTY
-// master.
-func startPTY(cmd *exec.Cmd, rows, cols uint16) (*os.File, error) {
+// master and slave.
+func startPTY(cmd *exec.Cmd, rows, cols uint16) (_, _ *os.File, err error) {
 	ptmx, tty, err := pty.Open()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer tty.Close()
+	defer func() {
+		if err != nil {
+			tty.Close()
+		}
+	}()
 	// pty.Open leaves the master in blocking mode, where a read cannot be
 	// cut short by a deadline; a background child can keep the PTY open
 	// after the session leader exits. Use a non-blocking duplicate, which
@@ -171,11 +182,11 @@ func startPTY(cmd *exec.Cmd, rows, cols uint16) (*os.File, error) {
 	fd, err := unix.FcntlInt(ptmx.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	ptmx.Close()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := unix.SetNonblock(fd, true); err != nil {
 		unix.Close(fd)
-		return nil, err
+		return nil, nil, err
 	}
 	master := os.NewFile(uintptr(fd), "ptmx")
 	if rows == 0 || cols == 0 {
@@ -183,15 +194,15 @@ func startPTY(cmd *exec.Cmd, rows, cols uint16) (*os.File, error) {
 	}
 	if err := setSize(master, rows, cols); err != nil {
 		master.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
 	if err := cmd.Start(); err != nil {
 		master.Close()
-		return nil, err
+		return nil, nil, err
 	}
-	return master, nil
+	return master, tty, nil
 }
 
 // setSize sets the window size of the PTY whose master is f. pty.Setsize

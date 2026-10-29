@@ -357,8 +357,13 @@ func TestSh(t *testing.T) {
 			t.Fatal(err)
 		}
 		r, tm := boxpool(t, tmp, "sh", "--from", "snap", "--name", "copy", "--", "/bin/echo", "from-snapshot")
-		tm.expect("from-snapshot")
-		r.wait(t, 0)
+		stderr := r.wait(t, 0)
+		tm.mu.Lock()
+		out := tm.out.String()
+		tm.mu.Unlock()
+		if !strings.Contains(out, "from-snapshot") {
+			t.Errorf("terminal output %q lacks the command's; stderr %q", out, stderr)
+		}
 		if r, _ := boxpool(t, tmp, "sh", "--from", "snap", "web"); !strings.Contains(r.wait(t, 2), "cannot attach") {
 			t.Error("sh --from with an existing sandbox did not refuse")
 		}

@@ -227,6 +227,18 @@ func wait(t *testing.T, s *Session, out *output, want int) {
 	}
 }
 
+// TestPTYFastExit checks that a command that exits at once on a PTY keeps
+// its output; on macOS it was lost now and then under load.
+func TestPTYFastExit(t *testing.T) {
+	for range 100 {
+		s, out := execPTY(t, "echo", "fast")
+		wait(t, s, out, 0)
+		if got := out.String(); !strings.Contains(got, "fast") {
+			t.Fatalf("output %q", got)
+		}
+	}
+}
+
 func TestPTYResize(t *testing.T) {
 	s, out := execPTY(t, "sh", "-c", "stty size; read x; stty size")
 	out.waitFor(t, "24 80")
