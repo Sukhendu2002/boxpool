@@ -601,3 +601,27 @@ func TestRebase(t *testing.T) {
 		t.Errorf("rebase = %q, want %q", got, want)
 	}
 }
+
+// TestStopWaitsForList checks that Stop returns only once List agrees, as
+// Docker 28.0 lists a container as running for a moment after its stop.
+func TestStopWaitsForList(t *testing.T) {
+	ctx := context.Background()
+	f := newFakeEngine(t)
+	d := f.driver(ctx, f.serve())
+	if _, err := d.Create(ctx, "abc", spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Start(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.listLag = 3
+	f.mu.Unlock()
+	if err := d.Stop(ctx, "abc"); err != nil {
+		t.Fatal(err)
+	}
+	listIs(t, d, backend.Sandbox{ID: "abc", Name: "web", State: backend.StateStopped})
+	if n := f.count("GET /containers/json"); n < 4 {
+		t.Errorf("Stop listed %d times, want at least 4 (3 stale)", n)
+	}
+}

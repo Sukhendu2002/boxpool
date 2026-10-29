@@ -37,6 +37,7 @@ type fakeEngine struct {
 	hook        func(method, path string)    // called before each request is handled
 	requests    []string
 	noAgent     bool // started containers serve no agent
+	listLag     int  // list calls after a stop that still list the container running, as Docker 28.0 can
 	exitOnStart bool // started containers exit at once
 }
 
@@ -53,6 +54,7 @@ type fakeContainer struct {
 	stop    context.CancelFunc // stops the agent
 	done    chan struct{}
 	files   map[string]string // /root's files, by path relative to it
+	stale   int               // list calls left that still list it running
 }
 
 func newFakeEngine(t *testing.T) *fakeEngine {
@@ -254,8 +256,9 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			state := "exited"
-			if c.running {
+			if c.running || c.stale > 0 {
 				state = "running"
+				c.stale = max(c.stale-1, 0)
 			}
 			list = append(list, map[string]any{"Names": []string{"/" + name}, "Labels": c.cfg.Labels, "State": state})
 		}
@@ -286,6 +289,7 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			f.halt(c)
+			c.stale = f.listLag
 			w.WriteHeader(204)
 		case "GET archive":
 			if r.URL.Query().Get("path") != "/root" {

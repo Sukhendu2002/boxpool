@@ -412,7 +412,29 @@ func (d *Driver) Stop(ctx context.Context, id string) error {
 	if err := d.stop(ctx, c.ID, stopTimeout); err != nil {
 		return fmt.Errorf("stop sandbox %s: %w", id, err)
 	}
-	return nil
+	return d.waitListedStopped(ctx, id)
+}
+
+// waitListedStopped waits until List reports the sandbox stopped. Docker
+// 28.0 can list a container as running for a moment after its stop
+// returned, while inspecting it already says it exited.
+func (d *Driver) waitListedStopped(ctx context.Context, id string) error {
+	ctx, cancel := context.WithTimeout(ctx, apiTimeout)
+	defer cancel()
+	for {
+		list, err := d.List(ctx)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(list, func(sb backend.Sandbox) bool { return sb.ID == id && sb.State != backend.StateStopped }) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("stop sandbox %s: docker still lists it as running: %w", id, ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func (d *Driver) stop(ctx context.Context, cid string, grace time.Duration) error {
