@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/backend"
 	"boxpool.run/boxpool/internal/store"
 )
@@ -127,6 +129,23 @@ type Sandbox struct {
 	Warning string `json:"warning,omitempty"`
 }
 
+// DefaultTokenTTL is how long a join token is valid by default.
+const DefaultTokenTTL = time.Hour
+
+// TokenRequest is the body of POST /v1/tokens. Zero fields get
+// DefaultTokenTTL and this host's name with auth.JoinPort.
+type TokenRequest struct {
+	TTL  time.Duration `json:"ttl_ns,omitempty"`
+	Addr string        `json:"addr,omitempty"`
+}
+
+// Token is a new join token. Revoke it with DELETE /v1/tokens/{hash},
+// where hash is auth.JoinToken.Hash.
+type Token struct {
+	Token     string    `json:"token"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 // Error is the body of every API error.
 type Error struct {
 	Message string `json:"message"`
@@ -139,14 +158,15 @@ var validName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`).MatchString
 type server struct {
 	st        *store.Store
 	d         Driver     // nil when this node has no usable backend
-	mu        sync.Mutex // serialises changing sandboxes and snapshots
+	mu        sync.Mutex // serialises changing sandboxes, snapshots and the CA
 	snapshots string     // directory of the snapshot files, named by ID
+	stateDir  string     // holds the head CA
 }
 
 // Handler returns the daemon's HTTP API. Without a driver, the sandbox
 // endpoints answer 503.
 func Handler(info Info, st *store.Store, d Driver) http.Handler {
-	s := &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots")}
+	s := &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), stateDir: info.StateDir}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]bool{"ok": true})
@@ -168,7 +188,65 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.backendOnly(s.exec))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/files", s.backendOnly(s.files))
 	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.backendOnly(s.files))
+	mux.HandleFunc("POST /v1/tokens", s.createToken)
+	mux.HandleFunc("DELETE /v1/tokens/{hash}", s.revokeToken)
 	return mux
+}
+
+// createToken issues a single-use join token naming this node as the head,
+// creating the head CA first if there is none.
+func (s *server) createToken(w http.ResponseWriter, r *http.Request) {
+	var req TokenRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return
+	}
+	if req.TTL < 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid ttl %s: must be positive", req.TTL))
+		return
+	}
+	req.TTL = cmp.Or(req.TTL, DefaultTokenTTL)
+	if req.Addr == "" {
+		host, err := os.Hostname()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		req.Addr = net.JoinHostPort(host, auth.JoinPort)
+	}
+	if host, port, err := net.SplitHostPort(req.Addr); err != nil || host == "" || port == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid head address %q: use host:port", req.Addr))
+		return
+	}
+	s.mu.Lock()
+	ca, err := auth.LoadOrCreateCA(s.stateDir)
+	s.mu.Unlock()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("head CA: %w", err))
+		return
+	}
+	tok := auth.NewJoinToken(req.Addr, sha256.Sum256(ca.Raw))
+	expires := time.Now().Add(req.TTL)
+	if err := s.st.CreateJoinToken(r.Context(), tok.Hash(), expires); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(Token{Token: tok.String(), ExpiresAt: expires})
+}
+
+func (s *server) revokeToken(w http.ResponseWriter, r *http.Request) {
+	err := s.st.RevokeJoinToken(r.Context(), r.PathValue("hash"))
+	if errors.Is(err, store.ErrTokenInvalid) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) backendOnly(h http.HandlerFunc) http.HandlerFunc {

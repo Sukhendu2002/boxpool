@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 
 	"boxpool.run/boxpool/internal/agent"
+	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/daemon"
 )
 
@@ -160,6 +161,28 @@ func (c *Client) RemoveSnapshot(ctx context.Context, name string) (daemon.Snapsh
 	var snap daemon.Snapshot
 	err := c.do(ctx, http.MethodDelete, "/v1/snapshots/"+url.PathEscape(name), nil, &snap)
 	return snap, err
+}
+
+// CreateJoinToken returns a new single-use join token for this node's pool.
+func (c *Client) CreateJoinToken(ctx context.Context, req daemon.TokenRequest) (daemon.Token, error) {
+	var tok daemon.Token
+	body, _ := json.Marshal(req)
+	err := c.do(ctx, http.MethodPost, "/v1/tokens", bytes.NewReader(body), &tok)
+	return tok, err
+}
+
+// RevokeJoinToken makes an unused join token invalid. Only its hash is
+// sent to the daemon.
+func (c *Client) RevokeJoinToken(ctx context.Context, token string) error {
+	t, err := auth.ParseJoinToken(token)
+	if err != nil {
+		return err
+	}
+	resp, err := c.send(ctx, http.MethodDelete, "/v1/tokens/"+t.Hash(), "", nil)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
 }
 
 // Exec starts a command in the named sandbox through the daemon, which

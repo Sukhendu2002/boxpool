@@ -227,3 +227,45 @@ func TestSnapshots(t *testing.T) {
 		t.Errorf("second DeleteSnapshot() = %v, want ErrSnapshotNotFound", err)
 	}
 }
+
+func TestJoinTokens(t *testing.T) {
+	ctx := context.Background()
+	s := open(t, filepath.Join(t.TempDir(), "state.db"))
+	t0 := time.Now()
+	for _, h := range []string{"once", "late", "revoked"} {
+		if err := s.CreateJoinToken(ctx, h, t0.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.UseJoinToken(ctx, "once", t0.Add(59*time.Minute)); err != nil {
+		t.Errorf("first UseJoinToken() = %v", err)
+	}
+	if err := s.UseJoinToken(ctx, "once", t0); !errors.Is(err, ErrTokenInvalid) {
+		t.Errorf("second UseJoinToken() = %v, want ErrTokenInvalid", err)
+	}
+	if err := s.UseJoinToken(ctx, "late", t0.Add(time.Hour)); !errors.Is(err, ErrTokenExpired) || err.Error() != "token expired" {
+		t.Errorf("UseJoinToken() at expiry = %v, want ErrTokenExpired", err)
+	}
+	if err := s.UseJoinToken(ctx, "unknown", t0); !errors.Is(err, ErrTokenInvalid) {
+		t.Errorf("UseJoinToken() of an unknown hash = %v, want ErrTokenInvalid", err)
+	}
+	if err := s.RevokeJoinToken(ctx, "revoked"); err != nil {
+		t.Errorf("RevokeJoinToken() = %v", err)
+	}
+	if err := s.UseJoinToken(ctx, "revoked", t0); !errors.Is(err, ErrTokenInvalid) {
+		t.Errorf("UseJoinToken() after revoke = %v, want ErrTokenInvalid", err)
+	}
+	if err := s.RevokeJoinToken(ctx, "revoked"); !errors.Is(err, ErrTokenInvalid) {
+		t.Errorf("second RevokeJoinToken() = %v, want ErrTokenInvalid", err)
+	}
+	// Creating a token drops those that expired unused.
+	if err := s.CreateJoinToken(ctx, "stale", t0.Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateJoinToken(ctx, "fresh", t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeJoinToken(ctx, "stale"); !errors.Is(err, ErrTokenInvalid) {
+		t.Errorf("RevokeJoinToken() of an expired token = %v, want it dropped", err)
+	}
+}
