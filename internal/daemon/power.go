@@ -10,6 +10,18 @@ import (
 	"boxpool.run/boxpool/internal/power"
 )
 
+// holdSleep protects boot and guest initialization; callers hold mu.
+func (s *server) holdSleep() {
+	if s.preventSleep == nil || s.info.AllowSleep || s.releaseSleep != nil {
+		return
+	}
+	var err error
+	s.releaseSleep, err = s.preventSleep()
+	if err != nil {
+		slog.Warn("cannot acquire idle-sleep assertion", "err", err)
+	}
+}
+
 // refreshSleep also runs after lifecycle requests, so stopping the last
 // sandbox releases the assertion without waiting for the next poll.
 func (s *server) refreshSleep(ctx context.Context) {
@@ -27,9 +39,9 @@ func (s *server) refreshSleep(ctx context.Context) {
 	for _, sb := range list {
 		running = running || sb.State == backend.StateRunning
 	}
-	if running && s.releaseSleep == nil {
-		s.releaseSleep, err = s.preventSleep()
-	} else if !running && s.releaseSleep != nil {
+	if running {
+		s.holdSleep()
+	} else if s.releaseSleep != nil {
 		err = s.releaseSleep()
 		if err == nil {
 			s.releaseSleep = nil

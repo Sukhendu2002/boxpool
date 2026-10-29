@@ -114,8 +114,11 @@ use the same `BOXPOOL_HOME` in another:
 
 On 2026-10-29, macOS/arm64 testing with two real 512 MiB VMs passed steps
 1–5's foreground-daemon checks, including console snapshot/follow, daemon
-logs, stop/pause/resume assertion transitions and `--allow-sleep`. The
-launch-agent flag has unit coverage. The machine was on AC: unplug/replug
+logs, stop/pause/resume assertion transitions and `--allow-sleep`. A repeat
+also verified a clean daemon exit with an active `logs -f --daemon` session.
+Unit tests block create/start/resume before guest readiness to check early
+assertion acquisition and failed-start release; routed followers are also
+cancelled on head shutdown. The launch-agent flag has unit coverage. The machine was on AC: unplug/replug
 and a two-physical-node check were not run. The in-process mTLS/tunnel pool
 test covers remote log snapshot/follow and unreachable sandbox retention.
 Idle-sleep prevention does not prevent explicit or lid-close sleep; keep

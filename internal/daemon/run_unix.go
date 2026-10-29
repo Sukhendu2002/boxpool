@@ -59,6 +59,7 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	}
 
 	s := newServer(info, st, d)
+	s.logShutdown = ctx
 	defer func() {
 		if s.releaseSleep != nil {
 			err = errors.Join(err, s.releaseSleep())
@@ -85,12 +86,17 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 	}
 	// Before serving, so no request sees the state the daemon died with;
 	// clients connecting meanwhile wait in the listen backlog.
+	defer s.watchSleep(ctx)()
 	if d != nil {
-		if err := reconcile(ctx, st, d); err != nil {
+		s.mu.Lock()
+		s.holdSleep()
+		err := reconcile(ctx, st, d)
+		s.mu.Unlock()
+		s.refreshSleep(ctx)
+		if err != nil {
 			return fmt.Errorf("reconcile sandboxes with the %s backend: %w", info.Backend, err)
 		}
 	}
-	defer s.watchSleep(ctx)()
 	if warmer, ok := d.(interface{ Warm(context.Context) error }); ok {
 		warmCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		err := warmer.Warm(warmCtx)

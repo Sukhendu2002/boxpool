@@ -265,6 +265,9 @@ func TestPoolRouting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	head, headServer, headDriver := poolMachine(t, "linux")
+	logShutdown, cancelFollowers := context.WithCancel(ctx)
+	headServer.logShutdown = logShutdown
+	defer cancelFollowers()
 	pool := poolServer(t, headServer, nil)
 	node, nodeServer, nodeDriver := poolMachine(t, "darwin")
 	consolePath := filepath.Join(nodeServer.info.StateDir, "console.log")
@@ -329,7 +332,16 @@ func TestPoolRouting(t *testing.T) {
 	if _, err := io.ReadFull(respLogs.Body, logBytes); err != nil || string(logBytes) != "remote console\n" {
 		t.Fatalf("follow through the head = %q, %v", logBytes, err)
 	}
+	cancelFollowers()
+	logsDone := make(chan struct{})
+	go func() { io.Copy(io.Discard, respLogs.Body); close(logsDone) }()
+	select {
+	case <-logsDone:
+	case <-time.After(time.Second):
+		t.Error("head shutdown did not cancel the remote log follower")
+	}
 	respLogs.Body.Close()
+	<-logsDone
 
 	// exec, over a WebSocket through the tunnel.
 	conn, _, err := execWS(ctx, t, head, "mac")

@@ -131,8 +131,10 @@ daemon. `boxpool down` stops the agent, which stops its VMs, and removes
 the plist; the state directory and the installed binary are kept.
 
 While a Mac has running sandboxes, the daemon holds a `boxpool` IOKit
-`PreventUserIdleSystemSleep` assertion; stopping or pausing the last one
-releases it. VM exits outside the API are detected within a second.
+`PreventUserIdleSystemSleep` assertion, including during boot and guest
+initialization; failed starts release it if no VM remains running.
+Stopping or pausing the last one releases it. VM exits outside the API
+are detected within a second.
 Use `boxpool up --allow-sleep` (saved in the launch agent) or
 `boxpool daemon --allow-sleep` to opt out. A later `boxpool up` without
 that flag restores sleep prevention. `doctor` and `ls --nodes` warn when a
@@ -224,7 +226,8 @@ older node did not report totals.
 
 `boxpool logs [-f] <sandbox>` reads the current sandbox console log, routed
 to its node. `boxpool logs [-f] --daemon` reads this node's daemon log.
-`-f` follows output until Ctrl-C. Flags precede the sandbox name. VM logs
+`-f` follows output until Ctrl-C or daemon shutdown. Followers do not delay
+a clean daemon shutdown. Flags precede the sandbox name. VM logs
 are serial-console output, not shell/exec session output; send an entry
 with `boxpool exec <sandbox> -- sh -c 'echo hello > /dev/console'`.
 Docker logs are the container's main process stdout/stderr, likewise not

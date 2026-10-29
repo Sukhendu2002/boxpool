@@ -182,6 +182,7 @@ type server struct {
 	reportMu     sync.Mutex                   // serialises changing nodes' reports
 	tunnels      tunnels                      // to the nodes, on a head
 	poolDone     chan struct{}                // closed when the pool API shuts down
+	logShutdown  context.Context              // cancels followers before HTTP shutdown waits
 	preventSleep func() (func() error, error) // set before serving
 	releaseSleep func() error                 // guarded by mu
 }
@@ -209,7 +210,7 @@ func Handler(info Info, st *store.Store, d Driver) http.Handler {
 
 func newServer(info Info, st *store.Store, d Driver) *server {
 	return &server{st: st, d: d, snapshots: filepath.Join(info.StateDir, "snapshots"), info: info,
-		capacity: &resources.Manager{StateDir: info.StateDir}, poolDone: make(chan struct{})}
+		capacity: &resources.Manager{StateDir: info.StateDir}, poolDone: make(chan struct{}), logShutdown: context.Background()}
 }
 
 func (s *server) handler() http.Handler {
@@ -224,8 +225,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /v1/sandboxes", s.place(s.backendOnly(s.create)))
 	mux.HandleFunc("GET /v1/sandboxes", s.list)
 	mux.HandleFunc("GET /v1/sandboxes/{name}", s.route(s.backendOnly(s.get)))
-	mux.HandleFunc("GET /v1/sandboxes/{name}/logs", s.route(s.backendOnly(s.sandboxLogs)))
-	mux.HandleFunc("GET /v1/logs", s.daemonLogs)
+	mux.HandleFunc("GET /v1/sandboxes/{name}/logs", s.logSession(s.route(s.backendOnly(s.sandboxLogs))))
+	mux.HandleFunc("GET /v1/logs", s.logSession(s.daemonLogs))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/start", s.route(s.backendOnly(s.start)))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/stop", s.route(s.backendOnly(s.stop)))
 	mux.HandleFunc("POST /v1/sandboxes/{name}/pause", s.route(s.backendOnly(s.pause)))
@@ -399,6 +400,7 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	}
 	// Start does nothing if it runs, and the record can be stale: the VM
 	// may have died since.
+	s.holdSleep()
 	if err := s.d.Start(ctx, sb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -517,6 +519,7 @@ func (s *server) boot(w http.ResponseWriter, r *http.Request, resume bool) {
 			start = s.d.Resume
 		}
 	}
+	s.holdSleep()
 	if err := start(r.Context(), sb.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -682,6 +685,7 @@ func (s *server) snapshot(w http.ResponseWriter, r *http.Request) {
 		// Whatever became of the stop or the copy, the sandbox was running;
 		// Start does nothing if it still is.
 		ctx := context.WithoutCancel(ctx)
+		s.holdSleep()
 		startErr := s.d.Start(ctx, sb.ID)
 		if startErr == nil {
 			startErr = s.st.SetState(ctx, sb.ID, backend.StateRunning)

@@ -42,6 +42,22 @@ func (w *logWriter) Write(p []byte) (int, error) {
 	return w.File.Write(p)
 }
 
+// logSession also wraps routing, so remote followers cannot delay head shutdown.
+func (s *server) logSession(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		follow, _ := strconv.ParseBool(r.URL.Query().Get("follow"))
+		if !follow {
+			h(w, r)
+			return
+		}
+		ctx, cancel := context.WithCancel(r.Context())
+		stop := context.AfterFunc(s.logShutdown, cancel)
+		defer stop()
+		defer cancel()
+		h(w, r.WithContext(ctx))
+	}
+}
+
 func (s *server) daemonLogs(w http.ResponseWriter, r *http.Request) {
 	follow, ok := logFollow(w, r)
 	if !ok {
