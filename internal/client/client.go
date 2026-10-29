@@ -185,6 +185,21 @@ func (c *Client) RevokeJoinToken(ctx context.Context, token string) error {
 	return resp.Body.Close()
 }
 
+// JoinPool joins this node to the pool named in token.
+func (c *Client) JoinPool(ctx context.Context, token string) (daemon.JoinPoolResponse, error) {
+	var out daemon.JoinPoolResponse
+	body, _ := json.Marshal(daemon.JoinPoolRequest{Token: token})
+	err := c.do(ctx, http.MethodPost, "/v1/pool/join", bytes.NewReader(body), &out)
+	return out, err
+}
+
+// ListNodes returns the head of this machine's pool and its nodes.
+func (c *Client) ListNodes(ctx context.Context) ([]daemon.Node, error) {
+	var list []daemon.Node
+	err := c.get(ctx, "/v1/nodes", &list)
+	return list, err
+}
+
 // Exec starts a command in the named sandbox through the daemon, which
 // relays the agent's exec protocol unchanged.
 func (c *Client) Exec(ctx context.Context, name string, req agent.ExecRequest, stdout, stderr io.Writer) (*agent.Session, error) {

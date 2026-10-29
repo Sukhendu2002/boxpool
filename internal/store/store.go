@@ -438,3 +438,46 @@ func (s *Store) RevokeJoinToken(ctx context.Context, hash string) error {
 	}
 	return err
 }
+
+// Node is a machine that joined this head's pool.
+type Node struct {
+	ID       string
+	Name     string
+	OS       string
+	Arch     string
+	JoinedAt time.Time
+}
+
+// CreateNode stores n under a new ID and returns it with ID and JoinedAt
+// set.
+func (s *Store) CreateNode(ctx context.Context, n Node) (Node, error) {
+	n.ID, n.JoinedAt = newID(), time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO nodes (id, name, os, arch, joined_at) VALUES (?, ?, ?, ?, ?)`,
+		n.ID, n.Name, n.OS, n.Arch, n.JoinedAt.Format(timeFormat))
+	if err != nil {
+		return Node{}, err
+	}
+	return n, nil
+}
+
+// ListNodes returns every joined node, oldest first.
+func (s *Store) ListNodes(ctx context.Context) ([]Node, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, os, arch, joined_at FROM nodes ORDER BY joined_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []Node
+	for rows.Next() {
+		var n Node
+		var joined string
+		if err := rows.Scan(&n.ID, &n.Name, &n.OS, &n.Arch, &joined); err != nil {
+			return nil, err
+		}
+		if n.JoinedAt, err = time.Parse(timeFormat, joined); err != nil {
+			return nil, err
+		}
+		list = append(list, n)
+	}
+	return list, rows.Err()
+}

@@ -102,3 +102,30 @@ networks a sandbox has only `lo`, and `TestIntegrationNetworkLimit` the
 32-network limit and the 2-minute pool quarantine. The route probe
 delivered A's segments to B on the shared NAT (measured on macOS 27, not
 on macOS 14 or 15 themselves), which is why older macOS gets no network.
+
+## Pool
+
+A daemon that has not joined another pool is a head: it keeps a CA
+(`ca.pem`, `ca-key.pem`, mode 0600) in its state directory and serves the
+pool API over TLS 1.3 on TCP port 7443, on every interface. If the port is
+taken, the daemon logs a warning and runs without it.
+
+- `POST /v1/nodes` is the only endpoint open without a client
+  certificate. It needs an unused, unexpired join token
+  (`boxpool token create --join`); the head stores only the SHA-256 of its
+  secret.
+- Every other endpoint needs a client certificate signed by the head CA.
+  A certificate from another CA, or an expired one, fails the handshake.
+- A joining node makes its key itself and sends only a certificate
+  request. It trusts the head only if the head's chain contains the CA
+  whose SHA-256 is in the token, so a token pins the head.
+- A node dials the head; the head never dials a node. In M4 the node must
+  reach the head directly, over a LAN or a tailnet.
+- A machine cannot join its own pool or join another pool while it has
+  nodes. While joining, it refuses registrations and token creation.
+  Once joined, its old tokens cannot register nodes, even before the old
+  head listener closes on restart.
+
+Limits: node certificates last as long as the CA (10 years) and cannot be
+revoked yet. Anyone who can reach port 7443 can attempt a handshake;
+restrict it with a host firewall if the network is untrusted.

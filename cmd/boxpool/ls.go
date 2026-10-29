@@ -35,10 +35,11 @@ func connect(ctx context.Context, cmd string) (*client.Client, bool) {
 func ls(args []string) int {
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprint(os.Stderr, "Usage: boxpool ls [--json]\n\nLists this machine's sandboxes.\n\nFlags:\n")
+		fmt.Fprint(os.Stderr, "Usage: boxpool ls [--nodes] [--json]\n\nLists this machine's sandboxes, or with --nodes the machines in its pool.\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
 	asJSON := fs.Bool("json", false, "print a JSON array instead of a table")
+	nodes := fs.Bool("nodes", false, "list the pool's machines, on the head")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -50,6 +51,9 @@ func ls(args []string) int {
 	c, ok := connect(ctx, "ls")
 	if !ok {
 		return 1
+	}
+	if *nodes {
+		return lsNodes(ctx, c, *asJSON)
 	}
 	list, err := c.ListSandboxes(ctx)
 	if err != nil {

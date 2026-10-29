@@ -3,6 +3,7 @@
 package auth
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -84,55 +85,89 @@ func ValidateJoinAddr(addr string) error {
 	return fmt.Errorf("invalid head address %q: use host:port with a numeric port from 1 to 65535", addr)
 }
 
-// LoadOrCreateCA returns the head CA certificate in dir, creating it and
-// its key first if there is none.
-func LoadOrCreateCA(dir string) (*x509.Certificate, error) {
-	certPath := filepath.Join(dir, "ca.pem")
+// LoadOrCreateCA returns the head CA certificate and key in dir, creating
+// them first if there are none.
+func LoadOrCreateCA(dir string) (*x509.Certificate, crypto.Signer, error) {
+	certPath, keyPath := filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem")
 	if b, err := os.ReadFile(certPath); err == nil {
-		p, _ := pem.Decode(b)
-		if p == nil {
-			return nil, fmt.Errorf("%s: no PEM certificate", certPath)
-		}
-		return x509.ParseCertificate(p.Bytes)
+		return loadCA(certPath, b, keyPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+		return nil, nil, err
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
 	tmpl := &x509.Certificate{
-		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "boxpool head CA"},
-		NotBefore:             now.Add(-time.Hour),
-		NotAfter:              now.AddDate(10, 0, 0),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := issue(tmpl, key, tmpl, &key.PublicKey)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The key first: a key without a certificate is regenerated next time.
-	if err := os.WriteFile(filepath.Join(dir, "ca-key.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
-		return nil, err
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0600); err != nil {
+		return nil, nil, err
 	}
 	tmp := certPath + ".tmp"
 	if err := os.WriteFile(tmp, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0600); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.Rename(tmp, certPath); err != nil {
+		return nil, nil, err
+	}
+	ca, err := x509.ParseCertificate(der)
+	return ca, key, err
+}
+
+func loadCA(certPath string, certPEM []byte, keyPath string) (*x509.Certificate, crypto.Signer, error) {
+	p, _ := pem.Decode(certPEM)
+	if p == nil {
+		return nil, nil, fmt.Errorf("%s: no PEM certificate", certPath)
+	}
+	ca, err := x509.ParseCertificate(p.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", certPath, err)
+	}
+	b, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	if p, _ = pem.Decode(b); p == nil {
+		return nil, nil, fmt.Errorf("%s: no PEM key", keyPath)
+	}
+	k, err := x509.ParsePKCS8PrivateKey(p.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", keyPath, err)
+	}
+	key, ok := k.(crypto.Signer)
+	if !ok {
+		return nil, nil, fmt.Errorf("%s: not a signing key", keyPath)
+	}
+	return ca, key, nil
+}
+
+// issue signs tmpl with the parent's key, giving it a random serial and,
+// unless set, the parent's expiry.
+func issue(tmpl *x509.Certificate, key crypto.Signer, parent *x509.Certificate, pub any) ([]byte, error) {
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
 		return nil, err
 	}
-	return x509.ParseCertificate(der)
+	tmpl.SerialNumber = serial
+	if tmpl.NotBefore.IsZero() {
+		tmpl.NotBefore = time.Now().Add(-time.Hour) // tolerate clock skew between machines
+	}
+	if tmpl.NotAfter.IsZero() {
+		tmpl.NotAfter = parent.NotAfter
+	}
+	return x509.CreateCertificate(rand.Reader, tmpl, parent, pub, key)
 }

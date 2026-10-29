@@ -1,0 +1,168 @@
+{
+  "source_commit": "e1ae842721aa091241f94c385b762f2ea572cc7c",
+  "samples": [
+    {
+      "direction": "Mac node -> Linux head",
+      "elapsed_seconds": 9.630059,
+      "exit_code": 0,
+      "stdout": "installed /private/tmp/bp35-xbp4k95m/mac-node/bin/boxpool\ninstalled /Users/sukhendu/Library/LaunchAgents/run.boxpool.daemon.plist\nwaiting for the daemon; its first start downloads the guest image (about 45 MB)\nboxpool pr120-e1ae842 is running (backend virtualization framework, state in /private/tmp/bp35-xbp4k95m/mac-node) after 9.2s\njoined the pool at 100.90.107.72:7443 as node 611d97d8f91e\n",
+      "stderr": "",
+      "proof": {
+        "authenticated_nodes": [
+          {
+            "name": "sukhendu-pc",
+            "role": "head",
+            "os": "linux",
+            "arch": "amd64"
+          },
+          {
+            "id": "611d97d8f91e",
+            "name": "Sukhendus-MacBook-Air.local",
+            "role": "node",
+            "os": "darwin",
+            "arch": "arm64",
+            "joined_at": "2026-10-29T12:53:51.92169876Z"
+          }
+        ],
+        "private_key_mode": "0o600"
+      },
+      "unauthenticated_status": 401,
+      "head_local_nodes": [
+        {
+          "name": "sukhendu-pc",
+          "role": "head",
+          "os": "linux",
+          "arch": "amd64"
+        },
+        {
+          "id": "611d97d8f91e",
+          "name": "Sukhendus-MacBook-Air.local",
+          "role": "node",
+          "os": "darwin",
+          "arch": "arm64",
+          "joined_at": "2026-10-29T12:53:51.92169876Z"
+        }
+      ]
+    },
+    {
+      "direction": "Linux node -> Mac head",
+      "elapsed_seconds": 27.992531,
+      "exit_code": 0,
+      "stdout": "installed /usr/local/bin/boxpool\n/etc/systemd/system/boxpool.service is up to date\nwaiting for the daemon; its first start downloads Firecracker and the guest image (about 60 MB)\n  still waiting (15s)\nboxpool pr120-e1ae842 is running (backend firecracker, state in /var/lib/boxpool) after 27.6s\njoined the pool at 100.83.148.12:7443 as node 3231d591040c\n",
+      "stderr": "Created symlink /etc/systemd/system/multi-user.target.wants/boxpool.service \u2192 /etc/systemd/system/boxpool.service.\n",
+      "proof": {
+        "authenticated_nodes": [
+          {
+            "name": "Sukhendus-MacBook-Air.local",
+            "role": "head",
+            "os": "darwin",
+            "arch": "arm64"
+          },
+          {
+            "id": "3231d591040c",
+            "name": "sukhendu-pc",
+            "role": "node",
+            "os": "linux",
+            "arch": "amd64",
+            "joined_at": "2026-10-29T12:54:24.19251Z"
+          }
+        ],
+        "private_key_mode": "0o600",
+        "head": "100.83.148.12:7443"
+      },
+      "head_local_nodes": [
+        {
+          "name": "Sukhendus-MacBook-Air.local",
+          "role": "head",
+          "os": "darwin",
+          "arch": "arm64"
+        },
+        {
+          "id": "3231d591040c",
+          "name": "sukhendu-pc",
+          "role": "node",
+          "os": "linux",
+          "arch": "amd64",
+          "joined_at": "2026-10-29T12:54:24.19251Z"
+        }
+      ]
+    }
+  ],
+  "restored": {
+    "linux": {
+      "active": "inactive",
+      "enabled": "disabled",
+      "state_inode_matches": true,
+      "files_match": true
+    },
+    "mac": {
+      "plist_matches": true,
+      "binary_matches": true,
+      "original_program_running": true,
+      "sandboxes": []
+    }
+  },
+  "date": "2026-10-29",
+  "transport": "Existing Tailscale tailnet; direct TCP port 7443, no SSH forwarding or relay added by the test",
+  "build": {
+    "source_commit": "e1ae842721aa091241f94c385b762f2ea572cc7c",
+    "macOS": {
+      "version": "27.0.1",
+      "arch": "arm64",
+      "cpu": "Apple M2"
+    },
+    "binary_sha256": {
+      "boxpool": "d823bdb74c1f35f7f7ed435020c87594d4a9a66054b95239829188ae17495921",
+      "boxpool-linux-amd64": "afeb4084e60a0a4ccd088277751cd61d263ff48ef52d2e03db15ad78d6f30af2"
+    },
+    "go_version": "go1.26.3 darwin/arm64"
+  },
+  "hosts": {
+    "mac": {
+      "name": "Sukhendus-MacBook-Air.local",
+      "os": "macOS 27.0.1",
+      "architecture": "arm64",
+      "cpu": "Apple M2",
+      "backend": "virtualization framework"
+    },
+    "linux": {
+      "name": "sukhendu-pc",
+      "os": "Ubuntu 24.04.3 LTS",
+      "kernel": "7.0.0-38-generic",
+      "architecture": "amd64",
+      "cpu": "Intel Core i5-1235U",
+      "backend": "firecracker"
+    }
+  },
+  "method": {
+    "sample_count_per_direction": 1,
+    "clock": "Python time.monotonic around the complete boxpool join subprocess on the joining host",
+    "timing_includes": [
+      "preflight",
+      "binary and service installation",
+      "fresh-state artifact downloads",
+      "daemon startup",
+      "registration",
+      "mTLS verification",
+      "credential persistence"
+    ],
+    "timing_excludes": [
+      "binary compilation and signing",
+      "head preparation",
+      "post-command independent curl verification",
+      "cleanup and restoration"
+    ],
+    "joining_node_artifact_cache": "empty before each measured join",
+    "head_artifact_cache": "existing artifacts reused",
+    "commands": [
+      "BOXPOOL_HOME=<fresh-mac-state> bin/boxpool join <token>",
+      "sudo -n <copied-linux-binary> join <token>"
+    ]
+  },
+  "direct_lan_attempt": {
+    "elapsed_seconds": 9.172143,
+    "exit_code": 1,
+    "error": "boxpool join: join the pool at 192.168.0.171:7443: reach the head at 192.168.0.171:7443: Post \"https://192.168.0.171:7443/v1/nodes\": dial tcp 192.168.0.171:7443: connect: no route to host",
+    "status": "Not verified: macOS background daemon could not connect over private LAN; cause not established. No firewall or privacy changes were made."
+  }
+}

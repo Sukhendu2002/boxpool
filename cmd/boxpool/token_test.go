@@ -25,7 +25,7 @@ func TestTokenCmd(t *testing.T) {
 	if err != nil || tok.Addr != "head.lan:7443" {
 		t.Fatalf("token %q: %+v, %v", out, tok, err)
 	}
-	ca, err := auth.LoadOrCreateCA(dir)
+	ca, _, err := auth.LoadOrCreateCA(dir)
 	if err != nil || tok.CA != sha256.Sum256(ca.Raw) {
 		t.Errorf("token does not pin the head CA: %v", err)
 	}
