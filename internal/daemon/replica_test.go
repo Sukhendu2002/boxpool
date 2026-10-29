@@ -99,9 +99,17 @@ func TestFSM(t *testing.T) {
 	}
 }
 
-// fastPool shortens the pool's timers for a test.
+// fastPool shortens the pool's timers for a test, allowing for TLS and
+// replicated SQLite writes on shared CI runners. A 50 ms heartbeat timeout
+// and 300 ms expiry can mark a live node unreachable during normal work.
 func fastPool(t *testing.T) {
-	for v, d := range map[*time.Duration]time.Duration{&heartbeatInterval: 50 * time.Millisecond, &unreachableAfter: 300 * time.Millisecond, &tunnelPoll: 200 * time.Millisecond, &tunnelWait: 200 * time.Millisecond} {
+	t.Helper()
+	for v, d := range map[*time.Duration]time.Duration{
+		&heartbeatInterval: 200 * time.Millisecond,
+		&unreachableAfter:  2 * time.Second,
+		&tunnelPoll:        200 * time.Millisecond,
+		&tunnelWait:        time.Second,
+	} {
 		old := *v
 		*v = d
 		t.Cleanup(func() { *v = old })
@@ -234,6 +242,38 @@ func revoke(t *testing.T, p *poolDaemon, tok string) (int, string) {
 		t.Fatal(err)
 	}
 	return send(t, p.local, "DELETE", "/v1/tokens/"+parsed.Hash(), "")
+}
+
+// TestHeadAddressAfterReplication models adding a tailnet node to a pool
+// originally bootstrapped with an address that node cannot reach.
+func TestHeadAddressAfterReplication(t *testing.T) {
+	fastPool(t)
+	head, node := startPoolDaemon(t, "head"), startPoolDaemon(t, "node")
+	if err := head.s.bootstrap(context.Background(), "192.0.2.1:7443"); err != nil {
+		t.Fatal(err)
+	}
+	joinTo(t, head, node)
+	waitFor(t, "the node to learn the advertised Raft leader", func() bool {
+		rep := node.s.raft.Load()
+		if rep == nil {
+			return false
+		}
+		addr, _ := rep.LeaderWithID()
+		return addr == "192.0.2.1:7443"
+	})
+	if got := node.s.reportTo(); got != head.s.poolAddr {
+		t.Fatalf("reporting to %s, want join address %s", got, head.s.poolAddr)
+	}
+	// New tunnels, not just those opened before replication, must keep
+	// using the reachable address. Restart the node to exercise saved state.
+	node.stop()
+	node = restart(t, node)
+	waitFor(t, "the restarted node's report", func() bool {
+		return nodeStates(t, head)[node.s.selfID()] == "ready"
+	})
+	if code, _, body := post(t, head.local, `{"name":"remote","node":"node"}`); code != http.StatusCreated {
+		t.Fatalf("create through the restarted node's tunnel = %d %s", code, body)
+	}
 }
 
 // TestFailover runs a pool of three in this process: they replicate the
@@ -426,9 +466,10 @@ func TestPromote(t *testing.T) {
 	if json.Unmarshal([]byte(body), &res); code != http.StatusOK || res.Head != b.s.poolAddr || !b.s.leading.Load() {
 		t.Fatalf("promote = %d %s", code, body)
 	}
-	if got := sandboxes(t, b); got != "on-a=unreachable on-b=running" {
-		t.Errorf("new head's sandboxes = %s", got)
-	}
+	// Promotion may finish before the old head's last report expires.
+	waitFor(t, "the promoted head to mark the old head unreachable", func() bool {
+		return sandboxes(t, b) == "on-a=unreachable on-b=running"
+	})
 	if code, body := revoke(t, b, tok); code != http.StatusNoContent {
 		t.Errorf("revoke a token from before the promotion = %d %s", code, body)
 	}

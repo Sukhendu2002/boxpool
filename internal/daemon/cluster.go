@@ -25,6 +25,7 @@ import (
 	"boxpool.run/boxpool/internal/backend"
 	"boxpool.run/boxpool/internal/power"
 	"boxpool.run/boxpool/internal/store"
+	"boxpool.run/boxpool/internal/transport"
 )
 
 // A node reports to the head every heartbeatInterval; the head marks it
@@ -177,15 +178,11 @@ func (s *server) serveHead(ctx context.Context, srv *http.Server) {
 }
 
 // reportTo returns the head this node reports to, or "" while it is the
-// head.
+// head. Keep the address that last worked, including a join token's
+// tailnet alias of a head advertised in Raft at a LAN-only address.
 func (s *server) reportTo() string {
 	if s.leading.Load() {
 		return ""
-	}
-	if rep := s.raft.Load(); rep != nil {
-		if addr, id := rep.LeaderWithID(); addr != "" && string(id) != s.selfID() {
-			return string(addr)
-		}
 	}
 	head, _ := s.head.Load().(string)
 	return head
@@ -196,7 +193,7 @@ func (s *server) reportTo() string {
 // the head does not answer, the first replica that answers as head is the
 // new head.
 func (s *server) heartbeat(ctx context.Context, cfg *tls.Config) {
-	hc := &http.Client{Timeout: heartbeatInterval, Transport: &http.Transport{TLSClientConfig: cfg}}
+	hc := &http.Client{Timeout: heartbeatInterval, Transport: &http.Transport{TLSClientConfig: cfg, DialContext: transport.DialContext}}
 	defer hc.CloseIdleConnections()
 	t := time.NewTicker(heartbeatInterval)
 	defer t.Stop()
@@ -214,6 +211,13 @@ func (s *server) heartbeat(ctx context.Context, cfg *tls.Config) {
 		err := s.sendReport(ctx, hc, head)
 		if err != nil && ctx.Err() == nil {
 			peers, _ := auth.Peers(s.info.StateDir)
+			// A former head may have no saved peers yet. Try the elected
+			// leader too, but adopt its address only after it answers.
+			if rep := s.raft.Load(); rep != nil {
+				if addr, id := rep.LeaderWithID(); addr != "" && string(id) != s.selfID() {
+					peers = append([]string{string(addr)}, peers...)
+				}
+			}
 			for _, p := range peers {
 				if p != head && s.reportTo() != "" && s.sendReport(ctx, hc, p) == nil {
 					slog.Info("following a new head", "head", p, "old", head)

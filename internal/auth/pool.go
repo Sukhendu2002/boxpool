@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"boxpool.run/boxpool/internal/transport"
 )
 
 // HeadName is the DNS name in the head's certificate. Nodes verify it
@@ -315,7 +317,7 @@ func call(ctx context.Context, cfg *tls.Config, method, addr string, body []byte
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
+	hc := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg, DialContext: transport.DialContext}}
 	defer hc.CloseIdleConnections()
 	resp, err := hc.Do(req)
 	if err != nil {

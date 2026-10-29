@@ -21,7 +21,7 @@ const joinUsage = `Usage: boxpool join <token>
 Installs and starts the daemon as boxpool up does, then joins the pool of
 the head that printed the token with boxpool token create --join. This
 machine must reach the head's address in the token directly, over a LAN or
-a tailnet.
+a tailnet (boxpool token create --join --transport tailscale).
 `
 
 func join(args []string) int {

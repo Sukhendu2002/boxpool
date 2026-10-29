@@ -7,16 +7,23 @@ import (
 	"os"
 	"time"
 
+	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/daemon"
+	"boxpool.run/boxpool/internal/transport"
 )
 
 const tokenUsage = `Usage:
-  boxpool token create --join [--ttl 1h] [--addr host:port]
+  boxpool token create --join [--ttl 1h] [--transport direct|tailscale] [--addr host:port]
   boxpool token revoke <token>
 
 create prints a token that boxpool join on another machine uses, once, to
 join this machine's pool. It expires after --ttl. revoke makes an unused
 token invalid.
+
+--transport is how nodes reach this machine. direct, the default, names
+this host's name on the LAN. tailscale names its tailnet address, so a node
+behind another NAT joins with no port forwarding; it works with Headscale
+too, and each node must be on the same tailnet. --addr overrides either.
 `
 
 func tokenCmd(args []string) int {
@@ -40,7 +47,8 @@ func tokenCmd(args []string) int {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, tokenUsage, "\nFlags:\n"); fs.PrintDefaults() }
 	join := fs.Bool("join", false, "create a join token (the only kind for now)")
 	ttl := fs.Duration("ttl", daemon.DefaultTokenTTL, "how long the token is valid")
-	addr := fs.String("addr", "", "head address the token names, host:port (default: this host's name, port 7443)")
+	addr := fs.String("addr", "", "head address the token names, host:port (default: from --transport, port 7443)")
+	mode := fs.String("transport", "direct", "how nodes reach this head: direct or tailscale")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -48,9 +56,22 @@ func tokenCmd(args []string) int {
 		fs.Usage()
 		return 2
 	}
+	tr, err := transport.New(*mode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "boxpool token create: unknown --transport %q: use direct or tailscale\n", *mode)
+		return 2
+	}
 	if *ttl <= 0 {
 		fmt.Fprintf(os.Stderr, "boxpool token create: --ttl must be positive\n")
 		return 2
+	}
+	if *addr == "" {
+		a, err := tr.Address(context.Background(), auth.JoinPort)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "boxpool token create: %v\n", err)
+			return 1
+		}
+		*addr = a
 	}
 	ctx := context.Background()
 	c, ok := connect(ctx, "token create")

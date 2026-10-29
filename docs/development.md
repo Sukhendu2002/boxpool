@@ -86,6 +86,52 @@ Artifacts are cached in `~/Library/Caches/boxpool-test`, or
 growing ext4. CI builds and runs unit tests with cgo on macOS; Linux and
 Windows do not compile the framework binding.
 
+## Pool transport
+
+`internal/transport.Transport` provides `Listen`, `Dial` and the address
+advertised in join tokens. `Direct` and `Tailscale` share system TCP sockets;
+the installed tailscaled supplies the routes for Tailscale or Headscale.
+The head's wildcard listener serves both networks. Pool joins, heartbeats,
+request tunnels, replica probes and Raft connections all use this boundary,
+with CA pinning or mutual TLS layered above it. Existing join token formats
+and saved credentials remain valid. A working join address is retained
+when Raft advertises that same head under another address; failed
+heartbeats try the elected leader and saved peers before adopting a new
+destination.
+
+The contract suite exercises both implementations on loopback without an
+auth key: the system client is authenticated separately, rather than by
+embedding tsnet. It checks cancellation, listener shutdown, mutual TLS,
+rejection of unauthenticated clients and bounded TLS handshakes:
+
+```sh
+go test ./internal/transport -v
+go test ./internal/daemon -run 'TestHeadAddressAfterReplication|TestFailover|TestPromote' -count=1
+go test ./cmd/boxpool -run 'TestTokenCmd|TestTokenCreateTailscale|TestTailnetAddrTimeout' -count=1
+```
+
+To run the same contract on a real tailnet interface, set
+`BOXPOOL_TEST_TAILNET_IP` to this machine's connected Tailscale IP and run
+`go test ./internal/transport -run TestTailnetContract -count=1 -v`.
+That check is skipped when the variable is unset; it uses an ephemeral
+port and requires no changes to the installed client's configuration.
+
+The issue #44 cross-network acceptance check still needs two physical
+networks. A passing local tailnet contract does not certify it:
+
+1. Connect the home head and laptop to the same tailnet. Allow pool TCP
+   port 7443 in tailnet policy and host firewalls.
+2. On the head, run `boxpool token create --join --transport tailscale`
+   (`sudo boxpool token create --join --transport tailscale` on Linux).
+3. Move the laptop to a phone hotspot, keeping its system tailnet client
+   connected. Run `boxpool join <token>` (with `sudo` on Linux). Expect exit
+   0 and `joined the pool at <head-tailnet-ip>:7443 as node ...`. Then label
+   the laptop with `boxpool node label laptop` (with `sudo` on Linux).
+4. On the head, run `boxpool ls --nodes`, then `boxpool sh --node laptop`
+   (with `sudo` on Linux). Expect a ready laptop and a working sandbox shell.
+   Repeat after at least 30 seconds, and after restarting the laptop daemon,
+   to exercise new heartbeats and request tunnels after replication starts.
+
 ## Pool status, console logs and Mac power checks
 
 Use a signed binary and a scratch `BOXPOOL_HOME`, so these checks do not
