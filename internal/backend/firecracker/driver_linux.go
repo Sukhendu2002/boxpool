@@ -212,7 +212,12 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	}
 	err = copyRootfs(l.rootfs, src)
 	if err == nil && warm {
-		err = copyRootfs(l.mem, d.warm.mem)
+		// Firecracker maps snapshot RAM MAP_PRIVATE; share the immutable
+		// inode instead of copying 2 GiB on filesystems without reflinks.
+		err = os.Link(d.warm.mem, l.mem)
+		if err != nil {
+			err = copyRootfs(l.mem, d.warm.mem)
+		}
 		if err == nil {
 			err = copyRootfs(l.vmstate, d.warm.vmstate)
 		}

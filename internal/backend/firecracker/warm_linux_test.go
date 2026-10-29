@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"boxpool.run/boxpool/internal/backend"
@@ -56,6 +57,33 @@ func TestCreateWarmClone(t *testing.T) {
 		if got, err := os.ReadFile(path); err != nil || string(got) != want {
 			t.Fatalf("%s: %q, %v", path, got, err)
 		}
+	}
+	baseInfo, err := os.Stat(base.mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloneInfo, err := os.Stat(l.mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(baseInfo, cloneInfo) {
+		t.Fatal("warm RAM was copied rather than shared")
+	}
+	f, err := os.Open(l.mem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory, err := syscall.Mmap(int(f.Fd()), 0, 6, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	memory[0] = 'X'
+	if err := syscall.Munmap(memory); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(base.mem); err != nil || string(got) != "memory" {
+		t.Fatalf("private RAM write changed the base: %q, %v", got, err)
 	}
 	if err := os.WriteFile(l.rootfs, []byte("private"), 0600); err != nil {
 		t.Fatal(err)
