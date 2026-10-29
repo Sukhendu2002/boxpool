@@ -18,9 +18,23 @@ import (
 	"boxpool.run/boxpool/internal/preflight"
 )
 
-// connect returns a client for the local daemon, or prints why there is
-// none for the command cmd.
+// connect returns a client for the head boxpool login saved, else for the
+// local daemon, or prints why there is none for the command cmd.
 func connect(ctx context.Context, cmd string) (*client.Client, bool) {
+	c, err := newClient()
+	if err == nil {
+		err = c.Health(ctx)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "boxpool %s: %v\n", cmd, err)
+		return nil, false
+	}
+	return c, true
+}
+
+// connectLocal is connect for commands about this machine, which always
+// go to the local daemon.
+func connectLocal(ctx context.Context, cmd string) (*client.Client, bool) {
 	dir, err := preflight.StateDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool %s: %v\n", cmd, err)

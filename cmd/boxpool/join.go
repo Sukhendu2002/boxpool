@@ -38,7 +38,7 @@ func join(args []string) int {
 		return code
 	}
 	ctx := context.Background()
-	c, ok := connect(ctx, "join")
+	c, ok := connectLocal(ctx, "join")
 	if !ok {
 		return 1
 	}

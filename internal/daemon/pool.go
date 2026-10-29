@@ -58,7 +58,8 @@ var validNodeName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`).Mat
 var validNodeField = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`).MatchString
 
 // poolHandler is the head's API for other machines, served with
-// auth.HeadTLS: POST /v1/nodes joins with a token, and every other
+// auth.HeadTLS: POST /v1/nodes joins with a token, a request with an
+// access token reaches the local API as remote allows, and every other
 // endpoint needs a client certificate from the head CA. It shares role
 // state with this server's local API. A replica that is not the head
 // answers only GET /v1/pool/raft.
@@ -68,6 +69,11 @@ func (s *server) poolHandler() http.Handler {
 	mux.Handle("GET /v1/nodes", requireNode(s.listNodes))
 	mux.Handle("POST /v1/heartbeat", requireNode(s.receiveReport))
 	mux.Handle("GET /v1/tunnel", requireNode(s.tunnel))
+	api := s.api
+	if api == nil { // tests serve the pool API without Run
+		api = s.handler()
+	}
+	remote := s.remote(api)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/pool/raft" {
 			requireNode(s.raftStatus)(w, r)
@@ -75,6 +81,10 @@ func (s *server) poolHandler() http.Handler {
 		}
 		if head, err := s.poolHead(); err != nil || head != "" {
 			writeJoined(w, head, err, "reach the head there instead")
+			return
+		}
+		if r.Header.Get("Authorization") != "" {
+			remote(w, r)
 			return
 		}
 		mux.ServeHTTP(w, r)

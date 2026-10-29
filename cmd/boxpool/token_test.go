@@ -16,6 +16,7 @@ import (
 
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/daemon"
+	"boxpool.run/boxpool/internal/store"
 	"boxpool.run/boxpool/internal/transport"
 )
 
@@ -60,11 +61,97 @@ func TestTokenCmd(t *testing.T) {
 		{[]string{"token", "create", "--join", "--addr", "127.0.0.1:-1"}, 1, `invalid head address "127.0.0.1:-1"`},
 		{[]string{"token", "create", "--join", "--addr", "head.lan:0"}, 1, `invalid head address "head.lan:0"`},
 		{[]string{"token", "create", "--join", "--addr", "head.lan:https"}, 1, `invalid head address "head.lan:https"`},
-		{[]string{"token", "revoke", "nonsense"}, 1, "not a boxpool join token"},
+		{[]string{"token", "revoke", "bpjoin1_nonsense"}, 1, "not a boxpool join token"},
+		{[]string{"token", "revoke", "nonsense"}, 1, "no access token with that ID"},
+		{[]string{"token", "create", "--join", "--scope", "cli"}, 2, "Usage:"},
+		{[]string{"token", "create", "--scope", "cli", "--addr", "head.lan:7443"}, 2, "Usage:"},
+		{[]string{"token", "create", "--join", "--sandbox", "web"}, 2, "Usage:"},
+		{[]string{"token", "create", "--scope", "root"}, 1, `invalid scope "root"`},
 	} {
 		if code, out, errOut := cli(t, dir, "", tc.args...); code != tc.code || out != "" || !strings.Contains(errOut, tc.err) {
 			t.Errorf("%v = %d %q %q, want %d, no token, and %q", tc.args, code, out, errOut, tc.code, tc.err)
 		}
+	}
+}
+
+func TestAccessTokenCmd(t *testing.T) {
+	dir := testDaemon(t)
+	create := func(args ...string) (string, string) {
+		t.Helper()
+		code, out, errOut := cli(t, dir, "", append([]string{"token", "create"}, args...)...)
+		if code != 0 {
+			t.Fatalf("token create %v = %d %q", args, code, errOut)
+		}
+		tok, err := auth.ParseAccessToken(strings.TrimSpace(out))
+		if err != nil {
+			t.Fatalf("token %q: %v", out, err)
+		}
+		return tok.String(), errOut
+	}
+	cliTok, msg := create("--scope", "cli")
+	if !strings.Contains(msg, "never expires") || !strings.Contains(msg, "boxpool login") {
+		t.Errorf("token create --scope cli said %q", msg)
+	}
+	webTok, msg := create("--scope", "expose", "--sandbox", "web", "--ttl", "1h")
+	if !strings.Contains(msg, "; expires ") {
+		t.Errorf("token create --ttl 1h said %q", msg)
+	}
+	web, _ := auth.ParseAccessToken(webTok)
+	webID := web.Hash()[:store.AccessIDLen]
+	code, out, errOut := cli(t, dir, "", "token", "ls")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if code != 0 || len(lines) != 3 || !strings.HasPrefix(lines[0], "ID") || !strings.Contains(lines[1], "cli") || !strings.Contains(lines[2], webID) || !strings.Contains(lines[2], "web") || strings.Contains(out, cliTok) {
+		t.Errorf("token ls = %d %q %q", code, out, errOut)
+	}
+	if code, _, errOut := cli(t, dir, "", "token", "revoke", webID); code != 0 {
+		t.Errorf("token revoke <id> = %d %q", code, errOut)
+	}
+	if code, _, errOut := cli(t, dir, "", "token", "revoke", cliTok); code != 0 {
+		t.Errorf("token revoke <token> = %d %q", code, errOut)
+	}
+	if code, out, _ := cli(t, dir, "", "token", "ls"); code != 0 || strings.Count(out, "\n") != 1 {
+		t.Errorf("token ls after revoking both = %d %q", code, out)
+	}
+}
+
+func TestLogin(t *testing.T) {
+	dir := testDaemon(t)
+	tok := auth.NewAccessToken([32]byte{}).String()
+	for _, tc := range []struct {
+		args []string
+		code int
+		err  string
+	}{
+		{[]string{"login", "head"}, 2, "Usage:"},
+		{[]string{"login", "head", "bpjoin1_x"}, 2, "not a boxpool access token"},
+		{[]string{"login", "head:0", tok}, 2, "invalid head address"},
+		{[]string{"login", "127.0.0.1:1", tok}, 1, "127.0.0.1:1"},
+	} {
+		if code, _, errOut := cli(t, dir, "", tc.args...); code != tc.code || !strings.Contains(errOut, tc.err) {
+			t.Errorf("%v = %d %q, want %d and %q", tc.args, code, errOut, tc.code, tc.err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "login.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a failed login saved itself: %v", err)
+	}
+	// Once logged in, sandbox commands go to the head; machine commands do not.
+	if err := os.WriteFile(filepath.Join(dir, "login.json"), []byte(`{"head":"127.0.0.1:1","token":"`+tok+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errOut := cli(t, dir, "", "ls"); code != 1 || !strings.Contains(errOut, "127.0.0.1:1") {
+		t.Errorf("ls after login = %d %q, want it to reach the head", code, errOut)
+	}
+	if code, _, errOut := cli(t, dir, "", "token", "ls"); code != 0 {
+		t.Errorf("token ls after login = %d %q, want the local daemon", code, errOut)
+	}
+	if code, _, errOut := cli(t, dir, "", "logout"); code != 0 {
+		t.Fatalf("logout = %d %q", code, errOut)
+	}
+	if code, _, errOut := cli(t, dir, "", "ls"); code != 0 {
+		t.Errorf("ls after logout = %d %q", code, errOut)
+	}
+	if code, _, errOut := cli(t, dir, "", "logout"); code != 0 {
+		t.Errorf("second logout = %d %q", code, errOut)
 	}
 }
 
