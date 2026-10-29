@@ -395,3 +395,46 @@ func (s *Store) NetSlots(ctx context.Context) (map[string]int, error) {
 	}
 	return slots, rows.Err()
 }
+
+var (
+	ErrTokenInvalid = errors.New("token is invalid or already used")
+	ErrTokenExpired = errors.New("token expired")
+)
+
+// CreateJoinToken stores the hash of a join token's secret, valid until
+// expires. Expired hashes are kept until use or revocation so that an
+// unused expired token can be distinguished from an invalid token.
+func (s *Store) CreateJoinToken(ctx context.Context, hash string, expires time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO join_tokens (hash, expires_at) VALUES (?, ?)`, hash, expires.UTC().Format(timeFormat))
+	return err
+}
+
+// UseJoinToken consumes the join token with the given hash: it succeeds
+// once, before the token expires at the time now.
+func (s *Store) UseJoinToken(ctx context.Context, hash string, now time.Time) error {
+	var expires string
+	err := s.db.QueryRowContext(ctx, `DELETE FROM join_tokens WHERE hash = ? RETURNING expires_at`, hash).Scan(&expires)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrTokenInvalid
+	}
+	if err != nil {
+		return err
+	}
+	t, err := time.Parse(timeFormat, expires)
+	if err != nil {
+		return err
+	}
+	if !now.Before(t) {
+		return ErrTokenExpired
+	}
+	return nil
+}
+
+// RevokeJoinToken deletes the unused join token with the given hash.
+func (s *Store) RevokeJoinToken(ctx context.Context, hash string) error {
+	err := expectOne(s.db.ExecContext(ctx, `DELETE FROM join_tokens WHERE hash = ?`, hash))
+	if errors.Is(err, ErrNotFound) {
+		return ErrTokenInvalid
+	}
+	return err
+}

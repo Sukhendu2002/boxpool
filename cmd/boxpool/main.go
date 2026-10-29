@@ -31,6 +31,7 @@ Commands:
             root), a launch agent on macOS (as you)
   down      stop the daemon's service or launch agent, keeping its state
   join      join an existing pool (not implemented yet)
+  token     create or revoke a single-use token to join this pool
   sh        open a shell in a new or existing sandbox
   exec      run a command in a sandbox
   cp        copy files between this machine and a sandbox
@@ -82,6 +83,8 @@ func main() {
 		os.Exit(up(os.Args[2:]))
 	case "down":
 		os.Exit(down(os.Args[2:]))
+	case "token":
+		os.Exit(tokenCmd(os.Args[2:]))
 	case "join":
 		fmt.Fprintf(os.Stderr, "boxpool %s: not implemented yet\n", os.Args[1])
 		os.Exit(1)
