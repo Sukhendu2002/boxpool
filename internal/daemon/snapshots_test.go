@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,7 +111,10 @@ func TestSnapshot(t *testing.T) {
 		t.Errorf("second DELETE = %d", code)
 	}
 	// Sandboxes started from it keep their disks.
-	if got := states(list(t, srv)); got != "box=running a=running b=paused" {
+	// a and b can share a creation time, which leaves their order to their IDs.
+	got := strings.Fields(states(list(t, srv)))
+	slices.Sort(got)
+	if got := strings.Join(got, " "); got != "a=running b=paused box=running" {
 		t.Errorf("after DELETE: %q", got)
 	}
 }
