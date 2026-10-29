@@ -559,18 +559,20 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 // waits for firecracker to exit, which reboot=k (x86_64) or PSCI (arm64)
 // makes it do. Agents without the shutdown endpoint get freezeAndReboot.
 func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
-	ctx, cancel := context.WithTimeout(ctx, shutdownGrace+stopTimeout)
-	defer cancel()
 	c := d.agent(l)
 	defer c.CloseIdleConnections()
-	v, err := c.Version(ctx)
+	// The request can use up its whole budget; the stages after it, from
+	// ctx, have deadlines of their own.
+	rctx, cancel := context.WithTimeout(ctx, shutdownGrace+stopTimeout)
+	defer cancel()
+	v, err := c.Version(rctx)
 	if err != nil {
 		return err
 	}
 	if !slices.Contains(v.Features, agent.FeatureShutdown) {
 		return freezeAndReboot(ctx, c, l)
 	}
-	if err := c.Shutdown(ctx, shutdownGrace); err != nil {
+	if err := c.Shutdown(rctx, shutdownGrace); err != nil {
 		// The reboot can cut the reply short.
 		if waitExit(ctx, l, time.Second) == nil {
 			return nil
@@ -589,6 +591,8 @@ func (d *Driver) shutdownGuest(ctx context.Context, l layout) error {
 // processes get no signal first: writers block on the frozen filesystem and
 // die with the VM.
 func freezeAndReboot(ctx context.Context, c *agent.Client, l layout) error {
+	ctx, cancel := context.WithTimeout(ctx, stopTimeout)
+	defer cancel()
 	// Unlike a read-only remount, the freeze succeeds while guest processes
 	// have files open for writing.
 	var out bytes.Buffer
