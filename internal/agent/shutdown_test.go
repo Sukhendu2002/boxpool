@@ -103,8 +103,8 @@ func TestShutdown(t *testing.T) {
 func TestShutdownNotServed(t *testing.T) {
 	c := serve(t)
 	v, err := c.Version(context.Background())
-	if err != nil || len(v.Features) != 0 {
-		t.Errorf("Version() = %+v, %v; want no features", v, err)
+	if err != nil || slices.Contains(v.Features, FeatureShutdown) {
+		t.Errorf("Version() = %+v, %v; want no shutdown feature", v, err)
 	}
 	if err := c.Shutdown(context.Background(), time.Second); err == nil {
 		t.Error("Shutdown on an agent without it succeeded")

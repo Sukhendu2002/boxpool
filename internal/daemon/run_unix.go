@@ -143,8 +143,11 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 			h.ServeHTTP(w, r.WithContext(ctx))
 		}),
 	}
-	// Remote requests with an access token go through the same handler.
+	// Remote requests with an access token, and exposed URLs, go through
+	// the same handler.
 	s.api = srv.Handler
+	s.serveExposes(ctx)
+	defer s.closeExposes()
 	// A replica of the head's state resumes it, and serves the pool port
 	// as a head does, for raft and in case it becomes the head.
 	if me, ok := s.storedIdentity(); ok {

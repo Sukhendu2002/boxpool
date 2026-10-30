@@ -97,7 +97,7 @@ func removeStaleSocket(path string) error {
 // /v1/shutdown.
 func Serve(ctx context.Context, l net.Listener, version string, shutdown *Shutdown) error {
 	var sessions sync.WaitGroup
-	var features []string
+	features := []string{FeatureTCP}
 	mux := http.NewServeMux()
 	if shutdown != nil {
 		features = append(features, FeatureShutdown)
@@ -106,6 +106,7 @@ func Serve(ctx context.Context, l net.Listener, version string, shutdown *Shutdo
 	mux.HandleFunc("GET /v1/files", getFiles)
 	mux.HandleFunc("PUT /v1/files", putFiles)
 	mux.HandleFunc("GET /v1/ports", getPorts)
+	mux.HandleFunc("GET /v1/tcp", connectTCP)
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(Version{Protocol: ProtocolVersion, Agent: version, Features: features})

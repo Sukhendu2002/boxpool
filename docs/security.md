@@ -132,6 +132,31 @@ taken, the daemon logs a warning and runs without it.
   Once joined, its old tokens cannot register nodes, even before the old
   head listener closes on restart.
 
+### Exposed ports
+
+`boxpool expose` serves a sandbox port on the head at
+`https://<head's tailnet name>:<port>/`. tailscale serve terminates TLS
+with a certificate for that name and forwards to the head's daemon on
+`127.0.0.1:<port>`, so the URL is reachable only on the tailnet, and no
+plain-HTTP port listens on other interfaces. The head reaches the port
+through the node's tunnel and the guest agent's `GET /v1/tcp`; the guest
+needs no open port.
+
+- Unless `--public`, every request needs an `expose` access token scoped
+  to that sandbox: `?boxpool_token=` in the link `expose` prints, which
+  the head swaps for an `HttpOnly`, `Secure`, `SameSite=Lax` cookie and
+  redirects without, or that cookie. Otherwise the answer is 401.
+- Every exposed URL shares the head's host name, so browsers send each
+  one's cookie to all of them. The head strips every `boxpool_expose_*`
+  cookie before a request reaches a sandbox, public ones included.
+- Pages on two exposed ports are different origins but the same site, so
+  one sandbox's page can send requests, with cookies, to another's URL
+  (it cannot read the answers unless that app allows it).
+- The token is checked when each request starts; a WebSocket already open
+  when the token is revoked stays open until it closes.
+- Answers from a sandbox's port are never read as sandbox records when
+  the head forwards them from a node.
+
 ### Replicas and failover
 
 From the pool's second machine on, the head replicates its state (nodes,

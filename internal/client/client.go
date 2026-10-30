@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"github.com/coder/websocket"
@@ -220,6 +221,30 @@ func (c *Client) ListAccessTokens(ctx context.Context) ([]daemon.AccessToken, er
 // RevokeAccessToken makes the access token with the given ID invalid.
 func (c *Client) RevokeAccessToken(ctx context.Context, id string) error {
 	resp, err := c.send(ctx, http.MethodDelete, "/v1/access-tokens/"+url.PathEscape(id), "", nil)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+// Expose serves a sandbox's port at a URL on the head.
+func (c *Client) Expose(ctx context.Context, req daemon.ExposeRequest) (daemon.Expose, error) {
+	var e daemon.Expose
+	body, _ := json.Marshal(req)
+	err := c.do(ctx, http.MethodPost, "/v1/exposes", bytes.NewReader(body), &e)
+	return e, err
+}
+
+// ListExposes returns the head's exposed ports, oldest first.
+func (c *Client) ListExposes(ctx context.Context) ([]daemon.Expose, error) {
+	var list []daemon.Expose
+	err := c.get(ctx, "/v1/exposes", &list)
+	return list, err
+}
+
+// Unexpose stops serving a sandbox's port and revokes its token.
+func (c *Client) Unexpose(ctx context.Context, sandbox string, port int) error {
+	resp, err := c.send(ctx, http.MethodDelete, "/v1/exposes/"+url.PathEscape(sandbox)+"/"+strconv.Itoa(port), "", nil)
 	if err != nil {
 		return err
 	}

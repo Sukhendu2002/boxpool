@@ -195,6 +195,7 @@ type server struct {
 	leading      atomic.Bool                  // raft elected this machine head, and its state is current
 	id           atomic.Value                 // string: this machine's node ID, once in a pool
 	head         atomic.Value                 // string: the head a node reports to
+	exposed      map[int]*http.Server         // by loopback port; guarded by poolMu
 }
 
 // prepareStateDir checks permissions before opening a lock, log or socket.
@@ -247,6 +248,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("GET /v1/snapshots", s.backendOnly(s.listSnapshots))
 	mux.HandleFunc("DELETE /v1/snapshots/{name}", s.backendOnly(s.removeSnapshot))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.route(s.backendOnly(s.exec)))
+	mux.HandleFunc("/v1/ports/{name}/{port}/{path...}", s.route(s.backendOnly(s.ports)))
+	mux.HandleFunc("POST /v1/exposes", s.createExpose)
+	mux.HandleFunc("GET /v1/exposes", s.listExposes)
+	mux.HandleFunc("DELETE /v1/exposes/{sandbox}/{port}", s.removeExpose)
 	mux.HandleFunc("GET /v1/sandboxes/{name}/files", s.route(s.backendOnly(s.files)))
 	mux.HandleFunc("PUT /v1/sandboxes/{name}/files", s.route(s.backendOnly(s.files)))
 	mux.HandleFunc("POST /v1/tokens", s.createToken)

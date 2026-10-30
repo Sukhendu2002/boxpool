@@ -50,6 +50,7 @@ Commands:
   resume    resume a paused sandbox
   rm        delete a sandbox and free its resources
   snapshot  save a sandbox's disk for boxpool sh --from; snapshot ls, rm
+  expose    on the head: an HTTPS URL for a sandbox port; expose ls, rm
 `
 
 func main() {
@@ -89,6 +90,8 @@ func main() {
 		os.Exit(rm(os.Args[2:]))
 	case "snapshot":
 		os.Exit(snapshotCmd(os.Args[2:]))
+	case "expose":
+		os.Exit(exposeCmd(os.Args[2:]))
 	case "up":
 		os.Exit(up(os.Args[2:]))
 	case "down":
