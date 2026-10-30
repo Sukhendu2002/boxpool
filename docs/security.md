@@ -132,6 +132,45 @@ taken, the daemon logs a warning and runs without it.
   Once joined, its old tokens cannot register nodes, even before the old
   head listener closes on restart.
 
+### Exposed ports
+
+`boxpool expose` serves a sandbox port on the head at
+`https://<head's tailnet name>:<port>/`. tailscale serve terminates TLS
+with a certificate for that name and forwards to the head's daemon on
+`127.0.0.1:<port>`, so the URL is reachable only on the tailnet, and no
+plain-HTTP port listens on other interfaces. The head reaches the port
+through the node's tunnel and the guest agent's `GET /v1/tcp`; the guest
+needs no open port.
+
+- Unless `--public`, every request needs an `expose` access token scoped
+  to that sandbox: `?boxpool_token=` in the link `expose` prints, which
+  the head swaps for an `HttpOnly`, `Secure`, `SameSite=Lax` cookie and
+  redirects without, or that cookie. Otherwise the answer is 401.
+- Every exposed URL shares the head's host name; cookies do not distinguish
+  ports. The head strips all browser cookies except authenticated app-cookie
+  envelopes belonging to that expose. Backend `Set-Cookie` values are
+  encrypted with AES-GCM, namespaced per expose and made host-only, `Secure`
+  and `HttpOnly`, including on WebSocket handshakes. Only their original
+  app names and values reach the corresponding app. Keys are derived from
+  the head's private CA key and the expose's identity and creation time:
+  sessions survive daemon restarts but cannot move to another expose or a
+  later expose reusing its port. Paths and lifetimes are preserved; changing
+  the name or value of an envelope invalidates it. Legacy raw app cookies
+  are ignored, so existing sessions need a new login. JavaScript cookie
+  APIs are unsupported: readable envelopes could be stolen and replayed
+  by JavaScript on a sibling port.
+- Pages on two exposed ports are different origins but the same site, so
+  one sandbox's page can send requests, with cookies, to another's URL
+  (it cannot read the answers unless that app allows it).
+- The token is checked when each request starts; a WebSocket already open
+  when the token is revoked stays open until it closes. Removing the expose
+  or stopping the daemon cancels its requests and open WebSockets.
+- Only an Origin matching that expose's HTTPS URL is translated to the
+  guest's localhost Origin. Foreign origins remain foreign, so backend
+  origin checks still reject cross-origin WebSockets and form requests.
+- Answers from a sandbox's port are never read as sandbox records when
+  the head forwards them from a node.
+
 ### Replicas and failover
 
 From the pool's second machine on, the head replicates its state (nodes,

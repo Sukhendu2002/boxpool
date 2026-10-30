@@ -83,6 +83,8 @@ boxpool resume box    # resume it where it left off
 boxpool snapshot box --name withjq   # save a copy of a sandbox's disk
 boxpool sh --from withjq             # start a new sandbox from it
 boxpool rm box        # delete a sandbox
+boxpool expose box 8000              # on the head: an HTTPS URL for port 8000
+boxpool expose ls     # exposed ports; expose rm box 8000 closes one
 boxpool doctor        # check whether this machine can host sandboxes
 ```
 
@@ -115,10 +117,26 @@ access token on the head with `boxpool token create --scope cli` and run
 lifecycle commands then go to the head over TLS on port 7443, which the
 token pins, until `boxpool logout`. `--sandbox name` limits a token to one
 sandbox and `--ttl` makes it expire. Restoring a snapshot with `--from`
-requires a token without `--sandbox`. `expose` tokens are for the URLs
-`boxpool expose` will make and cannot run commands. Tokens are stored
+requires a token without `--sandbox`. `expose` tokens only open the URLs
+`boxpool expose` makes and cannot run commands. Tokens are stored
 hashed on the head and are not replicated: after a failover, create new
 ones on the new head.
+
+To preview a web app from a phone, run `boxpool expose <sandbox> <port>` on
+the head. It needs Tailscale on the head, with MagicDNS and HTTPS
+certificates enabled for the tailnet: the head runs `tailscale serve` and
+prints `https://<head>.<tailnet>.ts.net:<port>/?boxpool_token=...`, which
+any device on the tailnet, such as a phone with the Tailscale app on mobile
+data, opens. The sandbox may be on any node. Opening the link once sets a
+cookie; without the token or the cookie the URL answers 401, unless
+`--public`. WebSockets, such as a dev server's hot reload, work through it.
+`boxpool expose rm` closes the URL and revokes its token; exposes, like
+tokens, are not replicated. Sandboxes need an image whose agent lists the
+`tcp` feature. Run `boxpool expose check` on the head to check its Tailscale
+connection, MagicDNS and HTTPS settings; see [head and guest image setup](docs/expose.md).
+App session cookies are encrypted and isolated per expose. Apps that read
+or write cookies through JavaScript need changes; server-side cookie logins
+work normally.
 
 `direct` remains the default transport. `--addr host:port` overrides
 automatic address discovery with either transport. Tailscale discovery

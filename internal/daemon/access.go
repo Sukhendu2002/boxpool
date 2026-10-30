@@ -73,25 +73,34 @@ func (s *server) createAccessToken(w http.ResponseWriter, r *http.Request) {
 	if !s.notJoined(w, "create access tokens on the head") {
 		return
 	}
-	ca, _, err := auth.LoadOrCreateCA(s.info.StateDir)
+	out, err := s.newAccessToken(r.Context(), req.Scope, req.Sandbox, req.TTL)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("head CA: %w", err))
-		return
-	}
-	tok := auth.NewAccessToken(sha256.Sum256(ca.Raw))
-	rec := store.AccessToken{Hash: tok.Hash(), Scope: req.Scope, Sandbox: req.Sandbox, CreatedAt: time.Now().UTC()}
-	if req.TTL > 0 {
-		rec.ExpiresAt = rec.CreatedAt.Add(req.TTL)
-	}
-	if err := s.st.CreateAccessToken(r.Context(), rec); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	out := accessToken(rec)
-	out.Token = tok.String()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(out)
+}
+
+// newAccessToken stores a new access token and returns it with its
+// secret. The caller must hold poolMu.
+func (s *server) newAccessToken(ctx context.Context, scope, sandbox string, ttl time.Duration) (AccessToken, error) {
+	ca, _, err := auth.LoadOrCreateCA(s.info.StateDir)
+	if err != nil {
+		return AccessToken{}, fmt.Errorf("head CA: %w", err)
+	}
+	tok := auth.NewAccessToken(sha256.Sum256(ca.Raw))
+	rec := store.AccessToken{Hash: tok.Hash(), Scope: scope, Sandbox: sandbox, CreatedAt: time.Now().UTC()}
+	if ttl > 0 {
+		rec.ExpiresAt = rec.CreatedAt.Add(ttl)
+	}
+	if err := s.st.CreateAccessToken(ctx, rec); err != nil {
+		return AccessToken{}, err
+	}
+	out := accessToken(rec)
+	out.Token = tok.String()
+	return out, nil
 }
 
 func (s *server) listAccessTokens(w http.ResponseWriter, r *http.Request) {

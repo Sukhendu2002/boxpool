@@ -43,9 +43,9 @@ Content-Type: application/json
 should check it before anything else and refuse a version it does not know.
 
 `features` lists optional endpoints this agent serves, and is left out when
-there are none. The only one is `shutdown`, for
-[`POST /v1/shutdown`](#post-v1shutdown). Agents older than a feature do not
-list it, so a client checks `features` before using one.
+there are none: `shutdown`, for [`POST /v1/shutdown`](#post-v1shutdown),
+and `tcp`, for [`GET /v1/tcp`](#get-v1tcpportn). Agents older than a
+feature do not list it, so a client checks `features` before using one.
 
 ## `GET /v1/exec`
 
@@ -318,6 +318,29 @@ python3 -m http.server 8000
 curl --fail --unix-socket /run/boxpool/agent.sock http://agent/v1/ports
 # Includes {"proto":"tcp","address":"0.0.0.0","port":8000}.
 ```
+
+## `GET /v1/tcp?port=N`
+
+Connects to TCP port `N` on the guest's loopback, `127.0.0.1` then `::1`,
+and switches the connection to carry that connection's bytes both ways
+until either side closes. `boxpool expose` reaches sandbox ports this way.
+
+```http
+GET /v1/tcp?port=8000 HTTP/1.1
+Host: agent
+Connection: Upgrade
+Upgrade: boxpool-tcp
+```
+
+```http
+HTTP/1.1 101 Switching Protocols
+Connection: Upgrade
+Upgrade: boxpool-tcp
+```
+
+A missing or out-of-range port is `400 Bad Request`; a port nothing accepts
+connections on within 5 seconds is `502 Bad Gateway`, with the usual JSON
+error. Agents from images before it answer `404 Not Found`.
 
 ## `POST /v1/shutdown`
 

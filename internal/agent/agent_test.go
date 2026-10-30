@@ -110,7 +110,7 @@ func run(t *testing.T, c *Client, req ExecRequest, stdin string) (stdout, stderr
 
 func TestVersion(t *testing.T) {
 	v, err := serve(t).Version(context.Background())
-	if err != nil || !reflect.DeepEqual(v, Version{Protocol: ProtocolVersion, Agent: "test"}) {
+	if err != nil || !reflect.DeepEqual(v, Version{Protocol: ProtocolVersion, Agent: "test", Features: []string{FeatureTCP}}) {
 		t.Errorf("Version() = %+v, %v", v, err)
 	}
 }

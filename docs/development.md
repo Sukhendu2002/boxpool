@@ -186,12 +186,21 @@ publishing. GitHub's hosted Macs cannot run VMs ("Virtualization is not
 available on this hardware"), so run the integration tests above on your Mac
 before tagging.
 
-A tag push alone creates the release with the workflow's token, which does
-not trigger the [guest image workflow](../.github/workflows/image.yml). To
-publish images too, create the release yourself (`gh release create` or
-the web UI); the release workflow then uploads into that release. Include
+A tag push creates the release with the workflow's token, then explicitly
+calls the [guest image workflow](../.github/workflows/image.yml) to build,
+test and publish matching guest images. GitHub does not emit another release
+event for that token, so the explicit call is required. A release created
+with `gh release create` or the web UI triggers the image workflow directly;
+the tag workflow only uploads binaries into that existing release. Include
 the ad-hoc signing and Gatekeeper notice below in manually created release
 notes too; workflow-created releases include a link to these instructions.
+
+Images must advertise and exercise the agent's `tcp` feature before
+publication: both OCI architectures test a real loopback HTTP request over
+`GET /v1/tcp`, and the KVM smoke tests that path in the VM. Publishing does
+not change the default image pins. Follow the
+[image rollout checklist](expose.md#guest-images) to update the verified VM
+checksums/sizes and Docker index digest after publication.
 
 Check a release:
 
