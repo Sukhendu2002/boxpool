@@ -8,6 +8,7 @@ import (
 	"net"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -39,19 +40,46 @@ func (Tailscale) Serve(ctx context.Context, port int) (string, error) {
 	// Serve waits for the user when HTTPS is not enabled on the tailnet.
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	host, err := (Tailscale{}).CheckServe(ctx)
+	if err != nil {
+		return "", err
+	}
+	p := strconv.Itoa(port)
+	if _, err := tailscale(ctx, "serve", "--bg", "--https="+p, "http://127.0.0.1:"+p); err != nil {
+		return "", fmt.Errorf("serve port %s over HTTPS: %w; run tailscale serve as the daemon user, or grant that user operator access with sudo tailscale set --operator=<daemon-user>", p, err)
+	}
+	return "https://" + host + ":" + p + "/", nil
+}
+
+// CheckServe checks the head's connection, MagicDNS and HTTPS capability
+// without changing its Serve configuration or prompting interactively.
+func (Tailscale) CheckServe(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	out, err := tailscale(ctx, "status", "--json")
 	if err != nil {
 		return "", fmt.Errorf("find this machine's tailnet name: %w; run tailscale up", err)
 	}
-	var st struct{ Self struct{ DNSName string } }
-	if err := json.Unmarshal(out, &st); err != nil || st.Self.DNSName == "" {
-		return "", errors.New("tailscale status names no DNS name for this machine: enable MagicDNS on the tailnet")
+	var st struct {
+		BackendState   string
+		Self           struct{ DNSName string }
+		CurrentTailnet struct{ MagicDNSEnabled bool }
+		CertDomains    []string
 	}
-	p := strconv.Itoa(port)
-	if _, err := tailscale(ctx, "serve", "--bg", "--https="+p, "http://127.0.0.1:"+p); err != nil {
-		return "", fmt.Errorf("serve port %s over HTTPS: %w; HTTPS certificates must be enabled on the tailnet", p, err)
+	if err := json.Unmarshal(out, &st); err != nil {
+		return "", fmt.Errorf("parse tailscale status: %w", err)
 	}
-	return "https://" + strings.TrimSuffix(st.Self.DNSName, ".") + ":" + p + "/", nil
+	if st.BackendState != "Running" {
+		return "", fmt.Errorf("Tailscale is %q: start Tailscale and run tailscale up on the head", st.BackendState)
+	}
+	host := strings.TrimSuffix(st.Self.DNSName, ".")
+	if !st.CurrentTailnet.MagicDNSEnabled || host == "" {
+		return "", errors.New("enable MagicDNS at https://login.tailscale.com/admin/dns on the head's tailnet")
+	}
+	if !slices.Contains(st.CertDomains, host) {
+		return "", errors.New("enable HTTPS Certificates at https://login.tailscale.com/admin/dns on the head's tailnet, then retry")
+	}
+	return host, nil
 }
 
 // Unserve stops serving port.
@@ -69,7 +97,7 @@ func tailscale(ctx context.Context, args ...string) ([]byte, error) {
 		bin, err = "/Applications/Tailscale.app/Contents/MacOS/Tailscale", nil
 	}
 	if err != nil {
-		return nil, errors.New("the tailscale CLI is not installed: install Tailscale or Headscale's client, or pass --addr")
+		return nil, errors.New("the tailscale CLI is not installed: install Tailscale on the head and make tailscale available in the daemon's PATH")
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	// A wrapper can leave a child holding stdout after it is killed.

@@ -8,8 +8,12 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -79,6 +83,9 @@ func check(ctx context.Context, socket, version string) error {
 	if v.Protocol != agent.ProtocolVersion || v.Agent != version {
 		return fmt.Errorf("unexpected version: %+v, want protocol %d agent %s", v, agent.ProtocolVersion, version)
 	}
+	if !slices.Contains(v.Features, agent.FeatureTCP) {
+		return fmt.Errorf("image agent lacks tcp feature: %+v", v)
+	}
 	fmt.Printf("GET /v1/version: protocol=%d agent=%s\n", v.Protocol, v.Agent)
 	var out bytes.Buffer
 	s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-ec", `
@@ -133,6 +140,73 @@ echo image-smoke-ok
 	if _, err := c.Ports(ctx); err != nil {
 		return fmt.Errorf("guest /proc TCP discovery: %w", err)
 	}
+	if err := checkTCP(ctx, c, func(ctx context.Context) (net.Conn, error) { return dial(ctx, socket) }); err != nil {
+		return err
+	}
 	fmt.Println("guest exec, PTY, agent CLIs, device links, mounts, metadata, writable directories, orphan reaping and port discovery: OK")
+	return nil
+}
+
+func checkTCP(ctx context.Context, c *agent.Client, dialAgent func(context.Context) (net.Conn, error)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	stop := context.AfterFunc(ctx, func() { reader.CloseWithError(ctx.Err()) })
+	defer stop()
+	var stderr bytes.Buffer
+	s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"node", "-e", `const s=require('http').createServer((_,r)=>{r.end('tcp-smoke-ok');s.close()});s.listen(0,'127.0.0.1',()=>console.log(s.address().port))`}}, writer, &stderr)
+	if err != nil {
+		return err
+	}
+	// Close the pipe even if the server exits before it prints its port.
+	done := make(chan struct{})
+	var waitErr error
+	go func() {
+		code, err := s.Wait()
+		if err == nil && code != 0 {
+			err = fmt.Errorf("TCP smoke server exited %d", code)
+		}
+		writer.CloseWithError(err)
+		waitErr = err
+		close(done)
+	}()
+	defer func() { cancel(); reader.Close(); <-done }()
+	line, err := bufio.NewReader(reader).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("start TCP smoke server: %w", err)
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil {
+		return err
+	}
+	conn, err := dialAgent(ctx)
+	if err != nil {
+		return err
+	}
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	conn, err = agent.DialTCP(ctx, conn, port)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"); err != nil {
+		return err
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusOK || string(b) != "tcp-smoke-ok" {
+		return fmt.Errorf("TCP agent forwarding: status=%d body=%q err=%v", resp.StatusCode, b, err)
+	}
+	<-done
+	if waitErr != nil {
+		return fmt.Errorf("TCP smoke server: %w: %s", waitErr, stderr.String())
+	}
+	fmt.Println("guest agent tcp feature and loopback HTTP forwarding: OK")
 	return nil
 }

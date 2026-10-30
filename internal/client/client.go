@@ -227,6 +227,13 @@ func (c *Client) RevokeAccessToken(ctx context.Context, id string) error {
 	return resp.Body.Close()
 }
 
+// CheckExpose checks the head's Tailscale prerequisites without creating a URL.
+func (c *Client) CheckExpose(ctx context.Context) (daemon.ExposeCheck, error) {
+	var out daemon.ExposeCheck
+	err := c.get(ctx, "/v1/exposes/check", &out)
+	return out, err
+}
+
 // Expose serves a sandbox's port at a URL on the head.
 func (c *Client) Expose(ctx context.Context, req daemon.ExposeRequest) (daemon.Expose, error) {
 	var e daemon.Expose

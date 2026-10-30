@@ -261,10 +261,16 @@ The **Guest image** workflow builds amd64 on `ubuntu-24.04` and arm64 on
 actual amd64 kernel/rootfs with KVM. Missing KVM fails, never silently
 skips. The summary records the compressed rootfs byte count and hashes.
 Per-architecture assets, including the saved OCI image, are uploaded for
-seven days. PR/main builds and manual dispatch **never publish**.
+seven days. PR/main builds and manual dispatch **never publish**. Both OCI
+architectures also check the agent's `tcp` feature and forward a real HTTP
+request to a guest loopback server through `GET /v1/tcp`. The VM smoke
+exercises this path over vsock too.
 
 Publishing happens only for a **published GitHub release** whose tag
 matches `v<major>.<minor>.<patch>[-suffix]` and points into `main`'s history.
+The binary release workflow also calls this workflow explicitly after
+creating a release with `GITHUB_TOKEN`; that token does not trigger release
+events. A UI/CLI-created release uses the release event directly instead.
 Both architectures are built/tested at that release commit and version in
 the same run. Only the dependent publish job receives `contents:write` and
 `packages:write`; no `pull_request_target`, PR-code credentials or package

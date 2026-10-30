@@ -515,7 +515,12 @@ func (s *server) forward(w http.ResponseWriter, r *http.Request, m member) {
 			DialContext:       func(ctx context.Context, _, _ string) (net.Conn, error) { return s.tunnels.take(ctx, m.ID) },
 			DisableKeepAlives: true, // a tunnel carries one request
 		},
-		ModifyResponse: func(resp *http.Response) error { return s.track(resp, m.ID) },
+		ModifyResponse: func(resp *http.Response) error {
+			if err := protectExposeCookies(resp); err != nil {
+				return err
+			}
+			return s.track(resp, m.ID)
+		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			writeError(w, http.StatusBadGateway, fmt.Errorf("node %s is unreachable: %w", m.Name, err))
 		},

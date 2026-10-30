@@ -27,6 +27,25 @@ type ExposeRequest struct {
 	Public  bool   `json:"public,omitempty"`
 }
 
+// ExposeCheck describes the head's readiness to serve tailnet HTTPS URLs.
+type ExposeCheck struct {
+	Hostname string `json:"hostname"`
+}
+
+func (s *server) checkExpose(w http.ResponseWriter, r *http.Request) {
+	s.poolMu.Lock()
+	defer s.poolMu.Unlock()
+	if !s.notJoined(w, "check expose prerequisites on the head") {
+		return
+	}
+	host, err := (transport.Tailscale{}).CheckServe(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, ExposeCheck{Hostname: host})
+}
+
 // Expose is a sandbox port the head serves at URL. Unless it is public,
 // URL carries an expose token only in the answer to its creation: opening
 // it swaps the token for a cookie. Revoking TokenID closes the URL.
@@ -120,6 +139,13 @@ func (s *server) createExpose(w http.ResponseWriter, r *http.Request) {
 		}
 		e = stored
 	}
+	if err == nil {
+		err = s.startExpose(e, l)
+		if err != nil {
+			unserveHTTPS(context.WithoutCancel(ctx), e.Port)
+			s.st.DeleteExpose(context.WithoutCancel(ctx), e.Port)
+		}
+	}
 	if err != nil {
 		l.Close()
 		if tok.ID != "" {
@@ -128,7 +154,6 @@ func (s *server) createExpose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	s.startExpose(e, l)
 	out := apiExpose(e)
 	if tok.Token != "" {
 		out.URL += "?" + tokenParam + "=" + tok.Token
@@ -203,19 +228,39 @@ func (s *server) serveExposes(ctx context.Context) {
 			slog.Warn("cannot serve exposed port; boxpool expose rm and expose it again", "sandbox", e.Sandbox, "port", e.SandboxPort, "err", err)
 			continue
 		}
-		s.startExpose(e, l)
+		if err := s.startExpose(e, l); err != nil {
+			l.Close()
+			slog.Warn("cannot serve exposed port", "sandbox", e.Sandbox, "err", err)
+		}
 	}
+}
+
+type exposeServer struct {
+	*http.Server
+	cancel context.CancelFunc
+}
+
+func (s *exposeServer) Close() error {
+	s.cancel() // ReverseProxy closes hijacked WebSockets on cancellation.
+	return s.Server.Close()
 }
 
 // startExpose serves e on l until closeExposes or its removal. The caller
 // must hold poolMu.
-func (s *server) startExpose(e store.Expose, l net.Listener) {
-	if s.exposed == nil {
-		s.exposed = map[int]*http.Server{}
+func (s *server) startExpose(e store.Expose, l net.Listener) error {
+	cookies, err := newExposeCookies(s.info.StateDir, e)
+	if err != nil {
+		return err
 	}
-	srv := &http.Server{Handler: s.exposeHandler(e), ReadHeaderTimeout: 10 * time.Second}
-	s.exposed[e.Port] = srv
+	if s.exposed == nil {
+		s.exposed = map[int]*exposeServer{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := &http.Server{Handler: s.exposeHandler(e, cookies), ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
+	s.exposed[e.Port] = &exposeServer{Server: srv, cancel: cancel}
 	go srv.Serve(l)
+	return nil
 }
 
 func (s *server) closeExposes() {
@@ -229,7 +274,7 @@ func (s *server) closeExposes() {
 
 // exposeHandler checks a request for an exposed URL and sends it, through
 // the local API, to the sandbox's port on whichever node has it.
-func (s *server) exposeHandler(e store.Expose) http.Handler {
+func (s *server) exposeHandler(e store.Expose, appCookies *exposeCookies) http.Handler {
 	api := s.api
 	if api == nil { // tests serve exposes without Run
 		api = s.handler()
@@ -264,15 +309,13 @@ func (s *server) exposeHandler(e store.Expose) http.Handler {
 				return
 			}
 		}
-		// Every exposed URL shares the host, so the browser sends each
-		// one's cookie to all of them: none may reach a sandbox.
-		cookies := r.Cookies()
-		r.Header.Del("Cookie")
-		for _, c := range cookies {
-			if !strings.HasPrefix(c.Name, cookiePrefix) {
-				r.AddCookie(c)
-			}
+		appCookies.open(r)
+		// Translate only this expose's same-origin requests. Foreign origins
+		// must remain foreign when the backend enforces its CSRF checks.
+		if r.Header.Get("Origin") == strings.TrimSuffix(e.URL, "/") {
+			r.Header.Set("Origin", "http://localhost:"+strconv.Itoa(e.SandboxPort))
 		}
+		r = r.WithContext(context.WithValue(r.Context(), exposeCookiesKey{}, exposeCookieRequest{cookies: appCookies, path: r.URL.EscapedPath()}))
 		escaped := r.URL.EscapedPath()
 		r.URL.Path, r.URL.RawPath = prefix+r.URL.Path, prefix+escaped
 		api.ServeHTTP(w, r)
@@ -345,6 +388,7 @@ func (s *server) ports(w http.ResponseWriter, r *http.Request) {
 			},
 			DisableKeepAlives: true,
 		},
+		ModifyResponse: protectExposeCookies,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			writeError(w, http.StatusBadGateway, fmt.Errorf("cannot reach port %d in sandbox %q (is it listening?): %w", port, sb.Spec.Name, err))
 		},

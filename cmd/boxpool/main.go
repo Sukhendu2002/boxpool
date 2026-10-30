@@ -50,7 +50,7 @@ Commands:
   resume    resume a paused sandbox
   rm        delete a sandbox and free its resources
   snapshot  save a sandbox's disk for boxpool sh --from; snapshot ls, rm
-  expose    on the head: an HTTPS URL for a sandbox port; expose ls, rm
+  expose    on the head: an HTTPS URL for a sandbox port; expose ls, rm, check
 `
 
 func main() {

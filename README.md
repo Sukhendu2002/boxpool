@@ -132,7 +132,11 @@ cookie; without the token or the cookie the URL answers 401, unless
 `--public`. WebSockets, such as a dev server's hot reload, work through it.
 `boxpool expose rm` closes the URL and revokes its token; exposes, like
 tokens, are not replicated. Sandboxes need an image whose agent lists the
-`tcp` feature.
+`tcp` feature. Run `boxpool expose check` on the head to check its Tailscale
+connection, MagicDNS and HTTPS settings; see [head and guest image setup](docs/expose.md).
+App session cookies are encrypted and isolated per expose. Apps that read
+or write cookies through JavaScript need changes; server-side cookie logins
+work normally.
 
 `direct` remains the default transport. `--addr host:port` overrides
 automatic address discovery with either transport. Tailscale discovery

@@ -15,6 +15,7 @@ import (
 const exposeUsage = `Usage:
   boxpool expose <sandbox> <port> [--public]
   boxpool expose ls
+  boxpool expose check
   boxpool expose rm <sandbox> <port>
 
 On the head: prints an HTTPS URL, on its tailnet, for a TCP port in a
@@ -34,6 +35,8 @@ func exposeCmd(args []string) int {
 			return exposeLs(args[1:])
 		case "rm":
 			return exposeRm(args[1:])
+		case "check":
+			return exposeCheck(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("expose", flag.ContinueOnError)
@@ -70,6 +73,26 @@ func exposeCmd(args []string) int {
 	if !e.Public {
 		fmt.Fprintf(os.Stderr, "Anyone with this link opens the URL until boxpool expose rm %s %d.\n", e.Sandbox, e.Port)
 	}
+	return 0
+}
+
+func exposeCheck(args []string) int {
+	if len(args) != 0 {
+		fmt.Fprint(os.Stderr, exposeUsage)
+		return 2
+	}
+	ctx := context.Background()
+	c, ok := connectLocal(ctx, "expose check")
+	if !ok {
+		return 1
+	}
+	out, err := c.CheckExpose(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "boxpool expose check: %v\n", err)
+		return 1
+	}
+	fmt.Printf("Tailscale connected; MagicDNS and HTTPS certificates enabled for %s.\n", out.Hostname)
+	fmt.Println("Creating an expose also checks the daemon's Serve permissions. See docs/expose.md for head and image setup.")
 	return 0
 }
 

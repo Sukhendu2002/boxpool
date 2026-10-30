@@ -18,7 +18,7 @@ func TestTailscaleServe(t *testing.T) {
 	script := `#!/bin/sh
 echo "$*" >> ` + log + `
 case "$1" in
-status) echo '{"Self":{"DNSName":"head.tail1.ts.net."}}' ;;
+status) echo '{"BackendState":"Running","Self":{"DNSName":"head.tail1.ts.net."},"CurrentTailnet":{"MagicDNSEnabled":true},"CertDomains":["head.tail1.ts.net"]}' ;;
 serve) if [ -n "$FAIL" ]; then echo 'Serve is not enabled on your tailnet.' >&2; exit 1; fi ;;
 esac
 `
@@ -42,5 +42,28 @@ esac
 	t.Setenv("FAIL", "1")
 	if _, err := (transport.Tailscale{}).Serve(ctx, 41001); err == nil || !strings.Contains(err.Error(), "Serve is not enabled") {
 		t.Errorf("Serve without HTTPS enabled = %v; want tailscale's message", err)
+	}
+}
+
+func TestTailscaleServeReadiness(t *testing.T) {
+	for _, tc := range []struct{ name, status, want string }{
+		{"login", `{"BackendState":"NeedsLogin"}`, "tailscale up"},
+		{"magicdns", `{"BackendState":"Running","Self":{"DNSName":"head.test."}}`, "enable MagicDNS"},
+		{"https", `{"BackendState":"Running","Self":{"DNSName":"head.test."},"CurrentTailnet":{"MagicDNSEnabled":true}}`, "enable HTTPS Certificates"},
+		{"wrong certificate", `{"BackendState":"Running","Self":{"DNSName":"head.test."},"CurrentTailnet":{"MagicDNSEnabled":true},"CertDomains":["other.test"]}`, "enable HTTPS Certificates"},
+		{"malformed", `not-json`, "parse tailscale status"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			script := "#!/bin/sh\n[ \"$1\" = status ] || { echo unexpected-serve >&2; exit 1; }\nprintf '%s' \"$STATUS\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "tailscale"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("STATUS", tc.status)
+			if _, err := (transport.Tailscale{}).Serve(context.Background(), 41000); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Serve=%v, want %s", err, tc.want)
+			}
+		})
 	}
 }

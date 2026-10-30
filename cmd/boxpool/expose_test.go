@@ -16,7 +16,7 @@ import (
 
 func TestExposeCmd(t *testing.T) {
 	bin := t.TempDir()
-	script := "#!/bin/sh\n[ \"$1\" = status ] && echo '{\"Self\":{\"DNSName\":\"head.tail1.ts.net.\"}}'\nexit 0\n"
+	script := "#!/bin/sh\n[ \"$1\" = status ] && echo '{\"BackendState\":\"Running\",\"Self\":{\"DNSName\":\"head.tail1.ts.net.\"},\"CurrentTailnet\":{\"MagicDNSEnabled\":true},\"CertDomains\":[\"head.tail1.ts.net\"]}'\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(bin, "tailscale"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +26,9 @@ func TestExposeCmd(t *testing.T) {
 	defer cancel()
 	if _, err := client.New(dir).CreateSandbox(ctx, daemon.CreateRequest{Name: "box"}); err != nil {
 		t.Fatal(err)
+	}
+	if code, out, errOut := cli(t, dir, "", "expose", "check"); code != 0 || !strings.Contains(out, "head.tail1.ts.net") || errOut != "" {
+		t.Fatalf("expose check = %d %q %q", code, out, errOut)
 	}
 	code, out, errOut := cli(t, dir, "", "expose", "box", "8000")
 	if code != 0 || !strings.HasPrefix(out, "https://head.tail1.ts.net:") || !strings.Contains(out, "/?boxpool_token=bpat1_") || !strings.Contains(errOut, "expose rm box 8000") {
@@ -45,7 +48,7 @@ func TestExposeCmd(t *testing.T) {
 	if code, _, errOut := cli(t, dir, "", "expose", "rm", "box", "8000"); code != 1 || !strings.Contains(errOut, "not exposed") {
 		t.Errorf("second expose rm = %d %q", code, errOut)
 	}
-	for _, args := range [][]string{{"expose"}, {"expose", "box"}, {"expose", "box", "http"}, {"expose", "box", "1", "2"}, {"expose", "rm", "box"}, {"expose", "ls", "x"}} {
+	for _, args := range [][]string{{"expose"}, {"expose", "box"}, {"expose", "box", "http"}, {"expose", "box", "1", "2"}, {"expose", "rm", "box"}, {"expose", "ls", "x"}, {"expose", "check", "x"}} {
 		if code, _, _ := cli(t, dir, "", args...); code != 2 {
 			t.Errorf("%v = %d, want 2", args, code)
 		}

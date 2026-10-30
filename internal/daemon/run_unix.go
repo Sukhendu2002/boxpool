@@ -203,6 +203,7 @@ func Run(ctx context.Context, dir string, info Info) (err error) {
 		}
 		<-served
 	}
+	s.closeExposes() // close uploads and upgraded sessions before waiting for handlers
 	mu.Lock()
 	endSessions() // each exec relay closes both its WebSockets
 	mu.Unlock()
