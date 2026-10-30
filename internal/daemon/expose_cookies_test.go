@@ -116,6 +116,16 @@ func TestExposeCookieEnvelopes(t *testing.T) {
 		if got := open(c, "/", resp.Cookies()[0]); got != "" {
 			t.Fatal("incomplete session accepted")
 		}
+		// A shorter replacement must ignore a lingering second piece,
+		// even when its ciphertext happens to end at the piece boundary.
+		shortValue := strings.Repeat("b", 2212)
+		short := seal("session="+shortValue+"; Path=/", "/login")
+		if len(short.Value) != appCookiePieceSize+2 {
+			t.Fatalf("boundary fixture length=%d", len(short.Value))
+		}
+		if got := open(c, "/", short, resp.Cookies()[1]); got != "session="+shortValue {
+			t.Fatal("stale tail invalidated shorter replacement")
+		}
 	}
 	if strings.Contains(app.Value, "secret") {
 		t.Fatal("plaintext cookie value")

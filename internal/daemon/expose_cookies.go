@@ -68,11 +68,16 @@ func (c *exposeCookies) open(r *http.Request) {
 		if !strings.HasPrefix(cookie.Name, c.prefix) {
 			continue
 		}
-		value := cookie.Value
-		if len(value) == appCookiePieceSize {
-			if tail, err := rCookie(cookies, cookie.Name+"_1"); err == nil {
-				value += tail.Value
+		pieces, value, ok := strings.Cut(cookie.Value, ".")
+		if !ok || pieces != "1" && pieces != "2" {
+			continue
+		}
+		if pieces == "2" {
+			tail, err := rCookie(cookies, cookie.Name+"_1")
+			if err != nil {
+				continue
 			}
+			value += tail.Value
 		}
 		b, err := base64.RawURLEncoding.DecodeString(value)
 		if err != nil || len(b) < c.aead.NonceSize() {
@@ -130,7 +135,11 @@ func protectExposeCookies(resp *http.Response) error {
 		if len(value) > 2*appCookiePieceSize {
 			return fmt.Errorf("app cookie exceeds the browser cookie size limit")
 		}
-		cookie.Value = value[:min(len(value), appCookiePieceSize)]
+		pieces := "1."
+		if len(value) > appCookiePieceSize {
+			pieces = "2."
+		}
+		cookie.Value = pieces + value[:min(len(value), appCookiePieceSize)]
 		cookie.Domain = ""
 		cookie.Secure, cookie.HttpOnly = true, true
 		resp.Header.Add("Set-Cookie", cookie.String())
