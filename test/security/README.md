@@ -38,7 +38,9 @@ harness does this automatically. Expected results start with `blocked:`;
 The Docker syscall probe attempts a privileged mount and raw socket, checks
 capability dropping, no-new-privileges, seccomp and masked/read-only proc/sys.
 VM root may use privileged syscalls inside its own kernel, so VM probes check
-kernel separation and host-marker/socket/device inaccessibility instead.
+kernel separation and host-marker/control-socket inaccessibility instead.
+Guest devices such as `/dev/mem` refer to the VM kernel and are permitted;
+the same devices are forbidden in Docker, which shares the host kernel.
 
 File transfer fuzzing runs without a backend:
 

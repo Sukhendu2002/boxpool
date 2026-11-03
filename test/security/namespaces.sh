@@ -4,13 +4,22 @@ set -eu -o pipefail
 backend=$1
 host_boot=$2
 marker=$3
+case "$backend" in
+  docker|firecracker) ;;
+  *) echo "FAIL: unsupported backend: $backend"; exit 1 ;;
+esac
 for tool in cat grep mount timeout perl; do command -v "$tool" >/dev/null; done
-for p in /var/run/docker.sock /run/docker.sock /dev/kvm /dev/mem /dev/sda; do
+for p in /var/run/docker.sock /run/docker.sock; do
   if test -e "$p"; then echo "FAIL: host resource visible: $p"; exit 1; fi
 done
 test ! -e "$marker"
 test ! -e "/proc/1/root$marker"
 if test "$backend" = docker; then
+  # Containers share the host kernel, so exposing these devices is a leak.
+  # VMs may have identically named devices backed by their own guest kernel.
+  for p in /dev/kvm /dev/mem /dev/sda; do
+    if test -e "$p"; then echo "FAIL: host resource visible: $p"; exit 1; fi
+  done
   grep -Eq '^Cap(Eff|Prm|Bnd):[[:space:]]+0+$' /proc/self/status
   for field in CapEff CapPrm CapBnd; do grep -Eq "^$field:[[:space:]]+0+$" /proc/self/status; done
   grep -Eq '^NoNewPrivs:[[:space:]]+1$' /proc/self/status
@@ -26,8 +35,9 @@ if test "$backend" = docker; then
   # Perl's core Socket module is present; raw sockets need CAP_NET_RAW.
   perl -MSocket -e 'socket(my $s, PF_INET, SOCK_RAW, 1) and die "raw socket succeeded"; $!{EPERM} or die "unexpected raw socket failure: $!"'
 else
-  # VM root may mount and use raw sockets in its own kernel. A distinct
-  # boot ID plus the inaccessible host marker checks the actual boundary.
+  # VM root may mount, use raw sockets and access guest memory/devices in its
+  # own kernel. A distinct boot ID plus the inaccessible host marker checks
+  # the actual boundary.
   test "$(cat /proc/sys/kernel/random/boot_id)" != "$host_boot"
 fi
 echo 'blocked: host socket, devices, /proc and /sys escape attempts'
