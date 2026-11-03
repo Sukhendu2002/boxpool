@@ -81,10 +81,16 @@ type auditResponse struct {
 	header http.Header
 	body   bytes.Buffer
 	status int
+	extra  []store.AuditEvent
 }
 
 func (w *auditResponse) Header() http.Header { return w.header }
 func (w *auditResponse) WriteHeader(status int) {
+	// A node may send 100 Continue before its final mutation response.
+	// Upgrades use auditUpgradeWriter rather than this buffered writer.
+	if status >= 100 && status < 200 {
+		return
+	}
 	if w.status == 0 {
 		w.status = status
 	}
@@ -92,6 +98,14 @@ func (w *auditResponse) WriteHeader(status int) {
 func (w *auditResponse) Write(b []byte) (int, error) {
 	w.WriteHeader(http.StatusOK)
 	return w.body.Write(b)
+}
+
+// addAuditEvent reports an actual side effect for the middleware to append
+// only when the enclosing operation succeeds, without changing its response.
+func addAuditEvent(w http.ResponseWriter, action, target string) {
+	if out, ok := w.(*auditResponse); ok {
+		out.extra = append(out.extra, store.AuditEvent{Action: action, Target: target})
+	}
 }
 
 // auditTarget reads only server response identities, never request bodies,
@@ -112,13 +126,9 @@ func auditTarget(action string, r *http.Request, out *auditResponse) (string, []
 		if err := json.Unmarshal(out.body.Bytes(), &e); err != nil {
 			return "", nil, err
 		}
-		var extra []store.AuditEvent
-		if e.TokenID != "" {
-			op := "token.create"
-			if action == "sandbox.unexpose" {
-				op = "token.revoke"
-			}
-			extra = append(extra, store.AuditEvent{Action: op, Target: e.TokenID})
+		extra := out.extra
+		if e.TokenID != "" && action == "sandbox.expose" {
+			extra = append(extra, store.AuditEvent{Action: "token.create", Target: e.TokenID})
 		}
 		return net.JoinHostPort(e.Sandbox, strconv.Itoa(e.Port)), extra, nil
 	case "token.create":

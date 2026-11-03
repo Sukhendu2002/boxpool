@@ -177,8 +177,9 @@ The head appends successful `sandbox.create`, `sandbox.rm`, `sandbox.exec`,
 `sandbox.expose`, `sandbox.unexpose`, `token.create`, `token.revoke` and
 `login` events to `audit_events` in its private SQLite database. Forwarded
 actions are recorded once on the head with the originating access token ID.
-Creating or removing a private expose also records its token creation or
-revocation. Join-token targets use the first 12 characters of the secret's
+Creating a private expose also records its token creation; removing it
+records a token revocation only when it actually revokes the token.
+Join-token targets use the first 12 characters of the secret's
 hash, as access-token IDs do. A login means the head accepted the CLI's
 explicit `POST /v1/login`, rather than a health check.
 

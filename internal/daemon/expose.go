@@ -194,7 +194,11 @@ func (s *server) removeExpose(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err == nil && e.TokenID != "" {
-		if err = s.st.RevokeAccessToken(ctx, e.TokenID); errors.Is(err, store.ErrTokenInvalid) {
+		err = s.st.RevokeAccessToken(ctx, e.TokenID)
+		switch {
+		case err == nil:
+			addAuditEvent(w, "token.revoke", e.TokenID)
+		case errors.Is(err, store.ErrTokenInvalid):
 			err = nil // revoked by hand already
 		}
 	}

@@ -287,3 +287,76 @@ func TestAuditOnNode(t *testing.T) {
 		t.Fatalf("node audit = %d", code)
 	}
 }
+
+// TestAuditExpectContinue exercises the informational response emitted by a
+// real node HTTP server before it reads a forwarded creation request.
+func TestAuditExpectContinue(t *testing.T) {
+	fastPool(t)
+	head, hs, _ := poolMachine(t, "linux")
+	pool := poolServer(t, hs, nil)
+	node, ns, _ := poolMachine(t, "darwin")
+	if code, body := send(t, node, "POST", "/v1/pool/join", `{"token":"`+issueToken(t, head, pool)+`"}`); code != http.StatusOK {
+		t.Fatalf("join = %d %s", code, body)
+	}
+	stop := serveNode(ns)
+	defer stop()
+	waitFor(t, "the node's first heartbeat", func() bool { return nodeState(t, head) == "ready" })
+	req, err := http.NewRequest("POST", head.URL+"/v1/sandboxes", strings.NewReader(`{"name":"expect-demo","os":"macos"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Expect", "100-continue")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("forwarded create with Expect = %d %s, want 201", resp.StatusCode, body)
+	}
+	var creates []store.AuditEvent
+	for _, e := range auditEvents(t, hs.st) {
+		if e.Action == "sandbox.create" {
+			creates = append(creates, e)
+		}
+	}
+	if len(creates) != 1 || creates[0].Target != "expect-demo" || creates[0].TokenID != "local" {
+		t.Fatalf("forwarded create audit = %+v", creates)
+	}
+}
+
+func TestAuditUnexposeAlreadyRevoked(t *testing.T) {
+	fakeServe(t)
+	head, hs, _ := poolMachine(t, "linux")
+	t.Cleanup(hs.closeExposes)
+	if code, _, body := post(t, head, `{"name":"web"}`); code != http.StatusCreated {
+		t.Fatalf("create = %d %s", code, body)
+	}
+	port := app(t)
+	e, _ := expose(t, head, fmt.Sprintf(`{"sandbox":"web","port":%d}`, port))
+	if code, body := send(t, head, "DELETE", "/v1/access-tokens/"+e.TokenID, ""); code != http.StatusNoContent {
+		t.Fatalf("revoke = %d %s", code, body)
+	}
+	code, body := send(t, head, "DELETE", "/v1/exposes/web/"+strconv.Itoa(port), "")
+	var removed Expose
+	if code != http.StatusOK || json.Unmarshal([]byte(body), &removed) != nil || removed.TokenID != e.TokenID {
+		t.Fatalf("unexpose = %d %s, want the original expose identity", code, body)
+	}
+	var revokes []store.AuditEvent
+	list := auditEvents(t, hs.st)
+	for _, ev := range list {
+		if ev.Action == "token.revoke" && ev.Target == e.TokenID {
+			revokes = append(revokes, ev)
+		}
+	}
+	if len(revokes) != 1 {
+		t.Fatalf("one token revocation produced %d events: %+v", len(revokes), revokes)
+	}
+	if list[0].Action != "sandbox.unexpose" || list[0].Target != "web:"+strconv.Itoa(port) {
+		t.Fatalf("unexpose event = %+v", list[0])
+	}
+}
