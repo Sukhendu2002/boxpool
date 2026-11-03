@@ -47,6 +47,14 @@ jobs:
           grep -Eq '✓ docker engine \(fallback\)' "$RUNNER_TEMP/doctor.log"
           grep -Fxq 'Backend: docker' "$RUNNER_TEMP/doctor.log"
           grep -Eq '^Warning: fallback mode: .*weaker' "$RUNNER_TEMP/doctor.log"
+      - name: Check VM loopback setup in a disposable network namespace
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -c -tags integration -o "$RUNNER_TEMP/agent.test" ./internal/agent/
+          sudo "$RUNNER_TEMP/agent.test" -test.v -test.count=1 -test.timeout 30s -test.run '^TestIntegrationGuestLoopback$' 2>&1 | tee "$RUNNER_TEMP/loopback.log"
+          grep -q '^--- PASS: TestIntegrationGuestLoopback ' "$RUNNER_TEMP/loopback.log"
+          ! grep -q -- '--- SKIP' "$RUNNER_TEMP/loopback.log"
       - name: Run the Docker driver integration test
         shell: bash
         run: |

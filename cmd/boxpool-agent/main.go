@@ -26,6 +26,13 @@ func main() {
 		slog.Error("could not listen", "addr", *listen, "err", err)
 		os.Exit(1)
 	}
+	if strings.HasPrefix(*listen, "vsock:") {
+		if err := agent.PrepareGuestNetwork(); err != nil {
+			l.Close()
+			slog.Error("could not configure guest networking", "err", err)
+			os.Exit(1)
+		}
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	slog.Info("agent started", "listen", *listen, "version", version)
