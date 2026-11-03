@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/backend"
+	securitytest "boxpool.run/boxpool/test/security"
 )
 
 // newTestDriver returns a driver for a new state directory, or skips the
@@ -152,7 +154,7 @@ type inspected struct {
 		RW                        bool
 	}
 	NetworkSettings struct {
-		Networks map[string]struct{ IPAddress string }
+		Networks map[string]struct{ IPAddress, Gateway string }
 	}
 }
 
@@ -222,6 +224,13 @@ awk '/^MemTotal:/ {print "host memory view:", $0}' /proc/meminfo`)
 
 	// The agent socket: made by the container's root, reachable by the
 	// daemon's user (this test) through a directory only it can enter.
+	// A root client can reach the agent before agentCmd finishes chmod.
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if fi, err := os.Stat(l.sock); err == nil && fi.Mode().Perm() == 0666 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	fi, err := os.Stat(l.sock)
 	if err != nil {
 		t.Fatal(err)
@@ -297,6 +306,27 @@ awk '/^MemTotal:/ {print "host memory view:", $0}' /proc/meminfo`)
 		t.Errorf("a reached b's listener: exit %d: %q", code, out)
 	}
 
+	var network inspected
+	if err := d.e.do(ctx, http.MethodGet, "/containers/"+d.name(a.id)+"/json", nil, nil, &network); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the original gap with the host rules absent, using only this
+	// test's trusted sandbox and listener. Start must restore the boundary even
+	// though the container is already running.
+	hostListener, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostListener.Close()
+	if err := d.removeNetworkRules(ctx, a.id); err != nil {
+		t.Fatal(err)
+	}
+	a.run(ctx, `perl -MIO::Socket::INET -e 'my $s = IO::Socket::INET->new(PeerAddr=>$ARGV[0], PeerPort=>$ARGV[1], Timeout=>3) or die $!' "$1" "$2"`, network.NetworkSettings.Networks[d.name(a.id)].Gateway, fmt.Sprint(hostListener.Addr().(*net.TCPAddr).Port))
+	if err := d.Start(ctx, a.id); err != nil {
+		t.Fatal(err)
+	}
+	securitytest.Run(ctx, t, a.c, "docker", network.NetworkSettings.Networks[d.name(a.id)].Gateway)
+
 	// A new driver for the state directory sees both, running, and can talk
 	// to their agents.
 	d2, err := New(ctx, strings.TrimSuffix(d.root, "/docker"))
@@ -317,6 +347,7 @@ awk '/^MemTotal:/ {print "host memory view:", $0}' /proc/meminfo`)
 		t.Errorf("agent through a new driver: %v", err)
 	}
 	c2.CloseIdleConnections()
+	securitytest.Run(ctx, t, a.c, "docker", network.NetworkSettings.Networks[d.name(a.id)].Gateway)
 
 	// Another state directory on the engine neither sees nor removes them.
 	other := newTestDriver(ctx, t)

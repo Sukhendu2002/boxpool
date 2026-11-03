@@ -1,6 +1,6 @@
 module boxpool.run/boxpool
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/Code-Hex/vz/v3 v3.7.1

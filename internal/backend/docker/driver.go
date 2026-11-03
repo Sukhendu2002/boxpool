@@ -38,6 +38,7 @@ type Driver struct {
 	root      string // <state dir>/docker, symlinks resolved; the owner label
 	prefix    string // of every resource name
 	admission *resources.Manager
+	network   func(context.Context, string, string) error // apply/remove host isolation
 }
 
 var _ backend.Driver = (*Driver)(nil)
@@ -51,6 +52,9 @@ func New(ctx context.Context, stateDir string) (*Driver, error) {
 		// socket does not connect to the host.
 		return nil, fmt.Errorf("the docker backend needs a Linux host, not %s", runtime.GOOS)
 	}
+	if os.Geteuid() != 0 {
+		return nil, fmt.Errorf("the docker backend needs a root daemon for host network isolation; use sudo boxpool up")
+	}
 	socket, err := host()
 	if err != nil {
 		return nil, err
@@ -60,6 +64,10 @@ func New(ctx context.Context, stateDir string) (*Driver, error) {
 		return nil, err
 	}
 	d, err := newDriver(e, filepath.Join(stateDir, "docker"))
+	if err == nil {
+		d.network = hostNetwork
+		err = d.protectNetworks(ctx)
+	}
 	if err == nil {
 		err = d.adopt(ctx)
 	}
@@ -193,6 +201,9 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 		"Name": name, "Driver": "bridge", "Labels": labels(d.root, id), "CheckDuplicate": true,
 	}, nil)
 	if err != nil {
+		return backend.Sandbox{}, err
+	}
+	if err := d.protectNetwork(ctx, id); err != nil {
 		return backend.Sandbox{}, err
 	}
 	made = append(made, func(ctx context.Context) error { return d.removeContainer(ctx, id) })
@@ -348,6 +359,12 @@ func (d *Driver) Start(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	if err := d.protectNetwork(ctx, id); err != nil {
+		// This includes an already-running container after a ruleset failure.
+		cleanup, cancel := cleanupContext(ctx)
+		defer cancel()
+		return errors.Join(err, d.stop(cleanup, c.ID, 0))
+	}
 	if c.State.Running {
 		return nil
 	}
@@ -500,7 +517,7 @@ func (d *Driver) removeNetwork(ctx context.Context, id string) error {
 	}
 	err := d.e.do(ctx, http.MethodGet, "/networks/"+name, nil, nil, &n)
 	if statusIs(err, http.StatusNotFound) {
-		return nil
+		return d.removeNetworkRules(ctx, id)
 	}
 	if err != nil {
 		return err
@@ -509,10 +526,10 @@ func (d *Driver) removeNetwork(ctx context.Context, id string) error {
 		return fmt.Errorf("network %s %w", name, errForeign)
 	}
 	err = d.e.do(ctx, http.MethodDelete, "/networks/"+n.ID, nil, nil, nil)
-	if statusIs(err, http.StatusNotFound) {
-		return nil
+	if err != nil && !statusIs(err, http.StatusNotFound) {
+		return err
 	}
-	return err
+	return d.removeNetworkRules(ctx, id)
 }
 
 func (d *Driver) removeVolume(ctx context.Context, id string) error {

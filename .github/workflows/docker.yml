@@ -36,6 +36,8 @@ jobs:
           } | tee "$RUNNER_TEMP/before.txt"
           test ! -s "$RUNNER_TEMP/before.txt"
         shell: bash
+      - name: Install host firewall tools
+        run: sudo apt-get update && sudo apt-get install -y nftables iproute2
       - name: Build Boxpool
         run: go build -o bin/boxpool ./cmd/boxpool
       - name: Require the forced Docker backend and its warning
@@ -45,18 +47,28 @@ jobs:
           grep -Eq '✓ docker engine \(fallback\)' "$RUNNER_TEMP/doctor.log"
           grep -Fxq 'Backend: docker' "$RUNNER_TEMP/doctor.log"
           grep -Eq '^Warning: fallback mode: .*weaker' "$RUNNER_TEMP/doctor.log"
+      - name: Check VM loopback setup in a disposable network namespace
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -c -tags integration -o "$RUNNER_TEMP/agent.test" ./internal/agent/
+          sudo "$RUNNER_TEMP/agent.test" -test.v -test.count=1 -test.timeout 30s -test.run '^TestIntegrationGuestLoopback$' 2>&1 | tee "$RUNNER_TEMP/loopback.log"
+          grep -q '^--- PASS: TestIntegrationGuestLoopback ' "$RUNNER_TEMP/loopback.log"
+          ! grep -q -- '--- SKIP' "$RUNNER_TEMP/loopback.log"
       - name: Run the Docker driver integration test
         shell: bash
         run: |
           set -o pipefail
-          go test -tags integration -count=1 -v -timeout 12m -run '^TestIntegration$' ./internal/backend/docker/ | tee "$RUNNER_TEMP/integration.log"
+          go test -c -tags integration -o "$RUNNER_TEMP/docker.test" ./internal/backend/docker/
+          sudo --preserve-env=BOXPOOL_TEST_REQUIRE_DOCKER "$RUNNER_TEMP/docker.test" -test.count=1 -test.v -test.timeout 12m -test.run '^TestIntegration$' | tee "$RUNNER_TEMP/integration.log"
           grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/integration.log"
           ! grep -q -- '--- SKIP' "$RUNNER_TEMP/integration.log"
       - name: Run boxpool sh's daemon integration test on Docker
         shell: bash
         run: |
           set -o pipefail
-          go test -tags integration -count=1 -v -timeout 10m -run '^TestIntegrationSh$/^docker$' ./internal/daemon/ | tee "$RUNNER_TEMP/daemon.log"
+          go test -c -tags integration -o "$RUNNER_TEMP/daemon.test" ./internal/daemon/
+          sudo --preserve-env=BOXPOOL_TEST_REQUIRE_DOCKER "$RUNNER_TEMP/daemon.test" -test.count=1 -test.v -test.timeout 10m -test.run '^TestIntegrationSh$/^docker$' | tee "$RUNNER_TEMP/daemon.log"
           grep -q -- '--- PASS: TestIntegrationSh/docker ' "$RUNNER_TEMP/daemon.log"
       - name: Require no boxpool-labelled resources left
         if: always()

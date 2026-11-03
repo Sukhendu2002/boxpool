@@ -264,7 +264,11 @@ Per-architecture assets, including the saved OCI image, are uploaded for
 seven days. PR/main builds and manual dispatch **never publish**. Both OCI
 architectures also check the agent's `tcp` feature and forward a real HTTP
 request to a guest loopback server through `GET /v1/tcp`. The VM smoke
-exercises this path over vsock too.
+exercises this path over vsock too. Before serving over vsock, the VM agent
+brings up only its loopback interface, including on VMs with no NIC; kernel
+IP autoconfiguration cannot initialize loopback in that case. Docker agents
+listen on Unix sockets and leave interface setup to the Engine, retaining
+their existing capability restrictions.
 
 Publishing happens only for a **published GitHub release** whose tag
 matches `v<major>.<minor>.<patch>[-suffix]` and points into `main`'s history.

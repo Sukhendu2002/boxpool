@@ -45,7 +45,7 @@
 //     the memory cgroup for the enforced limit.
 //   - Each sandbox has its own bridge network, and Docker's own rules drop
 //     traffic between bridges, so sandboxes cannot reach each other. The
-//     engine manages all of it; boxpool changes no host firewall rules.
+//     engine manages the bridges; boxpool adds host nftables isolation.
 //
 // The only host path in the container is the sandbox's agent directory, on
 // /run/boxpool. No Docker socket, /dev/kvm, home or other sandbox is
@@ -66,8 +66,13 @@
 //   - Linux hosts only, rootful Docker only. Rootless Docker, Podman and
 //     gVisor are out of scope; Docker Desktop's VM cannot connect a
 //     bind-mounted unix socket to the host.
-//   - Sandboxes reach the host's own addresses (the bridge gateway) and its
-//     network like any container does; #53 reviews that.
+//   - A root daemon, ip and nft are required. Per-network nftables tables
+//     deny host services before DNAT, IPv6, spoofing and forwarding except
+//     through the outbound interface; replies to host-initiated flows work.
+//     New restores rules before adoption; Start restores them even for running
+//     containers. Failed restoration stops owned running containers. Remove
+//     keeps rules until network deletion succeeds. Docker embedded DNS remains
+//     an infrastructure exception. See docs/security.md for lifecycle limits.
 //   - Each sandbox's network takes a subnet from the engine's address pools,
 //     about 30 by default; raise default-address-pools in daemon.json for
 //     more.

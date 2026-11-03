@@ -20,6 +20,7 @@ import (
 	"boxpool.run/boxpool/internal/artifacts"
 	"boxpool.run/boxpool/internal/backend"
 	"boxpool.run/boxpool/internal/store"
+	securitytest "boxpool.run/boxpool/test/security"
 )
 
 // TestIntegrationNetwork boots two networked sandboxes, A and B. It needs
@@ -164,6 +165,9 @@ func TestIntegrationNetwork(t *testing.T) {
 	blocked(a, "a host service on 0.0.0.0, through A's gateway", hostPort{nics[a].gateway.String(), all})
 	blocked(a, "a host service on 0.0.0.0, through B's gateway", hostPort{nics[b].gateway.String(), all})
 	blocked(a, "a host service on 0.0.0.0, at the host's LAN IP", hostPort{hostIP, all})
+	probeClient := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, a) })
+	defer probeClient.CloseIdleConnections()
+	securitytest.Run(ctx, t, probeClient, "firecracker", nics[a].gateway.String(), nics[b].gateway.String())
 	if os.Getenv("BOXPOOL_TEST_APT") == "1" {
 		must(a, "apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends curl iputils-ping >/dev/null")
 		probe := func(p networkProbe) string {

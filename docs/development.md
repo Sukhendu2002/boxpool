@@ -3,7 +3,7 @@
 ## macOS on Apple silicon
 
 Use macOS 14+ with Xcode Command Line Tools (`xcode-select --install`) and
-Go 1.24+. The Virtualization framework driver uses cgo. Intel Macs are
+Go 1.25+. The Virtualization framework driver uses cgo. Intel Macs are
 unsupported. Build and ad-hoc sign the daemon with the virtualization
 entitlement; no Developer ID is needed for local development:
 
@@ -394,10 +394,10 @@ go build -o bin/boxpool ./cmd/boxpool
 ./bin/boxpool doctor
 ```
 
-The repo requires Go 1.24+. Ubuntu 24.04's packaged Go is older, but Go 1.21+
+The repo requires Go 1.25+. Ubuntu 24.04's packaged Go is older, but Go 1.21+
 [automatically downloads the required toolchain](https://go.dev/doc/toolchain)
 when running in this repo with the default `GOTOOLCHAIN=auto`. If automatic
-downloads are disabled or unavailable, [install Go 1.24+](https://go.dev/doc/install)
+downloads are disabled or unavailable, [install Go 1.25+](https://go.dev/doc/install)
 before building. Use `git switch <your-branch>` after cloning to test your work.
 
 Expected doctor output on Linux/amd64 with Docker installed (spacing elided):
@@ -581,11 +581,12 @@ root regression creates its own namespace and refuses the host namespace.
 ### Docker fallback
 
 The Docker driver's integration test runs real containers of the published
-base image and needs a rootful Docker Engine your user can reach (root, or
-the root-equivalent `docker` group). It does not need KVM, and ignores it:
+base image and needs a local rootful Docker Engine, a root test process,
+`ip` and `nft` for host network isolation. It does not need KVM:
 
 ```sh
-go test -tags integration -v -run TestIntegration ./internal/backend/docker/
+go test -c -tags integration -o /tmp/docker-it.test ./internal/backend/docker/
+sudo env BOXPOOL_TEST_REQUIRE_DOCKER=1 /tmp/docker-it.test -test.v -test.run TestIntegration
 ```
 
 It creates two sandboxes in a fresh temporary state directory and checks the
