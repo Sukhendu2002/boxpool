@@ -33,8 +33,8 @@
 // # Network
 //
 // On macOS 26 and later every sandbox has a vmnet shared network of its own
-// (VZVmnetNetworkDeviceAttachment) with outbound IPv4 through NAT and no
-// root needed; vmnet gives each network a separate /24, and macOS forwards
+// with outbound IPv4 through NAT and no root needed; vmnet gives each
+// network a separate /24, and macOS forwards
 // no packets between them, so sandboxes cannot reach each other. The VM's
 // virtio network device has a MAC address derived from its sandbox ID, the
 // guest configures eth0 by DHCP with the kernel's ip=dhcp, and every Start
@@ -53,13 +53,20 @@
 // Before macOS 26, or when built with an older SDK, sandboxes have no
 // network device: the framework's shared NAT (VZNATNetworkDeviceAttachment)
 // lets root in one sandbox route packets to another through the gateway.
-// Either way a networked guest can reach the Mac's own services that listen
-// on the gateway's or the Mac's other addresses. See docs/security.md.
+//
+// On macOS 26 the VM uses VZFileHandleNetworkDeviceAttachment: a host-side
+// packet bridge filters its only path to a vmnet packet interface. Guest
+// traffic to host addresses is denied except gateway DHCP and DNS. IPv6,
+// VLANs and IPv4 options are not forwarded. Live host-address checks cover
+// LAN/VPN changes; exact reply state preserves host-initiated connections.
+// Setup and I/O failures disconnect the NIC. No root, extra entitlement or
+// system firewall rules are needed, and shutdown closes the bridge. See
+// docs/security.md for supported packet formats and reply-state limits.
 //
 // Creating a VM needs the com.apple.security.virtualization entitlement, so
 // the daemon binary must be signed with it: scripts/dev-sign.sh ad-hoc signs
 // a development build.
 //
 // The driver is built only on macOS; elsewhere this package holds just the
-// platform-neutral VM configuration.
+// platform-neutral VM configuration and packet policy.
 package vz

@@ -46,7 +46,10 @@ image's `resize2fs` cannot perform this growth.
 
 On macOS 26 and later each sandbox gets outbound IPv4 through NAT on a
 network of its own, which needs the macOS 26 SDK (Command Line Tools 26 or
-later) at build time; otherwise sandboxes have no network. See [security.md](security.md). Pause saves the Virtualization framework machine state on macOS 14+ and Resume restores it; unsupported configurations fall back to Stop. See [the M3 benchmark](benchmarks/m3-macos-pause.md). Stop syncs and freezes the guest rootfs,
+later) at build time; otherwise sandboxes have no network. A host-side packet bridge blocks
+connections to the Mac's services while retaining gateway DHCP/DNS and
+outbound IPv4. It uses the existing virtualization entitlement, without
+root or PF setup. See [security.md](security.md). Pause saves the Virtualization framework machine state on macOS 14+ and Resume restores it; unsupported configurations fall back to Stop. See [the M3 benchmark](benchmarks/m3-macos-pause.md). Stop syncs and freezes the guest rootfs,
 then triggers sysrq power-off; guest programs get no exit signal first
 (#91). If that fails, Stop requests a framework shutdown, then forces it,
 reporting `backend.ErrUncleanStop`. `boxpool down` or Ctrl-C on a
@@ -70,6 +73,20 @@ scripts/dev-sign.sh /tmp/vz.test
 /tmp/vz.test -test.v -test.timeout 5m
 go test -tags integration -run TestLaunchAgent -v ./cmd/boxpool
 ```
+
+To check the macOS host-service beta blocker specifically, run the signed
+binary with `-test.v -test.timeout 6m -test.run '^TestIntegrationHost'`.
+This covers cold boot, pause/resume, warm clone, TCP/UDP to gateway/LAN/VPN,
+spoofed sources and raw IPv6, with DNS and outbound HTTP controls. The warm
+clone uses the default 10 GiB reservation, so keep at least that much disk
+free; the full warm suite needs two such reservations on this machine.
+When upgrading from the old direct vmnet attachment, stop existing
+sandboxes before upgrading (see [security.md](security.md)). To verify
+post-upgrade recovery, point `BOXPOOL_UPGRADE_STATE` at a pre-upgrade state
+copy containing a paused sandbox named `legacy`, then run the signed test
+binary with `-test.run '^TestIntegrationUpgradePaused$'`. The test clones
+the supplied snapshot and checks clean stop/start, disk persistence, DNS
+and HTTP without modifying that snapshot.
 
 `TestLaunchAgent` runs the launchd half of `up` and `down` with the label
 `run.boxpool.daemon.test` and a temporary state directory, so it needs no

@@ -8,6 +8,11 @@ package vz
 #import <Virtualization/Virtualization.h>
 #import <vmnet/vmnet.h>
 #import <arpa/inet.h>
+#import <sys/socket.h>
+#import <sys/uio.h>
+#import <unistd.h>
+#import <fcntl.h>
+#import <errno.h>
 
 // An SDK older than macOS 26's builds a binary whose sandboxes have no network.
 #if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
@@ -35,6 +40,9 @@ static void *newNetwork(int *status) {
 			*status = st;
 			return NULL;
 		}
+		// IPv6 is not forwarded by the packet filter. Do not advertise it.
+		vmnet_network_configuration_disable_nat66(cfg);
+		vmnet_network_configuration_disable_router_advertisement(cfg);
 		vmnet_network_ref net = vmnet_network_create(cfg, &st);
 		CFRelease(cfg);
 		if (net == NULL) {
@@ -59,20 +67,113 @@ static int networkIPv4(void *network, uint32_t *subnet, uint32_t *mask) {
 	return 0;
 }
 
-// attach replaces the network device's attachment with one on network.
-static int attach(void *nic, void *network) {
+// The callback owns only C memory and a C-owned descriptor. No Go pointers
+// or goroutines are retained by vmnet. All vmnet I/O uses a serial queue.
+typedef struct {
+    interface_ref iface;
+    dispatch_queue_t queue;
+    int fd;
+} packetInterface;
+
+static int stopPacketInterface(packetInterface *p) {
+    vmnet_return_t disabled = vmnet_interface_set_event_callback(p->iface, VMNET_INTERFACE_PACKETS_AVAILABLE, NULL, NULL);
+    dispatch_sync(p->queue, ^{});
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    __block int result = 0;
+    vmnet_return_t st = vmnet_stop_interface(p->iface, p->queue, ^(vmnet_return_t status) {
+        result = status;
+        dispatch_semaphore_signal(done);
+    });
+    if (st == VMNET_SUCCESS) dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    dispatch_release(done);
+    // If neither operation succeeded, callbacks may still use p and its fd.
+    // Retain both on this exceptional path rather than reuse a live fd.
+    if (disabled != VMNET_SUCCESS && (st != VMNET_SUCCESS || result != VMNET_SUCCESS)) {
+        return st != VMNET_SUCCESS ? st : result;
+    }
+    dispatch_sync(p->queue, ^{});
+    close(p->fd);
+    dispatch_release(p->queue);
+    free(p);
+    return st != VMNET_SUCCESS ? st : result;
+}
+
+static packetInterface *startPacketInterface(void *network, int fd, int *status) {
+    *status = 0;
 #ifdef HAVE_VMNET_NETWORK
-	if (@available(macOS 26, *)) {
-		if (![(id)nic isKindOfClass:[VZVirtioNetworkDeviceConfiguration class]]) {
-			return 0;
-		}
-		VZVmnetNetworkDeviceAttachment *a = [[VZVmnetNetworkDeviceAttachment alloc] initWithNetwork:(vmnet_network_ref)network];
-		[(VZVirtioNetworkDeviceConfiguration *)nic setAttachment:a];
-		[a release];
-		return 1;
-	}
+    if (@available(macOS 26, *)) {
+        packetInterface *p = calloc(1, sizeof(*p));
+        if (p == NULL) return NULL;
+        p->fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+        if (p->fd < 0) { *status = -errno; free(p); return NULL; }
+        p->queue = dispatch_queue_create("run.boxpool.vmnet", DISPATCH_QUEUE_SERIAL);
+        xpc_object_t desc = xpc_dictionary_create(NULL, NULL, 0);
+        xpc_dictionary_set_bool(desc, vmnet_allocate_mac_address_key, false);
+        xpc_dictionary_set_bool(desc, vmnet_enable_isolation_key, true);
+        xpc_dictionary_set_bool(desc, vmnet_enable_tso_key, false);
+        xpc_dictionary_set_bool(desc, vmnet_enable_checksum_offload_key, false);
+        dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+        __block int result = 0;
+        p->iface = vmnet_interface_start_with_network((vmnet_network_ref)network, desc, p->queue, ^(vmnet_return_t st, xpc_object_t params) {
+            result = st;
+            dispatch_semaphore_signal(ready);
+        });
+        xpc_release(desc);
+        if (p->iface != NULL) dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);
+        dispatch_release(ready);
+        *status = result;
+        if (p->iface == NULL) {
+            close(p->fd);
+            dispatch_release(p->queue);
+            free(p);
+            return NULL;
+        }
+        if (result != VMNET_SUCCESS) {
+            stopPacketInterface(p);
+            return NULL;
+        }
+        vmnet_return_t st = vmnet_interface_set_event_callback(p->iface, VMNET_INTERFACE_PACKETS_AVAILABLE, p->queue, ^(interface_event_t event, xpc_object_t params) {
+            // A nonblocking notification coalesces when its socket is full.
+            // Go drains packets one at a time, so continuous receive traffic
+            // cannot monopolize this queue and block writes or shutdown.
+            char ready = 1;
+            send(p->fd, &ready, 1, MSG_DONTWAIT);
+        });
+        if (st != VMNET_SUCCESS) {
+            *status = st;
+            stopPacketInterface(p);
+            return NULL;
+        }
+        return p;
+    }
 #endif
-	return 0;
+    return NULL;
+}
+
+static int readPacket(packetInterface *p, void *buf, size_t capacity, size_t *size) {
+    __block int result;
+    __block size_t received = 0;
+    dispatch_sync(p->queue, ^{
+        struct iovec iov = { .iov_base = buf, .iov_len = capacity };
+        struct vmpktdesc packet = { .vm_pkt_size = capacity, .vm_pkt_iov = &iov, .vm_pkt_iovcnt = 1 };
+        int count = 1;
+        result = vmnet_read(p->iface, &packet, &count);
+        if (result == VMNET_SUCCESS && count == 1) received = packet.vm_pkt_size;
+    });
+    *size = received;
+    return result;
+}
+
+static int writePacket(packetInterface *p, void *buf, size_t size) {
+    __block int result;
+    dispatch_sync(p->queue, ^{
+        struct iovec iov = { .iov_base = buf, .iov_len = size };
+        struct vmpktdesc packet = { .vm_pkt_size = size, .vm_pkt_iov = &iov, .vm_pkt_iovcnt = 1 };
+        int count = 1;
+        result = vmnet_write(p->iface, &packet, &count);
+        if (result == VMNET_SUCCESS && count != 1) result = 0;
+    });
+    return result;
 }
 */
 import "C"
@@ -84,8 +185,6 @@ import (
 	"sync"
 	"time"
 	"unsafe"
-
-	virt "github.com/Code-Hex/vz/v3"
 
 	"boxpool.run/boxpool/internal/backend"
 )
@@ -172,16 +271,37 @@ func networkConfig(network unsafe.Pointer) (backend.GuestNetwork, error) {
 	}, nil
 }
 
-// attachNetwork moves nic onto the vmnet network.
-// shortcut: reads the Objective-C object from vz's unexported pointer field
-// (the attach checks its class), as the vz fork does not wrap
-// VZVmnetNetworkDeviceAttachment; use its wrapper once it has one. A change
-// to the fork's layout would crash here before the class check, so do not
-// change the fork without rerunning the vz integration suite.
-func attachNetwork(nic *virt.VirtioNetworkDeviceConfiguration, net unsafe.Pointer) error {
-	obj := **(**unsafe.Pointer)(unsafe.Pointer(nic))
-	if C.attach(obj, net) == 0 {
-		return errors.New("attach the network device to its vmnet network")
+// nativeInterface is accessed only while the bridge's Go loops are running.
+// Close waits for both loops before stopping it and releasing its C storage.
+type nativeInterface struct{ ptr *C.packetInterface }
+
+func startNativeInterface(network unsafe.Pointer, fd uintptr) (*nativeInterface, error) {
+	var status C.int
+	p := C.startPacketInterface(network, C.int(fd), &status)
+	if p == nil {
+		return nil, fmt.Errorf("start filtered vmnet interface: status %d", status)
+	}
+	return &nativeInterface{p}, nil
+}
+
+func (n *nativeInterface) read(packet []byte) (int, error) {
+	var size C.size_t
+	if st := C.readPacket(n.ptr, unsafe.Pointer(&packet[0]), C.size_t(len(packet)), &size); st != C.VMNET_SUCCESS {
+		return 0, fmt.Errorf("read vmnet packet: status %d", st)
+	}
+	return int(size), nil
+}
+
+func (n *nativeInterface) write(packet []byte) error {
+	if st := C.writePacket(n.ptr, unsafe.Pointer(&packet[0]), C.size_t(len(packet))); st != C.VMNET_SUCCESS {
+		return fmt.Errorf("write vmnet packet: status %d", st)
+	}
+	return nil
+}
+
+func (n *nativeInterface) close() error {
+	if st := C.stopPacketInterface(n.ptr); st != C.VMNET_SUCCESS {
+		return fmt.Errorf("stop vmnet packet interface: status %d", st)
 	}
 	return nil
 }

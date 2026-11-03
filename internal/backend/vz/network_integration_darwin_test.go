@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,7 +55,12 @@ func newNetTest(t *testing.T) *netTest {
 // start creates and starts a sandbox that the test removes at its end.
 func (n *netTest) start(id string) {
 	n.t.Helper()
-	if _, err := n.d.Create(n.ctx, id, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+	n.startSpec(id, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1})
+}
+
+func (n *netTest) startSpec(id string, spec backend.Spec) {
+	n.t.Helper()
+	if _, err := n.d.Create(n.ctx, id, spec); err != nil {
 		n.t.Fatal(err)
 	}
 	n.t.Cleanup(func() {
@@ -121,6 +128,211 @@ func hostDial(addr string, wait time.Duration) string {
 
 // subnet is the /24 holding an IPv4 address.
 func subnet(addr string) string { return addr[:strings.LastIndex(addr, ".")] }
+
+// TestIntegrationHostServices must pass before offering macOS sandboxes to
+// untrusted workloads. A successful DHCP boot and HTTP request by name are
+// controls: an offline guest must not make the isolation probes pass.
+func TestIntegrationHostServices(t *testing.T) {
+	if !IsolatedNetworks() {
+		t.Skip("no isolated networks")
+	}
+	listener, err := net.Listen("tcp4", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	go func() {
+		for {
+			c, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			c.Write([]byte("host service\n"))
+			c.Close()
+		}
+	}()
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	udpPort := strconv.Itoa(udp.LocalAddr().(*net.UDPAddr).Port)
+	n := newNetTest(t)
+	probe := func(id, stage string) {
+		t.Helper()
+		gateway := strings.TrimSpace(n.run(id, `awk '$1 == "nameserver" { print $2; exit }' /etc/resolv.conf`))
+		addrs, err := net.InterfaceAddrs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets := []string{gateway}
+		for _, addr := range addrs {
+			ip, _, err := net.ParseCIDR(addr.String())
+			if err == nil && ip.To4() != nil && !ip.IsLoopback() && ip.String() != gateway {
+				targets = append(targets, ip.String())
+			}
+		}
+		for _, target := range targets {
+			out, code, err := n.exec(n.ctx, id, `timeout 3 bash -c 'exec 3<>/dev/tcp/`+target+`/`+port+` && head -n 1 <&3'`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code == 0 {
+				t.Errorf("%s: guest reached host service at %s:%s: %q", stage, target, port, out)
+			}
+			n.run(id, `perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(Proto => "udp", PeerAddr => "`+target+`", PeerPort => `+udpPort+`) or die $!; print $s "host probe" or die $!'`)
+		}
+		n.run(id, addAddress+"10.250.0.2")
+		n.run(id, `perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(Proto => "udp", LocalAddr => "10.250.0.2", PeerAddr => "`+gateway+`", PeerPort => `+udpPort+`) or die $!; print $s "spoof probe" or die $!'`)
+		udp.SetReadDeadline(time.Now().Add(time.Second))
+		buf := make([]byte, 128)
+		if k, src, err := udp.ReadFromUDP(buf); err == nil {
+			t.Errorf("%s: host received UDP from %s: %q", stage, src, buf[:k])
+		} else if e, ok := err.(net.Error); !ok || !e.Timeout() {
+			t.Fatal(err)
+		}
+		out := n.run(id, `exec 3<>/dev/tcp/example.com/80 && printf 'HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n' >&3 && timeout 10 head -n 1 <&3`)
+		if !strings.HasPrefix(out, "HTTP/1.") {
+			t.Fatalf("%s: outbound HTTP by name: %q", stage, out)
+		}
+		n.run(id, `timeout 10 perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(Proto => "tcp", PeerAddr => $ARGV[0], PeerPort => 53, Timeout => 5) or die $!; $q = pack("n6", 0x106, 0x100, 1, 0, 0, 0)."\7example\3com\0".pack("n2", 1, 1); print $s pack("n", length($q)).$q; read($s, $len, 2) == 2 or die "no TCP DNS reply"; read($s, $reply, unpack("n", $len)) >= 12 or die "short TCP DNS reply"; unpack("n", $reply) == 0x106 or die "wrong DNS reply"' `+gateway)
+		t.Logf("%s: blocked TCP/UDP to %v and spoofed UDP; DNS and outbound HTTP: %s", stage, targets, strings.TrimSpace(out))
+	}
+	n.start("host-services")
+	probe("host-services", "cold boot")
+	if err := n.d.Pause(n.ctx, "host-services"); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.d.Resume(n.ctx, "host-services"); err != nil {
+		t.Fatal(err)
+	}
+	probe("host-services", "resume")
+	if err := n.d.Remove(n.ctx, "host-services"); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.d.Warm(n.ctx); err != nil {
+		t.Fatal(err)
+	}
+	n.startSpec("host-warm", backend.Spec{})
+	probe("host-warm", "warm clone")
+}
+
+// Root in a guest can construct IPv6 frames without accepting router
+// advertisements. Verify the host filter drops them before vmnet sees them.
+func TestIntegrationHostIPv6(t *testing.T) {
+	if !IsolatedNetworks() {
+		t.Skip("no isolated networks")
+	}
+	listener, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	n := newNetTest(t)
+	n.start("host-ipv6")
+	n.run("host-ipv6", `perl -MSocket -e 'gethostbyname("example.com") or die "DNS failed"'`)
+	mac, err := net.ParseMAC(strings.TrimSpace(n.run("host-ipv6", "cat /sys/class/net/eth0/address")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gwMAC, err := net.ParseMAC(strings.TrimSpace(n.run("host-ipv6", `awk 'NR > 1 && $4 != "00:00:00:00:00:00" {print $4; exit}' /proc/net/arp`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := n.run("host-ipv6", "cat /sys/class/net/eth0/statistics/tx_packets")
+	count := 0
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil || ip.To4() != nil {
+			continue
+		}
+		frame := ipv6UDPFrame(mac, gwMAC, net.ParseIP("fd12:3456::2"), ip, uint16(listener.LocalAddr().(*net.UDPAddr).Port))
+		n.run("host-ipv6", `perl -e 'open(my $f, "<", "/sys/class/net/eth0/ifindex") or die $!; $index = <$f>; socket(my $s, 17, 3, 0x0300) or die $!; $packet = pack("H*", $ARGV[0]); send($s, $packet, 0, pack("S n i S C C a8", 17, 0x86dd, $index, 1, 0, 6, substr($packet, 0, 6))) == length($packet) or die $!' `+hex.EncodeToString(frame))
+		count++
+	}
+	if count == 0 || n.run("host-ipv6", "cat /sys/class/net/eth0/statistics/tx_packets") == before {
+		t.Fatal("IPv6 probes were not transmitted by the guest NIC")
+	}
+	listener.SetReadDeadline(time.Now().Add(time.Second))
+	buf := make([]byte, 128)
+	if k, src, err := listener.ReadFromUDP(buf); err == nil {
+		t.Fatalf("host received guest IPv6 UDP from %s: %q", src, buf[:k])
+	} else if e, ok := err.(net.Error); !ok || !e.Timeout() {
+		t.Fatal(err)
+	}
+	t.Logf("blocked raw IPv6 UDP to %d host addresses", count)
+}
+
+func ipv6UDPFrame(srcMAC, dstMAC net.HardwareAddr, src, dst net.IP, port uint16) []byte {
+	frame := make([]byte, 14+40+9)
+	copy(frame[:6], dstMAC)
+	copy(frame[6:12], srcMAC)
+	binary.BigEndian.PutUint16(frame[12:14], 0x86dd)
+	ip := frame[14:]
+	ip[0], ip[6], ip[7] = 0x60, 17, 64
+	binary.BigEndian.PutUint16(ip[4:6], 9)
+	copy(ip[8:24], src.To16())
+	copy(ip[24:40], dst.To16())
+	udp := ip[40:]
+	binary.BigEndian.PutUint16(udp[:2], 50000)
+	binary.BigEndian.PutUint16(udp[2:4], port)
+	binary.BigEndian.PutUint16(udp[4:6], 9)
+	udp[8] = 'x'
+	pseudo := append([]byte{}, ip[8:40]...)
+	pseudo = append(pseudo, 0, 0, 0, 9, 0, 0, 0, 17)
+	pseudo = append(pseudo, udp...)
+	pseudo = append(pseudo, 0) // checksum padding
+	var sum uint32
+	for i := 0; i < len(pseudo); i += 2 {
+		sum += uint32(binary.BigEndian.Uint16(pseudo[i : i+2]))
+	}
+	for sum > 0xffff {
+		sum = sum&0xffff + sum>>16
+	}
+	checksum := ^uint16(sum)
+	if checksum == 0 {
+		checksum = 0xffff
+	}
+	binary.BigEndian.PutUint16(udp[6:8], checksum)
+	return frame
+}
+
+func TestIntegrationHostReplies(t *testing.T) {
+	if !IsolatedNetworks() {
+		t.Skip("no isolated networks")
+	}
+	n := newNetTest(t)
+	n.start("host-replies")
+	address := n.addr("host-replies")
+	n.run("host-replies", `perl -MIO::Socket::INET -e '$s = IO::Socket::INET->new(Proto => "udp", LocalPort => 8080) or die $!; open(my $ready, ">", "/tmp/udp-ready") or die $!; close $ready; while ($peer = recv($s, $data, 65535, 0)) { send($s, $data, 0, $peer) == length($data) or die $! }' >/tmp/udp-server.log 2>&1 &`)
+	n.run("host-replies", `timeout 5 bash -c 'until test -e /tmp/udp-ready; do sleep .05; done'`)
+	conn, err := net.Dial("udp4", net.JoinHostPort(address, "8080"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, size := range []int{64, 4096} {
+		payload := bytes.Repeat([]byte("x"), size)
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 8192)
+		k, err := conn.Read(buf)
+		if err != nil || !bytes.Equal(buf[:k], payload) {
+			t.Fatalf("host UDP echo, %d bytes: received %d, %v", size, k, err)
+		}
+	}
+	if out, err := exec.CommandContext(n.ctx, "/sbin/ping", "-c", "1", "-W", "2000", "-s", "4096", address).CombinedOutput(); err != nil {
+		t.Fatalf("host fragmented ICMP echo: %v: %s", err, out)
+	}
+	t.Log("host-initiated UDP and ICMP echo, including 4096-byte fragmented requests/replies, succeeded")
+}
 
 // addRoute adds a host route to $1 via the gateway $2 with SIOCADDRT (the
 // image has no ip or route command). The struct is arm64's rtentry.
