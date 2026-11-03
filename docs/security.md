@@ -21,8 +21,8 @@ sandbox's own directory (Docker), never over the network.
 | --- | --- | --- | --- | --- |
 | Outbound IPv4 | NAT, when the daemon runs as root | NAT | None: no network device | NAT |
 | Sandbox to sandbox | Dropped by the host | Not forwarded by the host | None | Dropped by Docker's rules |
-| Sandbox to the host's services | Dropped by the host | Reachable | None | Reachable (#53) |
-| Who enforces it | nftables on the host, needs root | macOS | No network | Docker Engine |
+| Sandbox to the host's services | Dropped by the host | Dropped by the host, except gateway DHCP/DNS | None | Reachable (#53) |
+| Who enforces it | nftables on the host, needs root | Host packet bridge and macOS | No network | Docker Engine |
 
 ### Linux (Firecracker)
 
@@ -37,7 +37,8 @@ spoofed source address. The guest cannot change host rules.
 Networking needs macOS 26 or later, and no root or extra entitlement.
 
 **macOS 26 and later.** Each sandbox has a vmnet shared network of its own
-(`VZVmnetNetworkDeviceAttachment`): vmnet allocates a separate /24 for each
+(a filtered `VZFileHandleNetworkDeviceAttachment` connected to a vmnet
+packet interface): vmnet allocates a separate /24 for each
 network dynamically (192.168.64.0/24 for the first), with a NAT for
 outbound IPv4. The VM has one virtio network device on it, configures it
 with the kernel's `ip=dhcp`, and uses the NAT's DNS proxy, the network's
@@ -66,26 +67,94 @@ routes packets between addresses on that network: root in sandbox A can
 add a host route to B via the gateway, and A's packets then reach B. So
 boxpool does not use it.
 
-**Limits on every macOS version.**
+**Host-service isolation (a hard public-beta blocker, #106).** The VM's
+only network attachment is a connected datagram socket. A packet bridge
+in the daemon filters guest frames before passing them to
+`vmnet_interface_start_with_network` on that sandbox's private network.
+It needs neither root, a privileged helper, extra entitlements, nor PF
+rules. There is no direct, unfiltered vmnet attachment or NAT fallback.
+A setup or I/O failure disconnects the network; vsock remains separate.
 
-- A networked sandbox can connect to services on the Mac that listen on all
-  interfaces, through the gateway or the Mac's LAN and VPN addresses.
-  Services bound to 127.0.0.1 are out of reach. The Linux backend drops
-  this traffic on the host. Blocking it on macOS needs a host packet filter
-  (pf, which needs root) and is not done.
-- The Mac can connect to a sandbox's address, as on Linux.
-- Bridged networking needs the `com.apple.vm.networking` entitlement and is
-  not used.
+The bridge drops IPv4 traffic to the Mac's own addresses, including the
+vmnet gateway and its LAN and VPN addresses. It reads host interface
+addresses for each packet, so new addresses apply to running guests and
+existing flows. Address-lookup failures deny traffic. Loopback,
+link-local, multicast, limited broadcasts and subnet network/broadcast
+addresses are also denied. The only infrastructure exceptions are UDP
+DHCP from port 68 to port 67 at the gateway or the limited broadcast, and
+TCP/UDP DNS to port 53 at the gateway.
+
+The bridge also checks the sandbox's source MAC and IPv4 subnet. It drops
+IPv6 frames even if guest root configures IPv6 manually; NAT66 and router
+advertisements are disabled. VLANs, other Ethernet protocols, IPv4 options
+(including source routing), malformed IP headers and unsolicited host-bound
+IPv4 fragments are not forwarded. A fragmented host reply is admitted only
+when its first fragment matches an existing reply flow; up to 1024
+fragment identities expire after 30 seconds. ARP is limited to the
+sandbox's own network and cannot claim a host address. None of these checks depends on guest
+firewall rules or on trusting the packet's source address.
+
+The Mac can still initiate TCP, UDP and ICMP echo traffic to a sandbox.
+Only matching replies gain an exception: a guest cannot create one by
+sending a SYN or an unsolicited ACK. Reply state is per running VM,
+bounded to 4096 flows, and expires after 24 hours of idle TCP or one minute
+for UDP, ICMP and closing TCP. Pause and restart discard that state;
+reconnect host-initiated sessions after restoring a VM. Direct guest
+connections to host services remain denied.
+
+The filter and its sockets are removed when the VM stops or is removed;
+`boxpool down` stops the VMs and closes their bridges. Nothing is installed
+in the system firewall, so uninstall needs no privileged cleanup. Cached
+warm bases from the old attachment are rebuilt automatically.
+
+**Upgrade from the direct vmnet attachment:** cleanly stop existing macOS
+sandboxes with `boxpool stop <name>` before installing this version,
+including paused ones. Saved NIC state from the old attachment cannot
+resume networking with the new socket attachment. If already upgraded,
+run `boxpool stop <name>` and then `boxpool start <name>`: Stop restores
+its saved memory over vsock and flushes the disk, and Start cold-boots the
+filtered NIC. Disk data is retained; in-memory processes do not survive the stop. Do not
+delete `machine.state` to migrate, since it can contain dirty disk data.
+
+Sandboxes on macOS 14–15 still have no NIC. Bridged networking needs the
+`com.apple.vm.networking` entitlement and is not used.
 
 ### Why not filter in the guest
 
 Rules applied inside the guest (for example nftables loaded by the agent
 at boot) would need a new guest image, since the image has no `nft` or
 `iptables` binary, and root in the guest could remove them. The macOS 26
-per-sandbox networks enforce isolation where the guest cannot reach it,
-so boxpool does not filter in the guest.
+per-sandbox networks and host packet bridge enforce isolation where the
+guest cannot reach it, so boxpool does not filter in the guest.
 
 ### How this was checked
+
+`TestIntegrationHostServices` binds TCP and UDP listeners on every IPv4
+interface and checks the gateway and all current non-loopback host addresses
+(including connected VPNs) from cold, resumed and warm-cloned guests. It
+also sends UDP with a source outside the sandbox's subnet. No connection
+or datagram may reach the listeners, while DNS over UDP and TCP and an
+outbound HTTP request by name must work. `TestIntegrationHostIPv6` injects
+raw IPv6 UDP frames addressed to the Mac, without relying on guest IPv6
+configuration, and checks a wildcard IPv6 listener receives none.
+`TestIntegrationHostReplies` checks host-initiated UDP and ICMP echo,
+including 4096-byte fragmented requests and replies.
+`filter_test.go` covers packet formats, source spoofing, live address
+changes, lookup failures, broadcasts, fragment/option bypasses, bounded
+reply state and expiry; it also supplies a packet-parser fuzz target.
+
+Manual confirmation, on macOS 26+ with a signed development build:
+
+1. Run `python3 -m http.server 8000 --bind 0.0.0.0` on the Mac.
+2. In `boxpool sh`, find the gateway with `cat /etc/resolv.conf`. Run
+   `timeout 3 bash -c 'exec 3<>/dev/tcp/<gateway>/8000'`, then repeat with
+   the Mac's LAN and VPN IPv4 addresses. Each must fail and the HTTP server
+   must receive no request.
+3. In that guest run
+   `bash -c 'exec 3<>/dev/tcp/example.com/80; printf "HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n" >&3; timeout 10 head -n 1 <&3'`.
+   Expect an HTTP status line. Pause/resume and repeat the probes.
+4. Run `boxpool down`. The daemon and VM helpers must stop; no PF anchor or
+   privileged helper has been installed to remove.
 
 `TestIntegrationNetwork` in `internal/backend/vz` fails, rather than
 skips, on macOS 26 or later when per-sandbox networks are off. It boots

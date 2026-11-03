@@ -386,11 +386,15 @@ func startVM(cfg vmConfig, network unsafe.Pointer, statePath string) (*machine, 
 		return nil, err
 	}
 	var vm *virt.VirtualMachine
+	var bridge *packetBridge
 	started := false
 	defer func() {
 		if !started {
 			if vm != nil && vm.CanStop() {
 				_ = vm.Stop()
+			}
+			if bridge != nil {
+				bridge.close()
 			}
 			capture.close()
 		}
@@ -418,12 +422,10 @@ func startVM(cfg vmConfig, network unsafe.Pointer, statePath string) (*machine, 
 	// (see doc.go). The framework's shared NAT would not, so without one the
 	// VM has no network device.
 	if network != nil {
-		nic, err := natNIC(cfg.MAC)
+		var nic *virt.VirtioNetworkDeviceConfiguration
+		bridge, nic, err = newPacketBridge(network, cfg.MAC)
 		if err != nil {
-			return nil, err
-		}
-		if err := attachNetwork(nic, network); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("create filtered network: %w", err)
 		}
 		c.SetNetworkDevicesVirtualMachineConfiguration([]*virt.VirtioNetworkDeviceConfiguration{nic})
 	}
@@ -475,35 +477,15 @@ func startVM(cfg vmConfig, network unsafe.Pointer, statePath string) (*machine, 
 		// Queued from Start on, so the stop cannot be missed.
 		for s := range vm.StateChangedNotify() {
 			if s == virt.VirtualMachineStateStopped || s == virt.VirtualMachineStateError {
+				if bridge != nil {
+					bridge.close()
+				}
 				close(m.stopped)
 				return
 			}
 		}
 	}()
 	return m, nil
-}
-
-// natNIC is a virtio network device on the framework's NAT, for
-// attachNetwork to move onto a vmnet network.
-func natNIC(mac string) (*virt.VirtioNetworkDeviceConfiguration, error) {
-	hw, err := net.ParseMAC(mac)
-	if err != nil {
-		return nil, err
-	}
-	nat, err := virt.NewNATNetworkDeviceAttachment()
-	if err != nil {
-		return nil, fmt.Errorf("NAT network attachment: %w", err)
-	}
-	nic, err := virt.NewVirtioNetworkDeviceConfiguration(nat)
-	if err != nil {
-		return nil, err
-	}
-	addr, err := virt.NewMACAddress(hw)
-	if err != nil {
-		return nil, err
-	}
-	nic.SetMACAddress(addr)
-	return nic, nil
 }
 
 // entitlementHint explains the framework's error for a binary that was not

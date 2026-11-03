@@ -37,7 +37,9 @@ func (d *Driver) Warm(ctx context.Context) error {
 		defer ag.CloseIdleConnections()
 		return backend.FreezeGuest(ctx, ag, true)
 	}
-	if err := backend.PrepareWarm(ctx, base, dir, fmt.Sprintf("network=%t;os=%s", d.isolated, osBuild), freeze, d.paths.Kernel, d.paths.Rootfs); err != nil {
+	// Saved NIC state from the direct vmnet attachment is not reusable with
+	// the filtered socket attachment. Rebuild old warm bases on upgrade.
+	if err := backend.PrepareWarm(ctx, base, dir, fmt.Sprintf("network=filtered-v1:%t;os=%s", d.isolated, osBuild), freeze, d.paths.Kernel, d.paths.Rootfs); err != nil {
 		return err
 	}
 	l := sandboxLayout(base.root, backend.WarmID)
