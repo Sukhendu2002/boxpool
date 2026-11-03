@@ -28,6 +28,7 @@ mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts /dev/pts
 ln -sf pts/ptmx /dev/ptmx
 mkdir -p /run/boxpool
 cd /root
+if [ -x /usr/local/bin/boxpool-desktop ]; then export DISPLAY=:0; fi
 # tini becomes PID 1, reaps adopted orphans and forwards signals to the agent
 # process group. The agent remains the only service; failure is fail-fast.
 exec /usr/bin/tini -g -- /usr/local/bin/boxpool-agent --listen vsock:1024

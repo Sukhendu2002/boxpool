@@ -179,14 +179,18 @@ func (d *Driver) lockSandbox(ctx context.Context, id string) (func(), error) {
 }
 
 // Create reserves capacity and grows a private copy of the base rootfs, or
-// of the disk snapshot Spec.From, to Spec.DiskGB GiB. Spec.Image is ignored
-// (there is one image).
+// of the disk snapshot Spec.From, to Spec.DiskGB GiB. Spec.Image selects
+// the base or desktop image.
 func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
 	if err := validID(id); err != nil {
 		return backend.Sandbox{}, err
 	}
 	var err error
 	if spec, err = spec.WithDefaults(); err != nil {
+		return backend.Sandbox{}, err
+	}
+	src, err := backend.ImageRootfs(d.rootfs, spec)
+	if err != nil {
 		return backend.Sandbox{}, err
 	}
 	l := sandboxLayout(d.root, id)
@@ -206,7 +210,6 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 		return backend.Sandbox{}, err
 	}
 	b, _ := json.Marshal(spec)
-	src := d.rootfs
 	warm := d.warm != nil && backend.WarmSpec(spec)
 	if spec.From != "" {
 		src = spec.From

@@ -1,0 +1,40 @@
+#!/bin/sh
+# Foreground supervisor, started only by boxpool-agent's desktop API.
+set -eu
+export DISPLAY=:0
+export HOME=/root
+export XDG_RUNTIME_DIR=/tmp/boxpool-runtime
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+xvnc='' wm='' browser=''
+cleanup() {
+    trap '' TERM INT HUP
+    for pid in $browser $wm $xvnc; do kill "$pid" 2>/dev/null || true; done
+    wait || true
+    rm -f /run/boxpool/desktop.vnc
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT HUP
+rm -f /run/boxpool/desktop.vnc /tmp/.X0-lock /tmp/.X11-unix/X0
+Xtigervnc :0 -geometry 1280x800 -depth 24 -nolisten tcp \
+    -rfbport -1 -rfbunixpath /run/boxpool/desktop.vnc -rfbunixmode 0600 \
+    -SecurityTypes None -AlwaysShared -AcceptKeyEvents=0 -AcceptPointerEvents=0 \
+    -AcceptCutText=0 -SendCutText=0 -AcceptSetDesktopSize=0 \
+    -AllowOverride AcceptKeyEvents,AcceptPointerEvents &
+xvnc=$!
+i=0
+until xdpyinfo >/dev/null 2>&1; do
+    kill -0 "$xvnc"
+    i=$((i+1)); [ "$i" -lt 200 ] || exit 1
+    sleep 0.05
+done
+openbox --sm-disable &
+wm=$!
+# Chromium runs inside the sandbox; its user-namespace sandbox cannot run as
+# root in our capability-free Docker fallback. Host VM/container isolation is
+# the security boundary, as it is for arbitrary commands run by the agent.
+chromium --no-sandbox --disable-dev-shm-usage --disable-gpu --no-first-run \
+    --no-default-browser-check --password-store=basic \
+    --user-data-dir=/root/.config/boxpool-chromium about:blank &
+browser=$!
+wait "$xvnc"

@@ -71,6 +71,8 @@ boxpool token revoke <id>            # it stops working within seconds
 boxpool audit         # on the head: who created, ran, exposed or removed what
 boxpool node label gpu,always-on     # labels sh --node picks machines by
 boxpool promote       # in a pool of two whose head is gone: become the head
+boxpool sh --image desktop --name browser # optional desktop image (see docs/desktop.md)
+boxpool desktop browser # authenticated browser viewer; Take over enables input
 boxpool sh            # open a shell in a new sandbox
 boxpool sh --os macos # on the head: on a node with this OS (or --arch, --node)
 boxpool exec box -- make test        # run a command in a sandbox
@@ -371,3 +373,6 @@ go test ./...
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
+
+See [desktop image and browser takeover](docs/desktop.md) for image installation,
+head setup, phone access and the control handoff.

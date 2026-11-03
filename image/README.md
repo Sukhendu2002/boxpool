@@ -299,3 +299,15 @@ some release assets; the workflow does not silently overwrite assets.
 Inspect them before retrying. For rollback, keep consumers on the prior
 explicit version. Nothing in this change downloads artifacts for users or
 implements a backend driver or the general integration harness.
+
+## Optional desktop variant
+
+`IMAGE_VARIANT=desktop image/build.sh <amd64|arm64>` builds the separate
+`boxpool-desktop:<version>-<arch>` OCI image and
+`rootfs-desktop-<arch>.ext4.zst` (4 GiB filesystem), with artifacts under
+`dist/image/desktop/<arch>/current`. The base variant remains the default.
+Run `image/test-desktop.sh <image>` to start the agent/display, open Chromium
+and verify a nonempty XWD screenshot under Docker fallback restrictions.
+CI builds both variants on both architectures and publishes their tested
+OCI images and checksummed VM disks together. See
+[desktop setup](../docs/desktop.md) for node installation and takeover.

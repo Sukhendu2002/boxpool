@@ -414,3 +414,10 @@ func apiError(method, path string, resp *http.Response) error {
 	}
 	return fmt.Errorf("%s %s: %s", method, path, resp.Status)
 }
+
+// StartDesktop starts the on-demand display on the sandbox's owning node.
+func (c *Client) StartDesktop(ctx context.Context, name string) (agent.Desktop, error) {
+	var d agent.Desktop
+	err := c.do(ctx, http.MethodPost, "/v1/sandboxes/"+url.PathEscape(name)+"/desktop", nil, &d)
+	return d, err
+}

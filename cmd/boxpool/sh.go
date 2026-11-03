@@ -46,6 +46,7 @@ func sh(args []string) int {
 	cpu := fs.Int("cpu", 0, fmt.Sprintf("vCPUs of a new sandbox (default %d)", daemon.DefaultCPUs))
 	mem := fs.String("mem", "", "memory of a new sandbox, e.g. 512m or 4g (default 2g)")
 	disk := fs.String("disk", "", "disk of a new sandbox, e.g. 20g (default 10g)")
+	image := fs.String("image", "", "image for a new sandbox: base or desktop")
 	from := fs.String("from", "", "snapshot to copy a new sandbox's disk from (see boxpool snapshot)")
 	restart := fs.String("restart", "no", "restart policy of a new sandbox: always boots it again if the daemon starts and finds it stopped, as after a host reboot")
 	osName := fs.String("os", "", "on a head, put a new sandbox on a node with this OS: linux or macos")
@@ -55,13 +56,22 @@ func sh(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	req := daemon.CreateRequest{Name: *name, CPUs: *cpu, Restart: *restart, From: *from, OS: *osName, Arch: *arch, Node: *node}
+	req := daemon.CreateRequest{Name: *name, Image: *image, CPUs: *cpu, Restart: *restart, From: *from, OS: *osName, Arch: *arch, Node: *node}
 	var err error
 	if req.MemoryMB, err = parseSize(*mem, 1); err == nil {
 		req.DiskGB, err = parseSize(*disk, 1024)
 	}
 	if err == nil && (fs.NArg() > 1 || fs.NArg() == 1 && *name != "") {
 		err = errors.New("give at most one sandbox name")
+	}
+	if err == nil && *image != "" && *image != "base" && *image != "desktop" {
+		err = errors.New("image must be base or desktop")
+	}
+	if err == nil && *image != "" && *from != "" {
+		err = errors.New("--image and --from cannot be combined")
+	}
+	if err == nil && fs.NArg() == 1 && *image != "" {
+		err = errors.New("--image starts a new sandbox; use --name to name it")
 	}
 	if err == nil && fs.NArg() == 1 && *from != "" {
 		err = errors.New("--from starts a new sandbox; it cannot attach to an existing one")

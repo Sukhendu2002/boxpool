@@ -51,6 +51,7 @@ Commands:
   resume    resume a paused sandbox
   rm        delete a sandbox and free its resources
   snapshot  save a sandbox's disk for boxpool sh --from; snapshot ls, rm
+  desktop   on the head: open an authenticated desktop viewer with takeover
   expose    on the head: an HTTPS URL for a sandbox port; expose ls, rm, check
 `
 
@@ -93,6 +94,8 @@ func main() {
 		os.Exit(rm(os.Args[2:]))
 	case "snapshot":
 		os.Exit(snapshotCmd(os.Args[2:]))
+	case "desktop":
+		os.Exit(desktopCmd(os.Args[2:]))
 	case "expose":
 		os.Exit(exposeCmd(os.Args[2:]))
 	case "up":

@@ -99,13 +99,17 @@ func (d *Driver) Name() string { return "vz" }
 
 // Create reserves capacity and makes the sandbox's disk an APFS clone of the
 // base rootfs, or of the disk snapshot Spec.From, sized to Spec.DiskGB GiB; Start grows the file system into
-// it. Spec.Image is ignored (there is one image).
+// it. Spec.Image selects the base or desktop image.
 func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (backend.Sandbox, error) {
 	if err := validID(id); err != nil {
 		return backend.Sandbox{}, err
 	}
 	var err error
 	if spec, err = spec.WithDefaults(); err != nil {
+		return backend.Sandbox{}, err
+	}
+	src, err := backend.ImageRootfs(d.rootfs, spec)
+	if err != nil {
 		return backend.Sandbox{}, err
 	}
 	if _, err := newVMConfig(spec, d.kernel, layout{}, d.limits); err != nil {
@@ -121,7 +125,6 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	}
 	l := sandboxLayout(d.root, id)
 	b, _ := json.Marshal(spec)
-	src := d.rootfs
 	warm := d.warm != nil && backend.WarmSpec(spec)
 	if spec.From != "" {
 		src = spec.From

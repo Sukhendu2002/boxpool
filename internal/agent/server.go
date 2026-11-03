@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -98,7 +99,13 @@ func removeStaleSocket(path string) error {
 func Serve(ctx context.Context, l net.Listener, version string, shutdown *Shutdown) error {
 	var sessions sync.WaitGroup
 	features := []string{FeatureTCP}
+	desktop := newDesktop(ctx)
+	defer desktop.close()
+	if _, err := exec.LookPath("boxpool-desktop"); err == nil {
+		features = append(features, FeatureDesktop)
+	}
 	mux := http.NewServeMux()
+	desktop.routes(mux)
 	if shutdown != nil {
 		features = append(features, FeatureShutdown)
 		mux.HandleFunc("POST /v1/shutdown", shutdown.serve)

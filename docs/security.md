@@ -289,9 +289,11 @@ needs no open port.
 - Pages on two exposed ports are different origins but the same site, so
   one sandbox's page can send requests, with cookies, to another's URL
   (it cannot read the answers unless that app allows it).
-- The token is checked when each request starts; a WebSocket already open
-  when the token is revoked stays open until it closes. Removing the expose
-  or stopping the daemon cancels its requests and open WebSockets.
+- For ordinary app exposes, the token is checked when each request starts;
+  a WebSocket already open when the token is revoked stays open until it
+  closes. Desktop viewers also recheck their token every two seconds and
+  disconnect on revocation or expiry. Removing either expose or stopping
+  the daemon cancels its requests and open WebSockets.
 - Only an Origin matching that expose's HTTPS URL is translated to the
   guest's localhost Origin. Foreign origins remain foreign, so backend
   origin checks still reject cross-origin WebSockets and form requests.
@@ -409,3 +411,20 @@ against CSRF from sibling ports, and an already-open exposed WebSocket remains
 open after token revocation, as described above. These are documented v1 trust
 limits, not guarantees provided by guest network filtering. This review is not
 the external audit planned for M7.
+
+### Desktop viewer
+
+Desktop URLs reserve non-TCP port 0 in the expose store and always require
+expose authentication. The proxy rejects foreign Origins before serving
+the viewer, its control API or WebSocket. VNC and X listen only on guest
+Unix sockets; RFB travels over the existing private agent channel, never
+a guest-network listener. Embedded noVNC assets need no CDN.
+
+TigerVNC disables key and pointer events until takeover; clipboard transfer
+and client display resizing stay disabled. Only one viewer is supported.
+Release or disconnect disables input again; a failure to reset input stops
+the desktop. The `human_control` API flag asks agents to pause automation
+cooperatively and does not stop arbitrary guest processes. Chromium runs
+with `--no-sandbox` inside the existing VM/container boundary, including
+the capability-free Docker fallback. See [desktop](desktop.md) for setup,
+limitations and real-device acceptance steps.

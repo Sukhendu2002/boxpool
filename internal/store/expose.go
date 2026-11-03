@@ -16,7 +16,8 @@ var ErrExposeNotFound = errors.New("not exposed")
 
 // Expose is a sandbox's port that the head serves at URL, from its own
 // loopback port Port. TokenID is the ID of the expose token made for it,
-// "" when it is public.
+// "" when it is public. SandboxPort 0 reserves the authenticated desktop
+// service; actual TCP ports are 1 through 65535.
 //
 // shortcut: exposes live only on the head that made them and are not
 // replicated with raft, like access tokens; add both to PoolState together.

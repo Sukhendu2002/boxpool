@@ -233,3 +233,15 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 	}
 	return resp, nil
 }
+
+// StartDesktop starts the image's display without tying it to this request.
+func (c *Client) StartDesktop(ctx context.Context) (Desktop, error) {
+	var d Desktop
+	resp, err := c.request(ctx, http.MethodPost, "/v1/desktop", nil)
+	if err != nil {
+		return d, err
+	}
+	defer resp.Body.Close()
+	err = json.NewDecoder(resp.Body).Decode(&d)
+	return d, err
+}
