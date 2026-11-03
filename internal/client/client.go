@@ -22,6 +22,7 @@ import (
 	"boxpool.run/boxpool/internal/agent"
 	"boxpool.run/boxpool/internal/auth"
 	"boxpool.run/boxpool/internal/daemon"
+	"boxpool.run/boxpool/internal/store"
 	"boxpool.run/boxpool/internal/transport"
 )
 
@@ -89,6 +90,23 @@ func (c *Client) Info(ctx context.Context) (daemon.Info, error) {
 	var info daemon.Info
 	err := c.get(ctx, "/v1/info", &info)
 	return info, err
+}
+
+// Login validates this access token and records the login on the head.
+func (c *Client) Login(ctx context.Context) error {
+	resp, err := c.send(ctx, http.MethodPost, "/v1/login", "", nil)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+// Audit returns the head's audit events, newest first. This is local-only:
+// scoped remote tokens cannot read other callers' actions.
+func (c *Client) Audit(ctx context.Context, before int64, limit int) ([]store.AuditEvent, error) {
+	var list []store.AuditEvent
+	err := c.get(ctx, "/v1/audit?before="+strconv.FormatInt(before, 10)+"&limit="+strconv.Itoa(limit), &list)
+	return list, err
 }
 
 // CreateSandbox returns the sandbox named req.Name, started, creating it if

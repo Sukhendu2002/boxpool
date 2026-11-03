@@ -44,6 +44,7 @@ Commands:
   cp        copy files between this machine and a sandbox
   ls        list pool sandboxes; --nodes shows node health and capacity
   logs      show sandbox console or --daemon logs; -f follows output
+  audit     on the head: show the last 90 days of actions and token IDs
   start     start a stopped sandbox with its disk
   stop      stop a sandbox
   pause     pause a running sandbox, keeping its memory (not on Docker)
@@ -78,6 +79,8 @@ func main() {
 		os.Exit(ls(os.Args[2:]))
 	case "logs":
 		os.Exit(logsCmd(os.Args[2:]))
+	case "audit":
+		os.Exit(auditCmd(os.Args[2:]))
 	case "start":
 		os.Exit(start(os.Args[2:]))
 	case "stop":

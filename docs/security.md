@@ -171,6 +171,47 @@ needs no open port.
 - Answers from a sandbox's port are never read as sandbox records when
   the head forwards them from a node.
 
+### Audit log
+
+The head appends successful `sandbox.create`, `sandbox.rm`, `sandbox.exec`,
+`sandbox.expose`, `sandbox.unexpose`, `token.create`, `token.revoke` and
+`login` events to `audit_events` in its private SQLite database. Forwarded
+actions are recorded once on the head with the originating access token ID.
+Creating or removing a private expose also records its token creation or
+revocation. Join-token targets use the first 12 characters of the secret's
+hash, as access-token IDs do. A login means the head accepted the CLI's
+explicit `POST /v1/login`, rather than a health check.
+
+Exec records the successful WebSocket upgrade, before any commands run,
+including interactive shells. It records the sandbox name, not the command
+or its output. Reusing an existing sandbox does not record another create.
+Failed and denied operations are not successful-action audit events.
+
+Each authorized exposed-URL request records `sandbox.access` before the
+redirect or proxy starts, even if the app later returns an error. This
+includes the token-to-cookie redirect and WebSocket handshakes. Public URLs
+use `public` as the actor; local socket operations use `local`, without
+distinguishing users sharing that socket. Targets contain only sandbox
+names, sandbox ports or token IDs. Token secrets, command text, cookies,
+app paths and URL queries are never stored in the audit table.
+
+`GET /v1/audit` and `boxpool audit` are local to the head. Remote scoped
+tokens cannot read the log. The API returns newest first, defaults to 100
+events, allows `limit=1` through `1000`, and accepts `before=<event ID>` for
+older pages. There is no event update or individual-delete API. Rows older
+than 90 days are pruned on append and read; idle databases are pruned on the
+next audit operation. Token revocation and sandbox deletion preserve their
+history. Events are not replicated, so a promoted head starts its own log.
+
+Mutation responses are acknowledged only after the audit transaction
+commits. If an action finishes but the audit write fails, the API returns
+500 with "operation completed but audit failed" and logs the failure; the
+action and audit cannot be atomic across hypervisors or node tunnels.
+Exec upgrades and exposed requests stop if their audit write fails. A crash
+between an action and its audit write can leave an unrecorded action. This
+is an activity history, not a tamper-proof log against the host owner, who
+can edit the database directly.
+
 ### Replicas and failover
 
 From the pool's second machine on, the head replicates its state (nodes,
