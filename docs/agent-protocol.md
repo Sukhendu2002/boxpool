@@ -388,3 +388,17 @@ and `Shutdown(ctx, grace) error` for the daemon. `Upload` consumes an already-pr
 EOF (checking read errors) and close. Cancelling the context interrupts the
 request/transfer. Non-success responses include the HTTP status and the
 agent's JSON error message in the returned error. No CLI is added here.
+
+## Desktop (optional image)
+
+`desktop` in `GET /v1/version` features advertises the desktop image.
+`POST /v1/desktop` starts or reuses a display that lives until the agent stops.
+`GET /v1/desktop` reports `display`, private Unix `vnc` endpoint and
+`human_control`. The latter is a cooperative signal for browser agents to
+pause automation during human takeover. See [desktop](desktop.md).
+`GET /v1/desktop/` serves the embedded viewer; `/ws` bridges binary WebSocket
+messages to RFB; `POST /v1/desktop/control` with `{"human_control":true}`
+enables VNC key and pointer events for the connected viewer. They are disabled
+by default, on release and on disconnect. Only one viewer is supported.
+All of these endpoints are private to the agent channel; the head exposes
+only this service through the existing expose-token authentication.

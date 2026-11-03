@@ -3,6 +3,8 @@
 ARG DEBIAN=debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
 ARG GO=golang:1.26.3-bookworm@sha256:386d475a660466863d9f8c766fec64d7fdad3edac2c6a05020c09534d71edb4b
 
+ARG IMAGE_VARIANT=base
+
 FROM --platform=$BUILDPLATFORM ${GO} AS golang
 
 FROM golang AS agent
@@ -70,6 +72,19 @@ LABEL org.opencontainers.image.source="https://github.com/Sukhendu2002/boxpool" 
 ENTRYPOINT ["/usr/bin/tini", "-g", "--"]
 CMD ["/usr/local/bin/boxpool-agent", "--listen", "unix:/run/boxpool/agent.sock"]
 
+# Optional desktop: base images keep their existing small userland.
+FROM userland AS base
+
+FROM userland AS desktop
+RUN apt-get -o APT::Update::Error-Mode=any update \
+    && apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools \
+       openbox chromium fonts-dejavu-core x11-utils x11-apps xdotool \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0755 image/desktop /usr/local/bin/boxpool-desktop
+ENV DISPLAY=:0
+
+FROM ${IMAGE_VARIANT} AS selected-userland
+
 FROM tools AS kernel
 ARG TARGETARCH
 ARG JOBS=4
@@ -82,20 +97,24 @@ FROM tools AS filesystem
 ARG TARGETARCH
 ARG IMAGE_VERSION
 ARG IMAGE_REVISION
-COPY --from=userland / /rootfs/
+ARG IMAGE_VARIANT
+COPY --from=selected-userland / /rootfs/
 # mke2fs runs as root inside BuildKit, preserving uid/gid/modes, symlinks and
 # hardlinks without a loop mount, host sudo, or a privileged build/container.
-RUN mkdir /out && truncate -s 2G /out/rootfs-$TARGETARCH.ext4 \
-    && mke2fs -q -t ext4 -F -L boxpool -m 0 -d /rootfs /out/rootfs-$TARGETARCH.ext4 \
-    && e2fsck -fn /out/rootfs-$TARGETARCH.ext4 \
-    && zstd -T2 -10 --rm /out/rootfs-$TARGETARCH.ext4 \
-    && printf 'version=%s\nrevision=%s\narch=%s\n' "$IMAGE_VERSION" "$IMAGE_REVISION" "$TARGETARCH" > /out/image-$TARGETARCH.txt
+RUN suffix=; size=2G; if [ "$IMAGE_VARIANT" = desktop ]; then suffix=-desktop; size=4G; fi \
+    && mkdir /out && truncate -s "$size" /out/rootfs$suffix-$TARGETARCH.ext4 \
+    && mke2fs -q -t ext4 -F -L boxpool -m 0 -d /rootfs /out/rootfs$suffix-$TARGETARCH.ext4 \
+    && e2fsck -fn /out/rootfs$suffix-$TARGETARCH.ext4 \
+    && zstd -T2 -10 --rm /out/rootfs$suffix-$TARGETARCH.ext4 \
+    && printf 'version=%s\nrevision=%s\narch=%s\n' "$IMAGE_VERSION" "$IMAGE_REVISION" "$TARGETARCH" > /out/image$suffix-$TARGETARCH.txt
 
 FROM tools AS bundle
 ARG TARGETARCH
 COPY --from=kernel /out/ /out/
 COPY --from=filesystem /out/ /out/
-RUN cd /out && sha256sum * > SHA256SUMS-$TARGETARCH
+ARG IMAGE_VARIANT
+RUN suffix=; if [ "$IMAGE_VARIANT" = desktop ]; then suffix=-desktop; fi \
+    && cd /out && sha256sum * > SHA256SUMS$suffix-$TARGETARCH
 
 FROM scratch AS artifacts
 COPY --from=bundle /out/ /

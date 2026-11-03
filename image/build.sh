@@ -5,6 +5,8 @@ die() { echo "image/build: $*" >&2; exit 1; }
 [[ $# == 1 ]] || die 'usage: image/build.sh <amd64|arm64>'
 arch=$1
 case $arch in amd64|arm64) ;; *) die "unsupported architecture '$arch'; use amd64 or arm64" ;; esac
+variant=${IMAGE_VARIANT:-base}
+case $variant in base) suffix=; target=userland; image_name=boxpool-image ;; desktop) suffix=-desktop; target=desktop; image_name=boxpool-desktop ;; *) die 'IMAGE_VARIANT must be base or desktop' ;; esac
 repo=$(cd "$(dirname "$0")/.." && pwd)
 version=${IMAGE_VERSION:-}
 # Reserve six characters for the architecture suffix in the local Docker tag.
@@ -23,7 +25,9 @@ version=${version:-0.0.0-dev.${revision:0:12}}
 command -v docker >/dev/null || die 'Docker with the buildx plugin is required'
 docker buildx version >/dev/null || die 'Docker buildx is required'
 docker info >/dev/null 2>&1 || die 'cannot reach the Docker engine; select an accessible engine with DOCKER_HOST or DOCKER_CONTEXT'
-out=${OUTPUT_DIR:-$repo/dist/image/$arch}
+default_out=$repo/dist/image/$arch
+if [[ $variant == desktop ]]; then default_out=$repo/dist/image/desktop/$arch; fi
+out=${OUTPUT_DIR:-$default_out}
 mkdir -p "$out"
 out=$(cd "$out" && pwd -P)
 [[ ! -e $out/current || -L $out/current ]] || die "$out/current must be absent or a symlink; move this existing entry aside explicitly"
@@ -44,20 +48,20 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-image=boxpool-image:$version-$arch
+image=$image_name:$version-$arch
 args=(--platform "linux/$arch" --file "$repo/image/Dockerfile"
     --build-arg "IMAGE_VERSION=$version" --build-arg "IMAGE_REVISION=$revision"
-    --build-arg "JOBS=$jobs")
-docker buildx build "${args[@]}" --target userland --tag "$image" --load "$repo"
+    --build-arg "JOBS=$jobs" --build-arg "IMAGE_VARIANT=$variant")
+docker buildx build "${args[@]}" --target "$target" --tag "$image" --load "$repo"
 docker buildx build "${args[@]}" --target artifacts --output "type=local,dest=$work" "$repo"
 # Save the exact image tested locally; the release job loads it, never rebuilds.
-docker image save "$image" -o "$work/oci-$arch.tar"
+docker image save "$image" -o "$work/oci$suffix-$arch.tar"
 if command -v sha256sum >/dev/null; then
-    (cd "$work" && sha256sum "oci-$arch.tar" > "oci-$arch.tar.sha256")
+    (cd "$work" && sha256sum "oci$suffix-$arch.tar" > "oci$suffix-$arch.tar.sha256")
 else
-    (cd "$work" && shasum -a 256 "oci-$arch.tar" > "oci-$arch.tar.sha256")
+    (cd "$work" && shasum -a 256 "oci$suffix-$arch.tar" > "oci$suffix-$arch.tar.sha256")
 fi
-wc -c "$work/rootfs-$arch.ext4.zst"
+wc -c "$work/rootfs$suffix-$arch.ext4.zst"
 ln -s "${work##*/}" "$pointer"
 # Keep this complete generation before the switch: a signal immediately after
 # rename must never let EXIT remove the newly selected set. Old generations

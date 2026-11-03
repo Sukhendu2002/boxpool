@@ -25,6 +25,7 @@ type ExposeRequest struct {
 	Sandbox string `json:"sandbox"`
 	Port    int    `json:"port"`
 	Public  bool   `json:"public,omitempty"`
+	Desktop bool   `json:"desktop,omitempty"`
 }
 
 // ExposeCheck describes the head's readiness to serve tailnet HTTPS URLs.
@@ -88,7 +89,11 @@ func (s *server) createExpose(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid sandbox name %q", req.Sandbox))
 		return
 	}
-	if req.Port < 1 || req.Port > 65535 {
+	if req.Desktop && (req.Public || req.Port != DesktopPort) {
+		writeError(w, http.StatusBadRequest, errors.New("desktop URLs must be authenticated and use port 0"))
+		return
+	}
+	if !req.Desktop && (req.Port < 1 || req.Port > 65535) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid port %d", req.Port))
 		return
 	}
@@ -285,6 +290,9 @@ func (s *server) exposeHandler(e store.Expose, appCookies *exposeCookies) http.H
 	}
 	cookie := cookiePrefix + strconv.Itoa(e.Port)
 	prefix := "/v1/ports/" + e.Sandbox + "/" + strconv.Itoa(e.SandboxPort)
+	if e.SandboxPort == DesktopPort {
+		prefix = "/v1/sandboxes/" + e.Sandbox + "/desktop"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actor, secret, fromQuery := "public", "", false
 		if !e.Public {
@@ -301,6 +309,35 @@ func (s *server) exposeHandler(e store.Expose, appCookies *exposeCookies) http.H
 			}
 			at, _ := auth.ParseAccessToken(secret) // checked above
 			actor = at.Hash()[:store.AccessIDLen]
+		}
+		if e.SandboxPort == DesktopPort {
+			if origin := r.Header.Get("Origin"); origin != "" && origin != strings.TrimSuffix(e.URL, "/") {
+				http.Error(w, "foreign origin", http.StatusForbidden)
+				return
+			}
+			ctx, cancel := context.WithCancel(r.Context())
+			defer cancel()
+			// Unlike short app requests, a desktop can stay connected for hours.
+			// Revoke the active viewer too, not just its next HTTP request.
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ticker := time.NewTicker(revokeCheck)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if s.checkExposeToken(ctx, e, secret) != nil {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+			defer func() { cancel(); <-done }()
+			r = r.WithContext(ctx)
 		}
 		r = r.WithContext(context.WithValue(r.Context(), auditActorKey{}, actor))
 		if err := s.recordAudit(r, "sandbox.access", net.JoinHostPort(e.Sandbox, strconv.Itoa(e.SandboxPort))); err != nil {
@@ -325,7 +362,11 @@ func (s *server) exposeHandler(e store.Expose, appCookies *exposeCookies) http.H
 		// Translate only this expose's same-origin requests. Foreign origins
 		// must remain foreign when the backend enforces its CSRF checks.
 		if r.Header.Get("Origin") == strings.TrimSuffix(e.URL, "/") {
-			r.Header.Set("Origin", "http://localhost:"+strconv.Itoa(e.SandboxPort))
+			origin := "http://localhost:" + strconv.Itoa(e.SandboxPort)
+			if e.SandboxPort == DesktopPort {
+				origin = "http://agent"
+			}
+			r.Header.Set("Origin", origin)
 		}
 		r = r.WithContext(context.WithValue(r.Context(), exposeCookiesKey{}, exposeCookieRequest{cookies: appCookies, path: r.URL.EscapedPath()}))
 		escaped := r.URL.EscapedPath()

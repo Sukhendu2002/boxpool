@@ -39,6 +39,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        variant: [base, desktop]
+        arch: [amd64, arm64]
         include:
           - arch: amd64
             runner: ubuntu-24.04
@@ -73,20 +75,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck zstd
-          shellcheck image/*.sh image/init
+          shellcheck image/*.sh image/init image/desktop
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 .github/workflows/image.yml
           go test ./image/...
       - name: Build native image and kernel
         env:
           IMAGE_VERSION: ${{ steps.version.outputs.value }}
-          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
+          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.variant }}-${{ matrix.arch }}
+          IMAGE_VARIANT: ${{ matrix.variant }}
         run: image/build.sh "${{ matrix.arch }}"
       - name: Check exact OCI image without privileges
         env:
           IMAGE_VERSION: ${{ steps.version.outputs.value }}
-        run: image/test-oci.sh "boxpool-image:$IMAGE_VERSION-${{ matrix.arch }}" "$IMAGE_VERSION"
+        run: |
+          name=boxpool-image
+          if [[ '${{ matrix.variant }}' == desktop ]]; then name=boxpool-desktop; fi
+          image/test-oci.sh "$name:$IMAGE_VERSION-${{ matrix.arch }}" "$IMAGE_VERSION"
+      - name: Start desktop, open Chromium and capture a screenshot
+        if: matrix.variant == 'desktop'
+        env:
+          IMAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: image/test-desktop.sh "boxpool-desktop:$IMAGE_VERSION-${{ matrix.arch }}"
       - name: Grant amd64 runner access to KVM
-        if: matrix.arch == 'amd64'
+        if: matrix.arch == 'amd64' && matrix.variant == 'base'
         run: |
           test -c /dev/kvm
           sudo groupadd -f kvm
@@ -94,10 +105,10 @@ jobs:
           sudo chgrp kvm /dev/kvm
           sudo chmod 0660 /dev/kvm
       - name: Boot the built amd64 image and exercise vsock agent
-        if: matrix.arch == 'amd64'
+        if: matrix.arch == 'amd64' && matrix.variant == 'base'
         env:
           IMAGE_VERSION: ${{ steps.version.outputs.value }}
-          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
+          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.variant }}-${{ matrix.arch }}
         run: |
           # Expand exported variables in the child shell started by sg.
           # shellcheck disable=SC2016
@@ -105,24 +116,27 @@ jobs:
       - name: Record artifact sizes and checksums
         env:
           ARCH: ${{ matrix.arch }}
+          VARIANT: ${{ matrix.variant }}
           IMAGE_VERSION: ${{ steps.version.outputs.value }}
-          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}
+          OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.variant }}-${{ matrix.arch }}
         shell: bash
         run: |
           cd "$OUTPUT_DIR/current"
-          sha256sum -c "SHA256SUMS-$ARCH"
-          sha256sum -c "oci-$ARCH.tar.sha256"
+          suffix=
+          if [[ $VARIANT == desktop ]]; then suffix=-desktop; fi
+          sha256sum -c "SHA256SUMS$suffix-$ARCH"
+          sha256sum -c "oci$suffix-$ARCH.tar.sha256"
           {
             echo "### $IMAGE_VERSION / $ARCH"
-            echo "Compressed rootfs: $(stat -c %s "rootfs-$ARCH.ext4.zst") bytes"
+            echo "Compressed rootfs: $(stat -c %s "rootfs$suffix-$ARCH.ext4.zst") bytes"
             echo '```text'
-            cat "SHA256SUMS-$ARCH"
+            cat "SHA256SUMS$suffix-$ARCH"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: guest-image-${{ matrix.arch }}
-          path: ${{ runner.temp }}/boxpool-image-${{ matrix.arch }}/current/*
+          name: guest-image-${{ matrix.variant }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/boxpool-image-${{ matrix.variant }}-${{ matrix.arch }}/current/*
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -151,24 +165,28 @@ jobs:
           set -euo pipefail
           cd artifacts
           mkdir release
-          registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/boxpool-image
           echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          for arch in amd64 arm64; do
-            sha256sum -c "SHA256SUMS-$arch"
-            sha256sum -c "oci-$arch.tar.sha256"
-            grep -Fx "version=$VERSION" "image-$arch.txt"
-            docker load -i "oci-$arch.tar"
-            image=boxpool-image:$VERSION-$arch
-            test "$(docker image inspect -f '{{.Architecture}}' "$image")" = "$arch"
-            docker tag "$image" "$registry:$VERSION-$arch"
-            docker push "$registry:$VERSION-$arch"
-            cp "SHA256SUMS-$arch" release/
-            while read -r checksum file; do
-              test -n "$checksum"
-              cp "$file" release/
-            done < "SHA256SUMS-$arch"
+          for variant in base desktop; do
+            suffix=; name=boxpool-image
+            if [[ $variant == desktop ]]; then suffix=-desktop; name=boxpool-desktop; fi
+            registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$name
+            for arch in amd64 arm64; do
+              sha256sum -c "SHA256SUMS$suffix-$arch"
+              sha256sum -c "oci$suffix-$arch.tar.sha256"
+              grep -Fx "version=$VERSION" "image$suffix-$arch.txt"
+              docker load -i "oci$suffix-$arch.tar"
+              image=$name:$VERSION-$arch
+              test "$(docker image inspect -f '{{.Architecture}}' "$image")" = "$arch"
+              docker tag "$image" "$registry:$VERSION-$arch"
+              docker push "$registry:$VERSION-$arch"
+              cp "SHA256SUMS$suffix-$arch" release/
+              while read -r checksum file; do
+                test -n "$checksum"
+                cp "$file" release/
+              done < "SHA256SUMS$suffix-$arch"
+            done
+            docker buildx imagetools create --tag "$registry:$VERSION" \
+              "$registry:$VERSION-amd64" "$registry:$VERSION-arm64"
           done
-          docker buildx imagetools create --tag "$registry:$VERSION" \
-            "$registry:$VERSION-amd64" "$registry:$VERSION-arm64"
-          cat SHA256SUMS-amd64 SHA256SUMS-arm64 > release/SHA256SUMS
+          cat SHA256SUMS-amd64 SHA256SUMS-arm64 SHA256SUMS-desktop-amd64 SHA256SUMS-desktop-arm64 > release/SHA256SUMS
           gh release upload "$VERSION" release/*

@@ -80,6 +80,7 @@ type Driver interface {
 // generated name and the default resources.
 type CreateRequest struct {
 	Name     string `json:"name,omitempty"`
+	Image    string `json:"image,omitempty"`
 	CPUs     int    `json:"cpu,omitempty"`
 	MemoryMB int    `json:"mem_mb,omitempty"`
 	DiskGB   int    `json:"disk_gb,omitempty"`
@@ -249,6 +250,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("POST /v1/sandboxes/{name}/snapshot", s.route(s.backendOnly(s.snapshot)))
 	mux.HandleFunc("GET /v1/snapshots", s.backendOnly(s.listSnapshots))
 	mux.HandleFunc("DELETE /v1/snapshots/{name}", s.backendOnly(s.removeSnapshot))
+	mux.HandleFunc("POST /v1/sandboxes/{name}/desktop", s.route(s.backendOnly(s.desktop)))
+	mux.HandleFunc("GET /v1/sandboxes/{name}/desktop", s.route(s.backendOnly(s.desktop)))
+	mux.HandleFunc("/v1/sandboxes/{name}/desktop/{path...}", s.route(s.backendOnly(s.desktop)))
 	mux.HandleFunc("GET /v1/sandboxes/{name}/exec", s.audit("sandbox.exec", s.route(s.backendOnly(s.exec))))
 	mux.HandleFunc("/v1/ports/{name}/{port}/{path...}", s.route(s.backendOnly(s.ports)))
 	mux.HandleFunc("POST /v1/exposes", s.audit("sandbox.expose", s.createExpose))
@@ -369,7 +373,15 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid restart policy %q: use always or no", req.Restart))
 		return
 	}
-	spec, err := (backend.Spec{Name: req.Name, CPUs: req.CPUs, MemoryMB: req.MemoryMB, DiskGB: req.DiskGB}).WithDefaults()
+	if req.Image != "" && req.Image != "base" && req.Image != "desktop" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid image %q: use base or desktop", req.Image))
+		return
+	}
+	if req.Image != "" && req.From != "" {
+		writeError(w, http.StatusBadRequest, errors.New("image and snapshot cannot be combined"))
+		return
+	}
+	spec, err := (backend.Spec{Name: req.Name, Image: req.Image, CPUs: req.CPUs, MemoryMB: req.MemoryMB, DiskGB: req.DiskGB}).WithDefaults()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -407,6 +419,9 @@ func (s *server) create(w http.ResponseWriter, r *http.Request) {
 	sb, err := s.st.GetByName(ctx, req.Name)
 	status := http.StatusOK
 	switch {
+	case err == nil && req.Image != "" && req.Image != sb.Spec.Image:
+		writeError(w, http.StatusConflict, fmt.Errorf("sandbox %q already exists with a different image", req.Name))
+		return
 	case err == nil && req.From != "":
 		writeError(w, http.StatusConflict, fmt.Errorf("sandbox %q already exists: a snapshot can only start a new sandbox", req.Name))
 		return

@@ -17,7 +17,7 @@ const WarmID = "base"
 // WarmSpec is the only configuration cached. Other sizes and named disk
 // snapshots cold-boot: saved memory must exactly match the disk and VM size.
 func WarmSpec(s Spec) bool {
-	return s.From == "" && s.CPUs == DefaultCPUs && s.MemoryMB == DefaultMemoryMB && s.DiskGB == DefaultDiskGB
+	return (s.Image == "" || s.Image == "base") && s.From == "" && s.CPUs == DefaultCPUs && s.MemoryMB == DefaultMemoryMB && s.DiskGB == DefaultDiskGB
 }
 
 // PrepareWarm boots and pauses a private base VM, or reuses its complete cache.

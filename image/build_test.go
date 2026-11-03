@@ -36,7 +36,7 @@ func buildCommand(t *testing.T, dir, version, jobs, revision string, args ...str
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"),
 		"GIT_CEILING_DIRECTORIES="+dir, "IMAGE_VERSION="+version, "JOBS="+jobs,
-		"IMAGE_REVISION="+revision, "OUTPUT_DIR="+filepath.Join(dir, "out"),
+		"IMAGE_REVISION="+revision, "IMAGE_VARIANT=base", "OUTPUT_DIR="+filepath.Join(dir, "out"),
 		"MARKER="+filepath.Join(dir, "contacted-docker"))
 	return cmd
 }
@@ -144,5 +144,31 @@ func TestBuildRevisionMetadata(t *testing.T) {
 				t.Fatalf("failed build left partial artifacts: %v (%v)", files, err)
 			}
 		})
+	}
+}
+
+func TestDesktopBuildSelection(t *testing.T) {
+	dir := buildSource(t)
+	stub := `#!/bin/sh
+case "$*" in
+'buildx version'|info) exit 0 ;;
+esac
+printf '%s\n' "$@" > "$MARKER"
+exit 1
+`
+	writeTestFile(t, filepath.Join(dir, "docker"), stub, 0755)
+	cmd := buildCommand(t, dir, "desktop-dev", "2", strings.Repeat("a", 40), "arm64")
+	cmd.Env = append(cmd.Env, "IMAGE_VARIANT=desktop")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("stub should stop the build")
+	}
+	out, err := os.ReadFile(filepath.Join(dir, "contacted-docker"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"IMAGE_VARIANT=desktop", "desktop", "boxpool-desktop:desktop-dev-arm64"} {
+		if !strings.Contains("\n"+string(out), "\n"+want+"\n") {
+			t.Fatalf("missing %s in %s", want, out)
+		}
 	}
 }
