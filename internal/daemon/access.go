@@ -169,7 +169,7 @@ func (s *server) remote(api http.Handler) http.HandlerFunc {
 			}
 		}()
 		defer func() { cancel(nil); <-done }() // before Run closes the store
-		r = r.WithContext(ctx)
+		r = r.WithContext(context.WithValue(ctx, auditActorKey{}, tok.ID()))
 		scopeErr := allowed(tok, r)
 		if err := context.Cause(ctx); err != nil {
 			w.Header().Set("Connection", "close") // do not drain an interrupted upload
@@ -210,6 +210,9 @@ func writeTokenError(w http.ResponseWriter, err error) {
 func allowed(tok store.AccessToken, r *http.Request) error {
 	if tok.Scope == "expose" {
 		return errors.New("an expose token only opens exposed URLs")
+	}
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/login" {
+		return nil
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.EscapedPath(), "/v1/"), "/")
 	if r.Method == http.MethodGet && len(parts) == 1 && (parts[0] == "health" || parts[0] == "info") {

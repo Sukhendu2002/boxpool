@@ -68,6 +68,7 @@ boxpool token create --scope cli     # on the head: an access token for login
 boxpool login <head> <token>         # from any machine: commands go to that head
 boxpool token ls      # on the head: access tokens and when each was last used
 boxpool token revoke <id>            # it stops working within seconds
+boxpool audit         # on the head: who created, ran, exposed or removed what
 boxpool node label gpu,always-on     # labels sh --node picks machines by
 boxpool promote       # in a pool of two whose head is gone: become the head
 boxpool sh            # open a shell in a new sandbox
@@ -121,6 +122,18 @@ requires a token without `--sandbox`. `expose` tokens only open the URLs
 `boxpool expose` makes and cannot run commands. Tokens are stored
 hashed on the head and are not replicated: after a failover, create new
 ones on the new head.
+
+Run `boxpool audit` on the head to see successful sandbox creates, removals,
+exec sessions, exposures, exposed-URL accesses, token creation/revocation and
+logins, newest first. Each entry has a UTC time, the caller's token ID (or
+`local` for the local socket, `public` for a public URL), an action and a
+target. `boxpool audit --json` prints records for scripts; `--limit 1000`
+shows more than the default 100, and `--before <event ID>` reads older pages.
+It always uses the local daemon, even after `login`; remote scoped tokens
+cannot read the log. Events stay in the head's SQLite database for 90 days
+and survive sandbox deletion and token revocation. They are not replicated.
+Command text, token secrets, app paths and URL queries are not recorded.
+See [audit guarantees and limits](docs/security.md#audit-log).
 
 To preview a web app from a phone, run `boxpool expose <sandbox> <port>` on
 the head. It needs Tailscale on the head, with MagicDNS and HTTPS

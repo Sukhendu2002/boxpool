@@ -194,7 +194,11 @@ func (s *server) removeExpose(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err == nil && e.TokenID != "" {
-		if err = s.st.RevokeAccessToken(ctx, e.TokenID); errors.Is(err, store.ErrTokenInvalid) {
+		err = s.st.RevokeAccessToken(ctx, e.TokenID)
+		switch {
+		case err == nil:
+			addAuditEvent(w, "token.revoke", e.TokenID)
+		case errors.Is(err, store.ErrTokenInvalid):
 			err = nil // revoked by hand already
 		}
 	}
@@ -282,8 +286,9 @@ func (s *server) exposeHandler(e store.Expose, appCookies *exposeCookies) http.H
 	cookie := cookiePrefix + strconv.Itoa(e.Port)
 	prefix := "/v1/ports/" + e.Sandbox + "/" + strconv.Itoa(e.SandboxPort)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		actor, secret, fromQuery := "public", "", false
 		if !e.Public {
-			secret, fromQuery := r.URL.Query().Get(tokenParam), true
+			secret, fromQuery = r.URL.Query().Get(tokenParam), true
 			if secret == "" {
 				fromQuery = false
 				if c, err := r.Cookie(cookie); err == nil {
@@ -294,20 +299,27 @@ func (s *server) exposeHandler(e store.Expose, appCookies *exposeCookies) http.H
 				http.Error(w, "boxpool: "+err.Error(), http.StatusUnauthorized)
 				return
 			}
-			if fromQuery {
-				// Swap the token for a cookie and take it out of the address
-				// bar. One leading slash, so the redirect stays on this host.
-				http.SetCookie(w, &http.Cookie{Name: cookie, Value: secret, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
-				q := r.URL.Query()
-				q.Del(tokenParam)
-				loc := "/" + strings.TrimLeft(r.URL.EscapedPath(), "/")
-				if len(q) > 0 {
-					loc += "?" + q.Encode()
-				}
-				w.Header().Set("Location", loc)
-				w.WriteHeader(http.StatusSeeOther)
-				return
+			at, _ := auth.ParseAccessToken(secret) // checked above
+			actor = at.Hash()[:store.AccessIDLen]
+		}
+		r = r.WithContext(context.WithValue(r.Context(), auditActorKey{}, actor))
+		if err := s.recordAudit(r, "sandbox.access", net.JoinHostPort(e.Sandbox, strconv.Itoa(e.SandboxPort))); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if fromQuery {
+			// Swap the token for a cookie and take it out of the address
+			// bar. One leading slash, so the redirect stays on this host.
+			http.SetCookie(w, &http.Cookie{Name: cookie, Value: secret, Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+			q := r.URL.Query()
+			q.Del(tokenParam)
+			loc := "/" + strings.TrimLeft(r.URL.EscapedPath(), "/")
+			if len(q) > 0 {
+				loc += "?" + q.Encode()
 			}
+			w.Header().Set("Location", loc)
+			w.WriteHeader(http.StatusSeeOther)
+			return
 		}
 		appCookies.open(r)
 		// Translate only this expose's same-origin requests. Foreign origins

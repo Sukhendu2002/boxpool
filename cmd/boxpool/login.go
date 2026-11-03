@@ -83,7 +83,7 @@ func login(args []string) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	if err := c.Health(ctx); err != nil {
+	if err := c.Login(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "boxpool login: %s: %v\n", head, err)
 		return 1
 	}
