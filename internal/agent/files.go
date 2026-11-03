@@ -174,10 +174,8 @@ func putFiles(w http.ResponseWriter, r *http.Request) {
 // be real directories, never symlinks, and an existing entry is unlinked,
 // not written through. Symlinks themselves may point anywhere.
 func ExtractTar(r io.Reader, dest string, check func(*tar.Header) error) error {
-	// Files and directories are created through root, so the kernel keeps
-	// them in dest even if the checks below missed a way out.
-	// shortcut: symlinks, modes and times are set by path, because Go 1.24's
-	// os.Root cannot; move them onto root once go.mod reaches 1.25.
+	// Keep all filesystem operations attached to the opened destination,
+	// including removals, symlinks and metadata after a concurrent rename.
 	root, err := os.OpenRoot(dest)
 	if err != nil {
 		return err
@@ -200,7 +198,7 @@ func ExtractTar(r io.Reader, dest string, check func(*tar.Header) error) error {
 				return fmt.Errorf("entry %q: %w", last, err)
 			}
 		}
-		if err := extractEntry(tr, root, dest, h); err != nil {
+		if err := extractEntry(tr, root, h); err != nil {
 			return fmt.Errorf("entry %q: %w", h.Name, err)
 		}
 		if h.Typeflag == tar.TypeDir {
@@ -219,9 +217,9 @@ func ExtractTar(r io.Reader, dest string, check func(*tar.Header) error) error {
 		return len(names[i]) > len(names[j])
 	})
 	for _, name := range names {
-		_, p, err := entryPath(dest, name)
+		p, err := entryPath(root, name)
 		if err == nil {
-			err = setMetadata(p, dirs[name])
+			err = setMetadata(root, p, dirs[name])
 		}
 		if err != nil {
 			return fmt.Errorf("entry %q: %w", name, err)
@@ -230,45 +228,44 @@ func ExtractTar(r io.Reader, dest string, check func(*tar.Header) error) error {
 	return nil
 }
 
-// entryPath returns the archive name's path relative to dest and joined
-// to it, after creating missing parents and checking that every parent is
-// a directory.
-func entryPath(dest, name string) (rel, full string, err error) {
+// entryPath returns a path relative to root after creating missing parents
+// and checking that every parent is a directory.
+func entryPath(root *os.Root, name string) (rel string, err error) {
 	clean := path.Clean(name)
 	if name == "" || path.IsAbs(name) || clean == ".." || strings.HasPrefix(clean, "../") || !filepath.IsLocal(filepath.FromSlash(clean)) {
-		return "", "", errors.New("path escapes destination")
+		return "", errors.New("path escapes destination")
 	}
-	p := dest
+	p := "."
 	parts := strings.Split(clean, "/")
 	for _, part := range parts[:len(parts)-1] {
 		p = filepath.Join(p, part)
-		info, err := os.Lstat(p)
+		info, err := root.Lstat(p)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := os.Mkdir(p, 0755); err != nil {
-				return "", "", err
+			if err := root.Mkdir(p, 0755); err != nil {
+				return "", err
 			}
 			continue
 		}
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		if !info.IsDir() {
-			return "", "", errors.New("parent is not a directory (symlink parents are not allowed)")
+			return "", errors.New("parent is not a directory (symlink parents are not allowed)")
 		}
 	}
 	rel = filepath.FromSlash(clean)
-	return rel, filepath.Join(dest, rel), nil
+	return rel, nil
 }
 
-func extractEntry(tr io.Reader, root *os.Root, dest string, h *tar.Header) error {
+func extractEntry(tr io.Reader, root *os.Root, h *tar.Header) error {
 	if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeDir && h.Typeflag != tar.TypeSymlink {
 		return fmt.Errorf("unsupported tar type %d", h.Typeflag)
 	}
-	rel, p, err := entryPath(dest, h.Name)
+	rel, err := entryPath(root, h.Name)
 	if err != nil {
 		return err
 	}
-	info, err := os.Lstat(p)
+	info, err := root.Lstat(rel)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -279,7 +276,7 @@ func extractEntry(tr io.Reader, root *os.Root, dest string, h *tar.Header) error
 		if err != nil {
 			return root.Mkdir(rel, 0700)
 		}
-		return os.Chmod(p, info.Mode()|0700) // allow contents before restoring the archived mode
+		return root.Chmod(rel, info.Mode()|0700) // allow contents before restoring the archived mode
 	}
 	if err == nil {
 		if info.IsDir() {
@@ -289,15 +286,15 @@ func extractEntry(tr io.Reader, root *os.Root, dest string, h *tar.Header) error
 			return errors.New("entry conflicts with an unsupported file type")
 		}
 		// Unlink first: neither symlinks nor existing hard links may redirect writes.
-		if err := os.Remove(p); err != nil {
+		if err := root.Remove(rel); err != nil {
 			return err
 		}
 	}
 	if h.Typeflag == tar.TypeSymlink {
-		if err := os.Symlink(h.Linkname, p); err != nil {
+		if err := root.Symlink(h.Linkname, rel); err != nil {
 			return err
 		}
-		return setSymlinkMetadata(p, h.FileInfo().Mode(), h.ModTime)
+		return setRootSymlinkMetadata(root, rel, h.FileInfo().Mode(), h.ModTime)
 	}
 	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -311,19 +308,19 @@ func extractEntry(tr io.Reader, root *os.Root, dest string, h *tar.Header) error
 	if closeErr != nil {
 		return closeErr
 	}
-	return setMetadata(p, h)
+	return setMetadata(root, rel, h)
 }
 
-func setMetadata(p string, h *tar.Header) error {
-	info, err := os.Lstat(p)
+func setMetadata(root *os.Root, p string, h *tar.Header) error {
+	info, err := root.Lstat(p)
 	if err != nil {
 		return err
 	}
 	if (h.Typeflag == tar.TypeDir && !info.IsDir()) || (h.Typeflag == tar.TypeReg && !info.Mode().IsRegular()) {
 		return errors.New("entry changed type before metadata was restored")
 	}
-	if err := os.Chmod(p, h.FileInfo().Mode()); err != nil {
+	if err := root.Chmod(p, h.FileInfo().Mode()); err != nil {
 		return err
 	}
-	return os.Chtimes(p, h.ModTime, h.ModTime)
+	return root.Chtimes(p, h.ModTime, h.ModTime)
 }

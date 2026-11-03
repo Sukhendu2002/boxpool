@@ -3,6 +3,7 @@ package docker
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +40,7 @@ type fakeEngine struct {
 	noAgent     bool // started containers serve no agent
 	listLag     int  // list calls after a stop that still list the container running, as Docker 28.0 can
 	exitOnStart bool // started containers exit at once
+	rootless    bool
 }
 
 type fakeNetwork struct {
@@ -154,6 +156,23 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/version":
 		json.NewEncoder(w).Encode(engineVersion{Version: "28.0.0", APIVersion: f.apiVersion, MinAPIVersion: "1.24", Os: "linux"})
+	case path == "/info":
+		var options []string
+		if f.rootless {
+			options = append(options, "name=rootless")
+		}
+		json.NewEncoder(w).Encode(map[string]any{"SecurityOptions": options})
+	case r.Method == "GET" && path == "/networks":
+		var filters map[string][]string
+		json.Unmarshal([]byte(r.URL.Query().Get("filters")), &filters)
+		var networks []networkInfo
+		for name, n := range f.networks {
+			k, v, _ := strings.Cut(filters["label"][0], "=")
+			if n.labels[k] == v {
+				networks = append(networks, networkInfo{ID: n.id, Name: name, Driver: "bridge", Labels: n.labels})
+			}
+		}
+		json.NewEncoder(w).Encode(networks)
 	case r.Method == "GET" && parts[0] == "images" && parts[len(parts)-1] == "json":
 		if !f.images[strings.TrimSuffix(strings.TrimPrefix(path, "/images/"), "/json")] {
 			errorf(w, 404, "No such image")
@@ -210,15 +229,16 @@ func (f *fakeEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			errorf(w, 409, "network with name %s already exists", n.Name)
 			return
 		}
-		f.networks[n.Name] = fakeNetwork{id: "net" + n.Name, labels: n.Labels}
-		json.NewEncoder(w).Encode(map[string]string{"Id": "net" + n.Name})
+		id := fakeNetworkID(n.Name)
+		f.networks[n.Name] = fakeNetwork{id: id, labels: n.Labels}
+		json.NewEncoder(w).Encode(map[string]string{"Id": id})
 	case parts[0] == "networks" && len(parts) == 2:
 		name, n, ok := f.network(parts[1])
 		switch {
 		case !ok:
 			errorf(w, 404, "network %s not found", parts[1])
 		case r.Method == "GET":
-			json.NewEncoder(w).Encode(map[string]any{"Id": n.id, "Name": name, "Labels": n.labels})
+			json.NewEncoder(w).Encode(map[string]any{"Id": n.id, "Name": name, "Labels": n.labels, "Driver": "bridge"})
 		case r.Method == "DELETE":
 			for _, c := range f.containers {
 				if c.cfg.HostConfig.NetworkMode == name {
@@ -415,3 +435,5 @@ func (f *fakeEngine) count(req string) int {
 	}
 	return n
 }
+
+func fakeNetworkID(name string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(name))) }

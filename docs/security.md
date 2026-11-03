@@ -4,6 +4,23 @@ What keeps a sandbox away from the host and from other sandboxes, per
 backend, and where that stops. Every sandbox runs its commands as root
 inside the guest, so a control the guest can change is not isolation.
 
+## Threat model
+
+Sandbox commands, network packets, file-transfer archives and sandbox web apps
+are untrusted, including commands run as guest root. The assets protected are
+host files and services, sibling sandbox state, pool credentials and access
+tokens. The host administrator, local daemon socket clients, Docker Engine,
+hypervisor, guest image supply chain and pool head are trusted. A compromised
+head controls its nodes; giving someone the local API socket grants the
+rights of its daemon user.
+
+Host-enforced VM/container boundaries and network filters separate guests;
+vsock or an inode-checked Unix socket carries the agent protocol. Remote API
+requests cross a TLS and token-scope boundary, and exposed apps cross a proxy
+and cookie boundary. A kernel exploit can escape a Docker container, which
+shares the host kernel. LAN services on other machines remain reachable over
+outbound NAT; boxpool does not impose an Internet-only egress policy.
+
 ## Compute
 
 | Backend | Boundary |
@@ -21,8 +38,8 @@ sandbox's own directory (Docker), never over the network.
 | --- | --- | --- | --- | --- |
 | Outbound IPv4 | NAT, when the daemon runs as root | NAT | None: no network device | NAT |
 | Sandbox to sandbox | Dropped by the host | Not forwarded by the host | None | Dropped by Docker's rules |
-| Sandbox to the host's services | Dropped by the host | Dropped by the host, except gateway DHCP/DNS | None | Reachable (#53) |
-| Who enforces it | nftables on the host, needs root | Host packet bridge and macOS | No network | Docker Engine |
+| Sandbox to the host's services | Dropped by the host | Dropped by the host, except gateway DHCP/DNS | None | Dropped by the host; embedded DNS exception below |
+| Who enforces it | nftables on the host, needs root | Host packet bridge and macOS | No network | Host nftables and Docker Engine; needs root |
 
 ### Linux (Firecracker)
 
@@ -31,6 +48,47 @@ forwards only a sandbox's outbound traffic and the replies, and drops
 everything else from taps: to other taps, to the host itself and with a
 spoofed source address. The guest cannot change host rules.
 `internal/backend/firecracker/doc.go` describes the ruleset and its limits.
+
+### Linux (Docker fallback)
+
+The daemon must run as root with `ip` and `nft` installed, using a local
+rootful Docker Engine in the same network namespace. `doctor` can still
+probe Engine access as a regular user; starting the Docker daemon backend
+without root fails with instructions to use `sudo boxpool up`.
+
+Every owned bridge gets a separate `inet bp_d_<hash>` nftables table before
+its container is created or started. Rules are also restored before adopting
+containers after a daemon restart. Network names and ownership labels must
+match, and the Engine's default `br-<network ID>` must exist locally as a
+bridge. Rootless engines and custom bridge names are refused. Failure to
+restore isolation stops verified running containers rather than adopting them
+unprotected. If Engine access itself fails, stopping them cannot be guaranteed;
+stop them administratively before retrying the daemon.
+
+The prerouting chain drops IPv6, spoofed IPv4 sources, and guest-initiated
+traffic addressed to the host **before Docker DNAT**. This covers gateway,
+LAN and VPN addresses, newly added host addresses, and published host ports.
+INPUT drops guest-initiated host traffic even on an established connection.
+Replies to connections initiated by the host are retained. FORWARD permits
+guest egress only through the host's outbound interface and accepts inbound
+reply traffic, keeping other bridges and Firecracker taps unreachable even
+if Docker's own isolation rules change. NAT and DNS/HTTP egress remain usable.
+The outbound interface is refreshed at Start; if routes change while guests
+run, traffic on another uplink fails closed until Start is called again.
+
+Docker's embedded resolver at `127.0.0.11` remains an infrastructure exception:
+Docker may forward DNS to a host-loopback resolver from its own host namespace.
+Guests can use that resolver for DNS queries; this is not a general socket
+forwarder. Administrators requiring no host DNS access must configure Docker
+with external upstream DNS servers. Ordinary guest connections to host port
+53 are filtered like other host services.
+
+Rules remain while the network exists, including while a sandbox is stopped
+or cleanup fails. Successful network removal deletes only its own table.
+Running containers survive daemon shutdown, so their rules must remain then.
+Do not flush the tables while guests run. Before upgrading, stop existing
+Docker sandboxes; the old daemon has no host-service isolation until the new
+one installs the rules. Reusing their disks/volumes needs no migration.
 
 ### macOS
 
@@ -321,3 +379,33 @@ who can reach port 7443 can attempt a handshake; restrict it with a host
 firewall if the network is untrusted. Join tokens name the head that
 issued them, so a token from before a failover does not reach the new
 head; issue a new one there.
+
+## Hardening checks (#53)
+
+`test/security/namespaces.sh` and `host-network.sh` are embedded by a shared
+host harness and executed as guest root by the Docker and Firecracker Linux
+integration jobs. They check host sockets/devices and host-filesystem markers,
+privileged Docker mount/raw-socket attempts, capability/seccomp settings,
+proc/sys exposure, TCP and UDP traffic to all current host IPv4 addresses and
+gateways, plus DNS and HTTP positive controls. VM root can legitimately mount
+and use raw sockets inside its own kernel; VM checks assert a different kernel
+boot ID and no access to the host marker instead. Docker also tests peer
+isolation, host-initiated TCP, restart adoption and the Unix-socket symlink
+attack. macOS's existing host-network integration and packet fuzz tests cover
+its separate host packet bridge.
+
+`FuzzFileUploadPaths` exercises the agent HTTP upload handler with traversal,
+absolute names and symlink targets. File contents, removals, symlinks and
+metadata use the opened destination directory, even if its name is replaced
+concurrently; `TestExtractTarDestinationReplaced` checks that regression for
+files, directories and symlinks. Extraction preserves normal modes, nanosecond
+timestamps and dangling symlinks. Downloads may include arbitrary symlink
+targets as links, but extraction never follows them outside its destination.
+
+The #53 source review also covered exposed-port routing, origin translation,
+app-cookie isolation, token parsing/scopes and revocation. Existing regression
+tests cover those controls. Exposed apps share a browser site: apps must defend
+against CSRF from sibling ports, and an already-open exposed WebSocket remains
+open after token revocation, as described above. These are documented v1 trust
+limits, not guarantees provided by guest network filtering. This review is not
+the external audit planned for M7.

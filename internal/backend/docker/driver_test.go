@@ -232,7 +232,7 @@ func TestCreateRollback(t *testing.T) {
 		}, want: "injected failure", left: 1},
 		{name: "network cleanup fails", setup: func(f *fakeEngine, name string, _ context.CancelFunc) {
 			f.lose["POST /networks/create"] = true
-			f.fail["DELETE /networks/net"+name] = 500
+			f.fail["DELETE /networks/"+fakeNetworkID(name)] = 500
 		}, want: "injected failure", left: 1},
 		// Another's resource that appears after the check is never removed.
 		{name: "foreign volume appears", setup: func(f *fakeEngine, name string, _ context.CancelFunc) {

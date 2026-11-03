@@ -11,3 +11,7 @@ import (
 func setSymlinkMetadata(name string, mode os.FileMode, mtime time.Time) error {
 	return errors.New("symlink metadata is only supported on Linux and macOS")
 }
+
+func setRootSymlinkMetadata(root *os.Root, name string, mode os.FileMode, mtime time.Time) error {
+	return errors.New("symlink metadata is only supported on Linux and macOS")
+}

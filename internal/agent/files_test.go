@@ -488,6 +488,48 @@ func TestTarDotDirectoryMetadata(t *testing.T) {
 	}
 }
 
+// A caller can rename or replace the destination after ExtractTar opens it.
+// Contents, unlinks, symlinks and metadata must all stay in the opened tree.
+func TestExtractTarDestinationReplaced(t *testing.T) {
+	for _, kind := range []byte{tar.TypeReg, tar.TypeDir, tar.TypeSymlink} {
+		t.Run(string(kind), func(t *testing.T) {
+			base := t.TempDir()
+			dest, moved, outside := filepath.Join(base, "dest"), filepath.Join(base, "moved"), filepath.Join(base, "outside")
+			for _, p := range []string{dest, outside} {
+				if err := os.Mkdir(p, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			canary := filepath.Join(outside, "entry")
+			if err := os.WriteFile(canary, []byte("untouched"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			h := &tar.Header{Name: "entry", Typeflag: kind, Mode: 0755, Linkname: "missing", ModTime: time.Unix(1700000000, 0)}
+			if kind == tar.TypeReg {
+				h.Size = 1
+			}
+			err := ExtractTar(tarBody(t, h), dest, func(*tar.Header) error {
+				if err := os.Rename(dest, moved); err != nil {
+					return err
+				}
+				return os.Symlink(outside, dest)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b, err := os.ReadFile(canary); err != nil || string(b) != "untouched" {
+				t.Fatalf("destination replacement escaped: %q, %v", b, err)
+			}
+			if fi, err := os.Stat(canary); err != nil || fi.Mode().Perm() != 0600 {
+				t.Fatalf("outside metadata changed: %v, %v", fi, err)
+			}
+			if _, err := os.Lstat(filepath.Join(moved, "entry")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestDownloadRejectsUnsupportedEntries(t *testing.T) {
 	c := serve(t)
 	sock := tempSock(t)
