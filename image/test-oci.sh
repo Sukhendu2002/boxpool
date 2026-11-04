@@ -3,6 +3,12 @@
 set -euo pipefail
 [[ $# == 2 ]] || { echo 'usage: image/test-oci.sh <image> <expected-version>' >&2; exit 1; }
 image=$1 version=$2
+repo=$(cd "$(dirname "$0")/.." && pwd)
+# Container startup bypasses /sbin/init. Check the exact VM entrypoint too,
+# otherwise a package replacing it can leave a passing OCI image that never
+# starts the agent when booted as an ext4 VM.
+docker run --rm -i --entrypoint /bin/sh "$image" -ec \
+    'test ! -L /sbin/init; test -x /sbin/init; cmp /sbin/init -' < "$repo/image/init"
 [[ $(docker run --rm "$image" cat /etc/boxpool-image) == "$version" ]]
 docker run --rm --network none "$image" sh -ec 'claude --version; codex --version; gemini --version'
 cid=$(docker run -d --network none "$image")
