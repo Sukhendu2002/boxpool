@@ -104,7 +104,7 @@ jobs:
           IMAGE_VERSION: ${{ steps.version.outputs.value }}
         run: image/test-desktop.sh "boxpool-desktop:$IMAGE_VERSION-${{ matrix.arch }}"
       - name: Grant amd64 runner access to KVM
-        if: matrix.arch == 'amd64' && matrix.variant == 'base'
+        if: matrix.arch == 'amd64'
         run: |
           test -c /dev/kvm
           sudo groupadd -f kvm
@@ -112,9 +112,10 @@ jobs:
           sudo chgrp kvm /dev/kvm
           sudo chmod 0660 /dev/kvm
       - name: Boot the built amd64 image and exercise vsock agent
-        if: matrix.arch == 'amd64' && matrix.variant == 'base'
+        if: matrix.arch == 'amd64'
         env:
           IMAGE_VERSION: ${{ steps.version.outputs.value }}
+          IMAGE_VARIANT: ${{ matrix.variant }}
           OUTPUT_DIR: ${{ runner.temp }}/boxpool-image-${{ matrix.variant }}-${{ matrix.arch }}
         run: |
           # Expand exported variables in the child shell started by sg.

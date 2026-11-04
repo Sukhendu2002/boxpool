@@ -223,6 +223,11 @@ image/test-oci.sh boxpool-image:v0.1.0-amd64 v0.1.0
 
 ## Firecracker acceptance check
 
+Both base and desktop amd64 artifacts must pass this VM boot check before
+publication. OCI checks also compare `/sbin/init` with the checked-in VM
+entrypoint: desktop package installation must not replace it with systemd.
+For desktop artifacts, set `IMAGE_VARIANT=desktop` when running the smoke.
+
 On Linux with readable/writable `/dev/kvm`, Go 1.24+, Python 3, bash,
 curl, tar, coreutils, zstd and the built artifacts:
 

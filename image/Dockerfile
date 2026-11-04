@@ -79,7 +79,11 @@ FROM userland AS desktop
 RUN apt-get -o APT::Update::Error-Mode=any update \
     && apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools \
        openbox chromium fonts-dejavu-core x11-utils x11-apps xdotool \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /sbin/init
+# Desktop dependencies install systemd-sysv and replace /sbin/init. Remove
+# its symlink before restoring our VM entrypoint; OCI starts tini directly.
+COPY --chmod=0755 image/init /sbin/init
 COPY --chmod=0755 image/desktop /usr/local/bin/boxpool-desktop
 ENV DISPLAY=:0
 

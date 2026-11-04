@@ -12,6 +12,11 @@ done
 # Resolve current once so a concurrent build cannot mix generations mid-check.
 dir=$(cd "$1" && pwd -P)
 version=$2
+case ${IMAGE_VARIANT:-base} in
+base) suffix= ;;
+desktop) suffix=-desktop ;;
+*) die 'IMAGE_VARIANT must be base or desktop' ;;
+esac
 case $(uname -m) in
 x86_64)
     arch=amd64; machine=x86_64
@@ -24,7 +29,7 @@ aarch64)
 *) die 'unsupported host architecture' ;;
 esac
 repo=$(cd "$(dirname "$0")/.." && pwd)
-(cd "$dir" && sha256sum -c "SHA256SUMS-$arch")
+(cd "$dir" && sha256sum -c "SHA256SUMS$suffix-$arch")
 cache=${CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/boxpool-bench-boot}
 mkdir -p "$cache"
 # Same release, upstream release checksum and cache path as bench-boot.sh.
@@ -57,7 +62,7 @@ on_error() {
 trap on_error ERR
 tar -xzf "$archive" -C "$work"
 fc=$work/release-$fc_version-$machine/firecracker-$fc_version-$machine
-zstd -d "$dir/rootfs-$arch.ext4.zst" -o "$work/rootfs.ext4"
+zstd -d "$dir/rootfs$suffix-$arch.ext4.zst" -o "$work/rootfs.ext4"
 cd "$repo"
 go build -o "$work/probe" ./image/smoke
 # Python only serializes paths safely into Firecracker's JSON config.
@@ -76,4 +81,4 @@ timeout --signal=TERM --kill-after=2 45 "$fc" --no-api --enable-pci --config-fil
     --log-path "$work/firecracker.log" --level Info </dev/null >"$work/console.log" 2>&1 &
 pid=$!
 "$work/probe" -socket "$work/vsock.sock" -version "$version"
-echo "Firecracker $fc_version: built $arch image smoke passed"
+echo "Firecracker $fc_version: built ${IMAGE_VARIANT:-base} $arch image smoke passed"
