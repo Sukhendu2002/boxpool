@@ -68,12 +68,21 @@ JS
 docker exec "$cid" sh -ec '
     test -S /run/boxpool/desktop.vnc
     DISPLAY=:0 xdpyinfo >/dev/null
+    screenshot=$(mktemp /tmp/boxpool-desktop.XXXXXX)
+    trap '\''rm -f "$screenshot"'\'' EXIT
+    # Chromium/Openbox can replace windows while xwd queries their attributes.
+    # Retry that startup race, but require an actual nonempty capture to pass.
     i=0
-    until DISPLAY=:0 xdotool search --onlyvisible --class chromium 2>/dev/null; do
-        i=$((i+1)); test "$i" -lt 100; sleep 0.1
+    until DISPLAY=:0 xdotool search --onlyvisible --class chromium >/dev/null 2>&1 \
+        && DISPLAY=:0 xwd -root -silent -out "$screenshot" \
+        && test -s "$screenshot"; do
+        i=$((i+1))
+        if test "$i" -ge 100; then
+            echo "desktop did not produce a Chromium screenshot" >&2
+            exit 1
+        fi
+        sleep 0.1
     done
-    DISPLAY=:0 xwd -root -silent -out /tmp/desktop.xwd
-    test -s /tmp/desktop.xwd
     test "$(tigervncconfig -display :0 -get AcceptKeyEvents)" = 0
     test "$(tigervncconfig -display :0 -get AcceptPointerEvents)" = 0
     tigervncconfig -display :0 -set AcceptKeyEvents=1 AcceptPointerEvents=1
