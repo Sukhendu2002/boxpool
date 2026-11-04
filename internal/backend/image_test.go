@@ -10,6 +10,11 @@ import (
 
 func TestImageRootfs(t *testing.T) {
 	base := filepath.Join(t.TempDir(), "rootfs-arm64.ext4")
+	// An old manually installed default must not shadow the new release pin.
+	desktop := filepath.Join(filepath.Dir(base), "rootfs-desktop.ext4")
+	if err := os.WriteFile(desktop, []byte("legacy desktop"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("BOXPOOL_DESKTOP_ROOTFS", "")
 	ctx := context.Background()
 	calls := 0
@@ -31,7 +36,6 @@ func TestImageRootfs(t *testing.T) {
 	if err != nil || got != "pinned-desktop" {
 		t.Fatalf("pinned desktop: %s %v", got, err)
 	}
-	desktop := filepath.Join(filepath.Dir(base), "rootfs-desktop.ext4")
 	if err := os.WriteFile(desktop, []byte("desktop disk"), 0600); err != nil {
 		t.Fatal(err)
 	}

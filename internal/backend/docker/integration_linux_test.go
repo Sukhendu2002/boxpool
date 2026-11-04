@@ -126,7 +126,16 @@ func TestIntegrationDesktop(t *testing.T) {
 	if err != nil || view.Display != ":0" || view.HumanControl {
 		t.Fatalf("start desktop: %+v, %v", view, err)
 	}
-	t.Logf("desktop %+v, %s", view, s.run(ctx, "DISPLAY=:0 xwd -root -silent > /tmp/screen.xwd && test -s /tmp/screen.xwd && chromium --version"))
+	t.Logf("desktop %+v, %s", view, s.run(ctx, `set -eu
+i=0
+until DISPLAY=:0 xdotool search --onlyvisible --class chromium 2>/dev/null; do
+    i=$((i+1)); test "$i" -lt 100; sleep 0.1
+done
+DISPLAY=:0 xwd -root -silent > /tmp/screen.xwd
+test -s /tmp/screen.xwd
+test "$(tigervncconfig -display :0 -get AcceptKeyEvents)" = 0
+test "$(tigervncconfig -display :0 -get AcceptPointerEvents)" = 0
+chromium --version`))
 }
 
 // try runs a shell script in the sandbox and returns its exit code and
