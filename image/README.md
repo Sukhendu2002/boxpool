@@ -153,6 +153,9 @@ building these changes does not replace released images or their digest.
 
 Snapshot downloads use three file retries, 30-second HTTP/HTTPS connection
 and idle-transfer timeouts, and independent requests without pipelining.
+Updates and archive downloads retry up to three times, waiting 10 then 20
+seconds and reusing downloaded archives. Package installation runs once,
+with further downloads disabled, only after all archives verify.
 Build-time APT updates have a five-minute command deadline; installs have
 ten minutes, with five seconds to terminate before a forced kill. Any
 remaining failure stops that build and prevents publication. TLS, Release
