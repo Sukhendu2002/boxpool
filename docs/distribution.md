@@ -7,10 +7,10 @@ artifacts and their SHA-256 manifest. PRs build the same packages without
 publishing. Packages and the formula are also attached to tag releases,
 so registry setup does not block binary publication.
 
-Public rollout is pending: #48 (the phone-access milestone gate) is still
-open, and the domain, first npm publication and Homebrew tap must be set
-up before advertising working public install commands. A repository PR
-cannot provision the domain registrar or npm account.
+The public installer, npm package and Homebrew tap are available; see the
+[user quickstart](../README.md). This page is the maintainer's setup and
+release runbook. The bootstrap steps below describe provisioning for a
+new registry/domain or replacement infrastructure, not user prerequisites.
 
 ## Domain and Go imports
 

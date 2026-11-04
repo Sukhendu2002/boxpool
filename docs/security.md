@@ -1,8 +1,59 @@
-# Sandbox isolation
+# Security and trust model
 
 What keeps a sandbox away from the host and from other sandboxes, per
 backend, and where that stops. Every sandbox runs its commands as root
 inside the guest, so a control the guest can change is not isolation.
+
+## Trust at a glance
+
+Boxpool is intended for a pool of machines owned by people who trust one
+another as administrators. Guest root is untrusted; the daemon, head,
+replicas, hypervisor/Engine and image publishers are trusted. It is not a
+multi-tenant service for mutually hostile host owners.
+
+| Access you give someone | What you trust them with |
+| --- | --- |
+| Local daemon socket | All daemon operations and its OS privileges; root on the standard Linux service |
+| Join token | One new pool member, until used, revoked or expired; do not give it to an untrusted host owner |
+| Pool head or replica | Control of pool nodes; replicas receive the pool CA private key |
+| `cli` / `api` access token | Sandbox operations, optionally restricted by sandbox name and expiry; no token management or audit access |
+| App expose link | Access to that app; `--public` removes the token requirement for everyone who can reach it on the tailnet |
+| Desktop link | View and take control of that desktop, until expiry or revocation |
+
+Join tokens are single-use with a default one-hour lifetime. Access tokens
+never expire unless `--ttl` is set. Both carry the head CA's fingerprint
+for TLS pinning; keep whole tokens and secret URLs private. The head stores
+access-token hashes, while `login` stores a usable token in the current
+user's private `login.json`. Use `token ls` and `token revoke <id>` locally
+on the head to manage access. Expose tokens cannot run sandbox commands.
+
+Pool TLS listens on TCP 7443 on all interfaces. Use a trusted LAN or
+system Tailscale/Headscale routing and restrict access to pool peers and
+clients. Tailnet membership alone does not grant Boxpool API access;
+Boxpool still checks tokens or node certificates. A node certificate
+cannot currently be revoked, and a former replica retains the CA key:
+remove trust by rebuilding the pool with fresh credentials, not just by
+revoking its original join token.
+
+VMs have a separate guest kernel; Docker shares the host kernel and is a
+weaker boundary. Network isolation blocks host/sibling access as detailed
+below, but outbound NAT can reach **other machines on your LAN**. Boxpool
+has no Internet-only egress policy. Give guests only the credentials and
+network access their tasks require. On Docker, work persists only in
+`/root`, and the disk budget is advisory.
+
+State directories contain private CA keys, sandbox disks and guest
+credentials. Keep backups private. SHA-256 checks detect download
+corruption but are not an independent publisher signature. macOS releases
+are ad-hoc signed, not notarized. See [installation verification](guide.md#installation-options).
+
+Exposed apps on different ports share a browser site: apps must enforce
+CSRF protection against sibling ports. JavaScript cookie APIs are
+unsupported; server-side cookie sessions work. App WebSockets already
+open at token revocation stay open until closed; removing the expose
+closes them. Desktop viewers recheck access every two seconds. The
+[audit history](#audit-log) is local to the head and is not tamper-proof
+against its administrator.
 
 ## Threat model
 
@@ -241,8 +292,10 @@ taken, the daemon logs a warning and runs without it.
   certificate. It needs an unused, unexpired join token
   (`boxpool token create --join`); the head stores only the SHA-256 of its
   secret.
-- Every other endpoint needs a client certificate signed by the head CA.
+- Node/pool endpoints need a client certificate signed by the head CA.
   A certificate from another CA, or an expired one, fails the handshake.
+  The remote sandbox API also accepts scoped bearer access tokens from
+  `token create --scope cli|api`; those do not grant pool administration.
 - A joining node makes its key itself and sends only a certificate
   request. It trusts the head only if the head's chain contains the CA
   whose SHA-256 is in the token, so a token pins the head.

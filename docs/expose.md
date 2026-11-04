@@ -1,7 +1,9 @@
 # Preview an app from a phone
 
-Run `boxpool expose <sandbox> <port>` on the head. The sandbox can run on
-any node. A phone on mobile data needs the Tailscale app, signed into the
+Run `boxpool expose <sandbox> <port>` on the head. For the standard Linux
+service, prefix every head-side Boxpool command below with
+`sudo /usr/local/bin/boxpool` in place of `boxpool`; on macOS run as
+yourself. The sandbox can run on any node. A phone on mobile data needs the Tailscale app, signed into the
 same tailnet and connected. `--public` removes Boxpool's token requirement;
 the URL remains reachable only on the tailnet.
 
@@ -45,7 +47,16 @@ disks or containers. The currently pinned `v0.0.1-alpha.1` image predates
 that endpoint; it must be replaced before previews work with defaults.
 An old agent makes the preview answer 502 with an image-update message.
 
-Release and rollout checklist:
+For a user trying previews before the base pin is updated, follow the
+[desktop image installation](desktop.md#install-the-image-on-each-desktop-capable-node),
+then create a fresh sandbox with `boxpool sh --image desktop --name web`.
+That source-built image includes the current agent and Node.js; it can
+serve an app without starting its graphical desktop. In the check below,
+substitute `web` for `box`. This is optional image preparation, separate
+from the two-node quickstart. Do not modify default image checksums or
+reuse a disk from an old sandbox to enable the feature.
+
+For maintainers, the release and rollout checklist is:
 
 1. Merge the agent and expose changes into `main`, then tag a release using
    the [release workflow](development.md#releases). The binary workflow
