@@ -68,7 +68,7 @@ func TestIntegrationNetwork(t *testing.T) {
 		b := make([]byte, 6)
 		rand.Read(b)
 		id := hex.EncodeToString(b)
-		if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 1, MemoryMB: 256, DiskGB: 1}); err != nil {
+		if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 1, MemoryMB: 256, DiskGB: 3}); err != nil {
 			t.Fatal(err)
 		}
 		ids = append(ids, id)

@@ -23,7 +23,7 @@ const NoNetwork = "sandboxes have no network: the daemon is not running as root"
 func openDriver(ctx context.Context, dir string, info *Info, st *store.Store) (Driver, error) {
 	switch info.Backend {
 	case "firecracker":
-		slog.Info("fetching Firecracker and the guest image; the first time downloads about 60 MB")
+		slog.Info("fetching Firecracker and the guest image; the first time downloads about 360 MB")
 		start := time.Now()
 		paths, err := artifacts.Fetch(ctx, filepath.Join(dir, artifacts.DirName))
 		if err != nil {

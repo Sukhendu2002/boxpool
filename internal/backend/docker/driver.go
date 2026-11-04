@@ -130,7 +130,7 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (_ ba
 	if image == "desktop" {
 		image = os.Getenv("BOXPOOL_DESKTOP_IMAGE")
 		if image == "" {
-			return backend.Sandbox{}, fmt.Errorf("desktop image not configured: build image/ with IMAGE_VARIANT=desktop and set BOXPOOL_DESKTOP_IMAGE to its tagged image")
+			image = DefaultDesktopImage
 		}
 	}
 	if image == "" || image == "base" {

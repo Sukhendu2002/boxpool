@@ -176,17 +176,17 @@ Exiting a shell leaves the sandbox running. Reconnect with `boxpool sh hello`
 ### 5. Open an app or desktop (optional)
 
 App previews and desktops need Tailscale on the head and viewing device,
-MagicDNS and HTTPS certificates enabled, and a guest image with the new
-agent. **The default pinned `v0.0.1-alpha.1` image predates these features.**
-Updating the CLI does not update existing sandbox images.
+MagicDNS and HTTPS certificates enabled. Fresh sandboxes use the pinned
+`v0.1.1` guest image with preview support. Existing sandbox disks keep their
+old agent; back up their work and recreate them if an image update is needed.
 
 Follow [app preview and image setup](docs/expose.md), then start a server
 inside a sandbox and run `boxpool expose <sandbox> 8000` on the head.
 Open its secret HTTPS link on a tailnet-connected phone or laptop.
 `boxpool expose check` checks the head's Tailscale prerequisites.
 
-For a graphical browser, first follow [desktop image installation](docs/desktop.md),
-then run on the head:
+For a graphical browser, run on the head (the matching
+[desktop image](docs/desktop.md) is fetched automatically on first use):
 
 ```sh
 boxpool sh --image desktop --name browser

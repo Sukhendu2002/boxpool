@@ -55,7 +55,7 @@ func newNetTest(t *testing.T) *netTest {
 // start creates and starts a sandbox that the test removes at its end.
 func (n *netTest) start(id string) {
 	n.t.Helper()
-	n.startSpec(id, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1})
+	n.startSpec(id, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 3})
 }
 
 func (n *netTest) startSpec(id string, spec backend.Spec) {
@@ -506,7 +506,7 @@ func TestIntegrationNetworkLimit(t *testing.T) {
 		}
 		networks.Unlock()
 	}()
-	if _, err := n.d.Create(n.ctx, "limit", backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+	if _, err := n.d.Create(n.ctx, "limit", backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 3}); err != nil {
 		t.Fatal(err)
 	}
 	defer n.d.Remove(context.Background(), "limit")

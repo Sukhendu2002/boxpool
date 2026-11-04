@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestForPlatform(t *testing.T) {
@@ -281,6 +283,7 @@ func TestFetchReal(t *testing.T) {
 	t.Logf("fetched %+v", paths)
 
 	list, _ := forPlatform(runtime.GOOS, runtime.GOARCH)
+	dir = filepath.Dir(paths.Rootfs)
 	got, err := fetch(ctx, dir, http.DefaultClient, list)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("second run downloaded %v, %v", got, err)
@@ -295,4 +298,59 @@ func TestFetchReal(t *testing.T) {
 		t.Fatalf("after truncating %s downloaded %v, %v", paths.Kernel, got, err)
 	}
 	t.Logf("truncated %s was downloaded again", filepath.Base(paths.Kernel))
+}
+
+func TestImageUpgradeCache(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	// The old release unpacked into the top-level artifacts directory.
+	legacy := filepath.Join(dir, "rootfs-arm64.ext4")
+	if err := os.WriteFile(legacy, []byte("old agent"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer enc.Close()
+	base, desktop := enc.EncodeAll([]byte("new base agent"), nil), enc.EncodeAll([]byte("new desktop agent"), nil)
+	srv, hits := server(t, map[string][]byte{"kernel": []byte("kernel"), "rootfs-arm64.ext4.zst": base, "rootfs-desktop-arm64.ext4.zst": desktop}, nil)
+	a := func(name string, b []byte) artifact {
+		return artifact{name, srv.URL + "/" + name, sum(b), int64(len(b))}
+	}
+	p := platform{kernel: a("kernel", []byte("kernel")), rootfs: a("rootfs-arm64.ext4.zst", base), desktop: a("rootfs-desktop-arm64.ext4.zst", desktop)}
+	paths, err := fetchPlatform(ctx, dir, srv.Client(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(paths.Rootfs) != filepath.Join(dir, imageVersion) || hits[p.desktop.name].Load() != 0 {
+		t.Fatalf("base fetch: %+v; desktop downloads %d", paths, hits[p.desktop.name].Load())
+	}
+	root, err := Rootfs(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(root); string(b) != "new base agent" {
+		t.Fatalf("upgrade reused old rootfs: %q", b)
+	}
+	if b, _ := os.ReadFile(legacy); string(b) != "old agent" {
+		t.Fatalf("legacy rootfs modified: %q", b)
+	}
+	for range 2 {
+		path, err := desktopRootfs(ctx, filepath.Dir(root), srv.Client(), p.desktop)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(path); string(b) != "new desktop agent" {
+			t.Fatalf("desktop image: %q", b)
+		}
+	}
+	if hits[p.desktop.name].Load() != 1 {
+		t.Fatalf("desktop downloaded %d times", hits[p.desktop.name].Load())
+	}
+	// A bad download must never be unpacked, even on the lazy desktop path.
+	p.desktop.sha256 = sum([]byte("wrong checksum"))
+	if _, err := desktopRootfs(ctx, t.TempDir(), srv.Client(), p.desktop); err == nil {
+		t.Fatal("corrupt desktop accepted")
+	}
 }

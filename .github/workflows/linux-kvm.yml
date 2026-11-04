@@ -74,10 +74,11 @@ jobs:
           set -o pipefail
           # Expand RUNNER_TEMP in sg's child shell, with the new group access.
           # shellcheck disable=SC2016
-          (cd internal/backend/firecracker && sg kvm -c '"$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 15m -test.run "^TestIntegration(Pause|Warm)?$"') 2>&1 | tee "$RUNNER_TEMP/fc.log"
+          (cd internal/backend/firecracker && sg kvm -c '"$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 15m -test.run "^TestIntegration(Pause|Warm|Desktop)?$"') 2>&1 | tee "$RUNNER_TEMP/fc.log"
           grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/fc.log"
           grep -q '^--- PASS: TestIntegrationPause ' "$RUNNER_TEMP/fc.log"
           grep -q '^--- PASS: TestIntegrationWarm ' "$RUNNER_TEMP/fc.log"
+          grep -q '^--- PASS: TestIntegrationDesktop ' "$RUNNER_TEMP/fc.log"
           # shellcheck disable=SC2016
           (cd internal/daemon && sg kvm -c '"$RUNNER_TEMP/daemon.test" -test.v -test.count=1 -test.timeout 10m -test.run "^TestIntegrationSh$/^firecracker$"') 2>&1 | tee "$RUNNER_TEMP/daemon.log"
           grep -q -- '--- PASS: TestIntegrationSh/firecracker ' "$RUNNER_TEMP/daemon.log"

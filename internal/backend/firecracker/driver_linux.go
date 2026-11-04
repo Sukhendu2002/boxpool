@@ -189,7 +189,7 @@ func (d *Driver) Create(ctx context.Context, id string, spec backend.Spec) (back
 	if spec, err = spec.WithDefaults(); err != nil {
 		return backend.Sandbox{}, err
 	}
-	src, err := backend.ImageRootfs(d.rootfs, spec)
+	src, err := backend.ImageRootfs(ctx, d.rootfs, spec)
 	if err != nil {
 		return backend.Sandbox{}, err
 	}

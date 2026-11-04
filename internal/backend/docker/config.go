@@ -11,10 +11,13 @@ import (
 	"boxpool.run/boxpool/internal/backend"
 )
 
-// DefaultImage is the base guest image release v0.0.1-alpha.1, pinned by
+// DefaultImage is the base guest image release v0.1.1, pinned by
 // the digest of its two-architecture index, the same release as the
 // Firecracker artifacts.
-const DefaultImage = "ghcr.io/sukhendu2002/boxpool-image@sha256:747ea3a41c0dd069a535af68807ec03794b4876676bbc5aabbb71b0801301eba"
+const DefaultImage = "ghcr.io/sukhendu2002/boxpool-image@sha256:1df25000a2acd62f2c2aca7a7e49933958f1e51c3b1f674fdf98364d06902647"
+
+// DefaultDesktopImage pins the matching two-architecture desktop index.
+const DefaultDesktopImage = "ghcr.io/sukhendu2002/boxpool-desktop@sha256:bf323ea90d1d9692b064dd2e82352766820a0352a86978452e9f7daa66a57a2b"
 
 // Warning is what every entry point that picks or creates Docker sandboxes
 // shows: the fallback is weaker than the microVM backends.

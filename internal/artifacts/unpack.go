@@ -68,8 +68,7 @@ func decompress(zst string, f *os.File) error {
 const blockSize = 4096
 
 // writeSparse copies r to f and skips all-zero blocks, leaving holes. The
-// image is a 512 MiB ext4 file system holding far less data, and a sandbox's
-// copy keeps the holes.
+// ext4 images contain large unused regions; sandbox copies keep these holes.
 func writeSparse(f *os.File, r io.Reader) error {
 	var zero [blockSize]byte
 	isZero := func(b []byte) bool { return bytes.Equal(b, zero[:len(b)]) }

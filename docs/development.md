@@ -36,7 +36,7 @@ bin/boxpool daemon
 ```
 
 The first daemon start fetches the pinned arm64 kernel and rootfs (about
-45 MB); subsequent starts reuse them. `sh --timing` prints time to prompt.
+350 MB); subsequent starts reuse them. `sh --timing` prints time to prompt.
 APFS is required: each sandbox gets a copy-on-write `clonefile` disk.
 The daemon uses the same CPU, memory and disk admission as Linux; macOS
 available memory comes from `kern.memorystatus_level`. Guest ext4 grows
@@ -515,7 +515,7 @@ a `rootfs-<arch>.ext4.zst` in a directory of its own, for example one from
 
 ```sh
 CGO_ENABLED=0 go build -o /tmp/boxpool-agent ./cmd/boxpool-agent
-mkdir /tmp/img && cp --sparse=always ~/.cache/boxpool-test/artifacts/rootfs-amd64.ext4 /tmp/img/
+mkdir /tmp/img && cp --sparse=always ~/.cache/boxpool-test/artifacts/v0.1.1/rootfs-amd64.ext4 /tmp/img/
 debugfs -w -f - /tmp/img/rootfs-amd64.ext4 <<'EOF'
 cd /usr/local/bin
 rm boxpool-agent
@@ -662,8 +662,7 @@ protects future sparse growth and reflink copies at the cost of sometimes
 rejecting early. The cached image stays unchanged. `nproc` matches the CPU
 request; `/proc/meminfo` and `free -m` show usable guest RAM, slightly below
 the configured amount because of the guest kernel's reservations.
-Newly built images include `procps` for `free`; the pinned alpha.1 image
-predates that package, so read `/proc/meminfo` until a new image is released.
+The pinned `v0.1.1` image includes `procps` for `free`.
 
 Docker sets CPU quota, CPU affinity, memory limit and equal memory-plus-swap
 limit (no swap). `nproc` matches new containers' CPU requests. Its memory
@@ -686,7 +685,7 @@ Tests: `go test -race ./internal/resources ./internal/backend/...` covers
 defaults, capacity boundaries, memory pressure, stopped/legacy allocations,
 concurrent creates, restart accounting, rollback and removal. Linux also
 exercises real ext4 growth when e2fsprogs is installed. The existing
-Firecracker integration test requests 1 CPU, 512 MiB and 1 GiB and verifies
+Firecracker integration test requests 1 CPU, 512 MiB and 3 GiB and verifies
 agent-visible CPU, memory, block-device and filesystem sizes. The Docker
 integration test verifies 1 CPU/512 MiB in Engine inspect and from inside
 the memory/CPU cgroups. Both reject an excessive memory request before
