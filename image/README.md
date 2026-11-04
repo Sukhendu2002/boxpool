@@ -33,6 +33,14 @@ Docker retains reusable layers; failed builds clean only their own incomplete
 output directory. Complete generations are retained as described below. The
 script never prunes Docker caches.
 
+The GitHub-hosted image build and publish jobs remove the runner's unused
+Android, .NET and GHC SDK directories before downloading/building images.
+Desktop builds need space for BuildKit layers, the compressed VM disk,
+and both Docker's temporary export and the saved OCI archive at once.
+CI logs filesystem usage before/after reclamation and filesystem/inode and
+Docker usage at job exit, including on failure. This cleanup runs only in
+the hosted workflow; `image/build.sh` does not remove SDKs or caches.
+
 ```sh
 IMAGE_VERSION=v0.1.0 JOBS=4 image/build.sh amd64
 ```
