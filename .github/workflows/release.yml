@@ -10,6 +10,10 @@ on:
     paths:
       - '.github/workflows/release.yml'
       - 'scripts/vz.entitlements'
+      - 'scripts/prepare-distribution.py'
+      - 'scripts/install.sh'
+      - 'packaging/**'
+      - 'npm/**'
 
 permissions:
   contents: read
@@ -36,7 +40,7 @@ jobs:
             git merge-base --is-ancestor HEAD origin/main
             version=$TAG
           else
-            version=0.0.0-dev.${GITHUB_SHA:0:12}
+            version=v0.0.0-dev.${GITHUB_SHA:0:12}
           fi
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
@@ -104,9 +108,69 @@ jobs:
           path: ${{ env.BIN }}
           if-no-files-found: error
 
+  distribution:
+    needs: [version, linux, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Prepare pinned distribution packages
+        env:
+          VERSION: ${{ needs.version.outputs.value }}
+        run: |
+          cd dist
+          sha256sum boxpool-* > checksums.txt
+          cd ..
+          python3 scripts/prepare-distribution.py "$VERSION" dist dist/distribution
+          cd dist/distribution/npm
+          npm pack --ignore-scripts --pack-destination ..
+      - name: Smoke test packaged launcher against the built Linux binary
+        env:
+          VERSION: ${{ needs.version.outputs.value }}
+          BOXPOOL_CACHE_DIR: ${{ runner.temp }}/boxpool-package-cache
+        run: |
+          node <<'JS'
+          const fs = require('node:fs/promises');
+          const { getBinary } = require('./dist/distribution/npm/lib/launcher');
+          getBinary({ fetchImpl: async () => new Response(await fs.readFile('dist/boxpool-linux-amd64')) })
+            .catch(error => { console.error(error); process.exitCode = 1; });
+          JS
+          npm exec --yes --offline --ignore-scripts --package "$PWD"/dist/distribution/*.tgz -- boxpool version | grep -Fx "boxpool $VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distribution
+          path: |
+            dist/distribution/boxpool.rb
+            dist/distribution/*.tgz
+          if-no-files-found: error
+
+  formula:
+    needs: distribution
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution
+          path: distribution/Formula
+      - name: Lint generated Homebrew formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: brew style distribution/Formula/boxpool.rb
+
   publish:
     if: github.event_name == 'push'
-    needs: [version, linux, macos]
+    needs: [version, linux, macos, distribution, formula]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -119,6 +183,10 @@ jobs:
           pattern: release-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution
+          path: distribution
       - name: Publish binaries and checksums
         id: release
         env:
@@ -144,6 +212,66 @@ jobs:
             echo 'created=false' >> "$GITHUB_OUTPUT"
           fi
           gh release upload "$VERSION" boxpool-* checksums.txt
+          gh release upload "$VERSION" ../distribution/boxpool.rb ../distribution/*.tgz
+
+  npm:
+    # Enable after the first manual publish and npm trusted-publisher setup.
+    if: github.event_name == 'push' && vars.NPM_PUBLISH == 'true'
+    needs: [version, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution
+          path: distribution
+      - name: Publish launcher with npm trusted publishing
+        env:
+          VERSION: ${{ needs.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=latest
+          [[ $VERSION == *-* ]] && tag=next
+          npm publish distribution/*.tgz --access public --provenance --tag "$tag" --ignore-scripts
+
+  homebrew:
+    # This token only needs Contents: write on Sukhendu2002/homebrew-tap.
+    if: github.event_name == 'push' && !contains(needs.version.outputs.value, '-') && vars.HOMEBREW_PUBLISH == 'true'
+    needs: [version, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Sukhendu2002/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution
+          path: distribution
+      - name: Update tap formula
+        env:
+          VERSION: ${{ needs.version.outputs.value }}
+        run: |
+          mkdir -p tap/Formula
+          cp distribution/boxpool.rb tap/Formula/boxpool.rb
+          cd tap
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formula/boxpool.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "build(release): update boxpool to $VERSION"
+            git push origin HEAD
+          fi
 
   guest-image:
     # GITHUB_TOKEN-created releases do not emit another workflow event.

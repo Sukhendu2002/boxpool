@@ -1,0 +1,16 @@
+{
+  "name": "boxpool",
+  "version": "0.0.0-dev",
+  "description": "Pool your Linux machines and Apple silicon Macs into sandboxes for AI agents",
+  "license": "Apache-2.0",
+  "homepage": "https://boxpool.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sukhendu2002/boxpool.git",
+    "directory": "npm"
+  },
+  "bin": { "boxpool": "bin/boxpool.js" },
+  "files": ["bin/", "lib/", "release.json", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test" }
+}
