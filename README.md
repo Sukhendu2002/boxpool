@@ -9,6 +9,44 @@ from anywhere, with no per-minute bills.
 
 > Status: early development. Nothing here is usable yet.
 
+## Install a release
+
+The distribution paths below are being prepared for the public beta. They
+require a published release, the `boxpool.run` domain, the npm package and
+the Homebrew tap; see the [distribution setup](docs/distribution.md).
+
+On Linux amd64/arm64 or Apple silicon macOS:
+
+```sh
+curl -fsSL https://boxpool.run/install | sh
+boxpool doctor
+```
+
+The script verifies the release's SHA-256 checksum and installs to
+`/usr/local/bin` if writable, otherwise `~/.local/bin` (add it to `PATH`).
+It never invokes sudo or starts a daemon. Set `BOXPOOL_INSTALL_DIR` to
+choose another directory, or `BOXPOOL_VERSION=v0.1.0` to pin a release.
+
+Alternatively, use Homebrew or Node.js 20+:
+
+```sh
+brew install sukhendu2002/tap/boxpool
+# Or, without install hooks:
+npx boxpool doctor
+```
+
+The Homebrew formula verifies SHA-256; the npm launcher downloads on first
+execution and verifies its package's pinned digest on every run, including
+cached binaries. `npx boxpool@X.Y.Z` selects release `vX.Y.Z`.
+The macOS binary is ad-hoc signed, not notarized; see the
+[verification and Gatekeeper instructions](docs/development.md#releases).
+
+After `doctor` passes, run `sudo boxpool up` on Linux or `boxpool up` as
+your user on macOS. Linux client commands also need sudo. For the npm
+route, prefer a global install (`npm install -g boxpool`) and invoke its
+installed `boxpool` command; do not use `sudo npx`. All methods need the
+same host prerequisites described below and in the development guide.
+
 ## Install from source (Linux)
 
 Use a Linux 5.10+ host with systemd, at least 20 GB free in `/var/lib`,

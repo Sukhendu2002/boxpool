@@ -1,0 +1,44 @@
+class Boxpool < Formula
+  desc "Pool spare machines into sandboxes for AI agents"
+  homepage "https://boxpool.run"
+  version "$version"
+  license "Apache-2.0"
+
+  on_macos do
+    depends_on arch: :arm64
+    depends_on macos: :sonoma
+    on_arm do
+      url "$base/boxpool-darwin-arm64", using: :nounzip
+      sha256 "$darwin_arm64"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "$base/boxpool-linux-amd64", using: :nounzip
+      sha256 "$linux_amd64"
+    end
+    on_arm do
+      url "$base/boxpool-linux-arm64", using: :nounzip
+      sha256 "$linux_arm64"
+    end
+  end
+
+  def install
+    bin.install Dir["boxpool-*"].first => "boxpool"
+    chmod 0755, bin/"boxpool"
+  end
+
+  def caveats
+    <<~EOS
+      Run boxpool doctor to check this host, then boxpool up on macOS
+      or sudo boxpool up on Linux to install and start the daemon.
+      The macOS binary is ad-hoc signed, not notarized:
+      https://github.com/Sukhendu2002/boxpool/blob/main/docs/development.md#releases
+    EOS
+  end
+
+  test do
+    assert_match "boxpool v#{version}", shell_output("#{bin}/boxpool version")
+  end
+end

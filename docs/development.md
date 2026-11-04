@@ -203,6 +203,12 @@ publishing. GitHub's hosted Macs cannot run VMs ("Virtualization is not
 available on this hardware"), so run the integration tests above on your Mac
 before tagging.
 
+The same workflow prepares an npm archive with embedded binary checksums
+and a Homebrew formula, attached to each release. Stable tags update the
+tap, and all tags publish npm packages, once their repository variables
+are enabled. See [distribution setup and clean-host validation](distribution.md)
+for domain hosting, registry bootstrap and required credentials.
+
 A tag push creates the release with the workflow's token, then explicitly
 calls the [guest image workflow](../.github/workflows/image.yml) to build,
 test and publish matching guest images. GitHub does not emit another release
