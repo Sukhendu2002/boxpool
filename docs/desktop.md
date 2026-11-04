@@ -9,7 +9,10 @@ existing packages. Audio and GPU acceleration are not included.
 Desktop artifacts are built and published separately from the pinned base
 release. Until a desktop release is pinned by the binary, install the tested
 artifact explicitly; selecting desktop never silently falls back to base.
-Build on a machine with Docker BuildKit (use `amd64` on x86 Linux):
+Build from a [source checkout](guide.md#installation-options) on a machine
+with Docker Engine and buildx (Docker Desktop on macOS also works).
+Use `amd64` on x86 Linux and `arm64` on Apple silicon or arm64 Linux;
+commands below show arm64:
 
 ```sh
 IMAGE_VARIANT=desktop IMAGE_VERSION=desktop-dev image/build.sh arm64
@@ -24,9 +27,53 @@ lookup is `rootfs-desktop.ext4` next to the unpacked base rootfs in the
 artifacts directory. The desktop uses the existing base image's kernel.
 Do not change or replace a disk while a sandbox is being created.
 
+For the standard service, you can use that default lookup without editing
+its environment. On the target node, install `zstd` (`brew install zstd`
+on a Mac, `sudo apt-get install zstd` on Debian/Ubuntu), and run `up` once
+so the base artifacts directory exists. Transfer the compressed desktop
+disk to that node if built elsewhere. From the checkout where it was built,
+for **Linux arm64 with Firecracker**:
+
+```sh
+sudo /usr/local/bin/boxpool down
+zstd -d dist/image/desktop/arm64/current/rootfs-desktop-arm64.ext4.zst -o /tmp/boxpool-desktop.ext4
+sudo install -m 0600 /tmp/boxpool-desktop.ext4 /var/lib/boxpool/artifacts/rootfs-desktop.ext4
+sudo /usr/local/bin/boxpool up
+```
+
+Substitute `amd64` in both the output directory and filename for x86 Linux.
+For a **Mac**, use a temporary file on the state filesystem, then rename
+it into the default location while the daemon is stopped:
+
+```sh
+boxpool down
+zstd -d dist/image/desktop/arm64/current/rootfs-desktop-arm64.ext4.zst \
+  -o "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4.new"
+chmod 0600 "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4.new"
+mv "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4.new" \
+  "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4"
+boxpool up
+```
+
+These paths assume default state directories; adapt them if you configured
+`BOXPOOL_HOME` on macOS. Use unused temporary output names; `zstd` refuses
+to overwrite an existing file. Keep the installed base disk unchanged
+while the daemon runs. Mac `down` stops VMs, so save work first.
+
 For Docker fallback, load the matching OCI image into the daemon's Docker
 engine and set `BOXPOOL_DESKTOP_IMAGE=boxpool-desktop:desktop-dev-arm64`
-in the daemon's environment. A tag or digest is required. Both variants
+in the daemon's environment. For the standard Linux service, run
+`sudo systemctl edit boxpool` and add:
+
+```ini
+[Service]
+Environment="BOXPOOL_DESKTOP_IMAGE=boxpool-desktop:desktop-dev-arm64"
+```
+
+Then run `sudo systemctl restart boxpool`. Use the matching architecture
+tag from your build. This override survives `boxpool up`; remove it when
+switching images. Exporting the variable in your interactive shell does
+not configure systemd. A tag or digest is required. Both variants
 also publish versioned multi-architecture images and checksummed ext4
 artifacts in the guest-image release workflow.
 
@@ -43,13 +90,14 @@ the root shell cannot launch one.
 
 ```sh
 boxpool sh --image desktop --name browser
-# Optionally place it on a specific node: add --os macos or --node <label>.
+# Optionally select the prepared node: add --os macos or --node <label>.
+# At the guest prompt, run: exit
 boxpool desktop browser
-# Headless/SSH session:
-boxpool desktop --no-open browser
 ```
 
-`sh` creates the sandbox but does not start the display. `desktop` starts it
+For an SSH/headless session, use `boxpool desktop --no-open browser`
+instead of `boxpool desktop browser`. Run only one of these; each creates
+a viewer URL. `sh` creates the sandbox but does not start the display. `desktop` starts it
 on demand, prints a secret HTTPS URL and opens the browser. Open that same
 link on a laptop or a phone connected to the tailnet. The URL exchanges its
 expose token for a Secure, HttpOnly cookie and removes the secret from the

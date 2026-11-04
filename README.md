@@ -1,416 +1,236 @@
 # Boxpool
 
-Turn your spare machines into a pool of sandboxes for AI agents.
+Turn your spare Linux machines and Apple silicon Macs into a pool of
+sandboxes for AI agents. Run commands in Linux VMs on hardware you own,
+add machines to the pool, and open sandbox apps from your phone.
 
-Boxpool pools the Linux boxes and Apple silicon Macs you already own into
-sandboxes your agents can run in. Each sandbox is its own Linux VM
-(Firecracker on Linux, Apple's Virtualization framework on macOS), reachable
-from anywhere, with no per-minute bills.
+Early releases are available; Boxpool is under active development. Linux uses Firecracker with KVM, or a
+Docker container fallback with weaker isolation. Macs use Apple's
+Virtualization framework. Read the [trust model](docs/security.md#trust-at-a-glance)
+before running untrusted workloads.
 
-> Status: early development. Nothing here is usable yet.
+## Quickstart: a two-machine pool
 
-## Install a release
+Choose two machines you control. **Head** is the first machine; it
+coordinates the pool. **Worker** is the second; it contributes capacity.
+You need a terminal on each (SSH is fine) and internet for the first
+image download. Allow about ten minutes once host prerequisites and
+network access are ready; first downloads may take longer.
 
-The distribution paths below are being prepared for the public beta. They
-require a published release, the `boxpool.run` domain, the npm package and
-the Homebrew tap; see the [distribution setup](docs/distribution.md).
+Both hosts need at least **20 GB free** in the state filesystem, plus CPU
+and memory for sandboxes. Defaults per sandbox are 2 CPUs, 2 GiB RAM and
+10 GiB disk; Boxpool also reserves one CPU and at least 1 GiB RAM for the
+host. The smaller examples below request 1 CPU and 512 MiB RAM.
 
-On Linux amd64/arm64 or Apple silicon macOS:
+| Host | Requirements |
+| --- | --- |
+| Linux amd64/arm64 | Kernel 5.10+, systemd, root access; `/dev/kvm` for Firecracker; `e2fsprogs`, `ip` and `nft` |
+| Linux without KVM | Local rootful Docker Engine running, plus `ip` and `nft`; containers share the host kernel |
+| Apple silicon Mac | macOS 14+, APFS; **macOS 26+ for sandbox internet access**; run Boxpool as your user |
+
+Intel Macs and Windows hosts are unsupported. Guests are Linux, including
+on a Mac; `--os macos` selects a Mac **host**.
+
+### 1. Install on both machines
+
+On Debian/Ubuntu hosts, install the networking and disk tools first:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y curl e2fsprogs iproute2 nftables
+```
+
+On Fedora, use `sudo dnf install curl e2fsprogs iproute nftables`.
+For Docker fallback, also install and start [Docker Engine](https://docs.docker.com/engine/install/).
+Then on **both** machines:
 
 ```sh
 curl -fsSL https://boxpool.run/install | sh
+boxpool version
+```
+
+The installer verifies the release's SHA-256 checksum and never runs sudo
+or starts a service. If it installs to `~/.local/bin`, add it to your
+current shell's path with `export PATH="$HOME/.local/bin:$PATH"` and add
+that line to your shell startup file for later sessions.
+
+Alternatively, use `brew install sukhendu2002/tap/boxpool`, or with Node.js
+20+, `npm install -g boxpool`. `npx boxpool doctor` can check a host
+without a global npm install; use an installed binary for Linux service
+setup, and do not run `sudo npx`. See [install options and source builds](docs/guide.md#installation-options).
+The Mac release is ad-hoc signed and not notarized; if macOS blocks it,
+follow the [per-file verification instructions](docs/development.md#releases).
+
+### 2. Start the head
+
+On a **Linux head** (use the path printed by the installer for the first command):
+
+```sh
+sudo "$(command -v boxpool)" doctor
+sudo "$(command -v boxpool)" up
+sudo /usr/local/bin/boxpool ls --nodes
+```
+
+On a **Mac head**:
+
+```sh
 boxpool doctor
+boxpool up
+boxpool ls --nodes
 ```
 
-The script verifies the release's SHA-256 checksum and installs to
-`/usr/local/bin` if writable, otherwise `~/.local/bin` (add it to `PATH`).
-It never invokes sudo or starts a daemon. Set `BOXPOOL_INSTALL_DIR` to
-choose another directory, or `BOXPOOL_VERSION=v0.1.0` to pin a release.
+`doctor` should exit successfully and print `Backend: firecracker`,
+`Backend: docker` (with an isolation warning), or
+`Backend: virtualization framework`. Not every check must be green: Docker
+is optional when KVM works, and KVM is optional for Docker fallback.
+See [troubleshooting by check name](docs/troubleshooting.md) if it fails.
 
-Alternatively, use Homebrew or Node.js 20+:
+`up` installs and starts the daemon, downloading the pinned VM image on
+first start. `ls --nodes` should now show one `ready` head. On Linux, keep
+using `sudo /usr/local/bin/boxpool` for **all local daemon commands**;
+on macOS use `boxpool` without sudo.
+
+### 3. Join the worker
+
+The worker must reach the head on TCP **7443**. Replicas also need to
+accept connections from their pool peers on that port; allow it between
+both machines in host firewalls. For this LAN example, choose the head's
+LAN IP address reachable from the worker. On the **head**, replace the
+example IP below with that address:
 
 ```sh
-brew install sukhendu2002/tap/boxpool
-# Or, without install hooks:
-npx boxpool doctor
+# Linux head
+sudo /usr/local/bin/boxpool token create --join --addr 192.168.1.10:7443
+# Mac head: boxpool token create --join --addr 192.168.1.10:7443
 ```
 
-The Homebrew formula verifies SHA-256; the npm launcher downloads on first
-execution and verifies its package's pinned digest on every run, including
-cached binaries. `npx boxpool@X.Y.Z` selects release `vX.Y.Z`.
-The macOS binary is ad-hoc signed, not notarized; see the
-[verification and Gatekeeper instructions](docs/development.md#releases).
+This prints a secret beginning with `bpjoin`. Copy the **whole token**.
+It is single-use and expires after one hour by default.
 
-After `doctor` passes, run `sudo boxpool up` on Linux or `boxpool up` as
-your user on macOS. Linux client commands also need sudo. For the npm
-route, prefer a global install (`npm install -g boxpool`) and invoke its
-installed `boxpool` command; do not use `sudo npx`. All methods need the
-same host prerequisites described below and in the development guide.
-
-## Install from source (Linux)
-
-Use a Linux 5.10+ host with systemd, at least 20 GB free in `/var/lib`,
-Git and Go 1.25+. Firecracker needs `/dev/kvm`, `e2fsprogs` (for
-`resize2fs`), `ip` (the `iproute2` package on Debian/Ubuntu, `iproute` on
-Fedora), and `nft` (`nftables`) for root-daemon networking. Without KVM,
-install and start Docker Engine for the fallback.
-See the [Linux setup](docs/development.md) for distribution package commands.
+On the **worker**, replace `PASTE_JOIN_TOKEN` with that token:
 
 ```sh
-git clone https://github.com/Sukhendu2002/boxpool.git
-cd boxpool
-go build -o bin/boxpool ./cmd/boxpool
-sudo ./bin/boxpool up
-sudo /usr/local/bin/boxpool sh
+# Linux worker
+sudo "$(command -v boxpool)" doctor
+sudo "$(command -v boxpool)" join 'PASTE_JOIN_TOKEN'
+sudo /usr/local/bin/boxpool node label worker
+# Mac worker: boxpool doctor
+#             boxpool join 'PASTE_JOIN_TOKEN'
+#             boxpool node label worker
 ```
 
-`up` installs the binary at `/usr/local/bin/boxpool` and starts the root
-daemon. If a preflight check fails, fix it and rerun `sudo ./bin/boxpool up`.
-The first start needs internet access to download Firecracker and the guest
-image. Exit the sandbox shell with `exit`; the sandbox stays running.
-
-**After `up`, run client commands with `sudo`**, for example
-`sudo boxpool ls`, `sudo boxpool exec <name> -- uname -a`,
-`sudo boxpool cp ./src <name>:/root/`, and `sudo boxpool sh <name>`.
-Use `/usr/local/bin/boxpool` if it is not on sudo's `PATH`. Leave
-`BOXPOOL_HOME` unset to use the service's `/var/lib/boxpool` state directory.
-Files copied to the host with `sudo boxpool cp` are owned by root.
-Stop the service with `sudo boxpool down`.
-
-The service's socket, `/var/lib/boxpool/boxpool.sock`, is `root:root` mode
-`0660`, inside a state directory created as `root:root` mode `0750`.
-A normal user cannot search that directory, so **permission denied does
-not tell you whether the daemon is running**: it can also happen after
-`sudo boxpool down` removes the socket. Retry with
-`sudo /usr/local/bin/boxpool ls` to check with the required access. If the
-socket is missing or refuses connections, the client gives a startup hint.
-Do not start another daemon just to fix permissions or loosen directory
-permissions to check its status.
-
-No `boxpool` group is created: access to a root daemon's socket is
-effectively root access to the host (it can create VMs and copy files as
-root), so do not make it
-world-accessible or share it with untrusted users. A foreground daemon
-started without sudo is instead used by the same user, with the same
-`BOXPOOL_HOME` if set.
-
-## Commands
+`join` starts the worker's daemon itself; expect `joined the pool at ... as
+node ...`. Labels are comma-separated selectors; `worker` here is a label
+you set, not a special role. After about five seconds, on the **head**:
 
 ```sh
-boxpool up            # install and start the daemon on this machine
-boxpool down          # stop the daemon, keeping its state
-boxpool token create --join          # on the head: a token to add a machine
-boxpool token create --join --transport tailscale  # use the head's tailnet IP
-boxpool join <token>  # add this machine to the head's pool
-boxpool token create --scope cli     # on the head: an access token for login
-boxpool login <head> <token>         # from any machine: commands go to that head
-boxpool token ls      # on the head: access tokens and when each was last used
-boxpool token revoke <id>            # it stops working within seconds
-boxpool audit         # on the head: who created, ran, exposed or removed what
-boxpool node label gpu,always-on     # labels sh --node picks machines by
-boxpool promote       # in a pool of two whose head is gone: become the head
-boxpool sh --image desktop --name browser # optional desktop image (see docs/desktop.md)
-boxpool desktop browser # authenticated browser viewer; Take over enables input
-boxpool sh            # open a shell in a new sandbox
-boxpool sh --os macos # on the head: on a node with this OS (or --arch, --node)
-boxpool exec box -- make test        # run a command in a sandbox
-boxpool cp ./src box:/root/          # copy files in or out
-boxpool ls            # list sandboxes; on the head or a replica, the pool's too
-boxpool ls --nodes    # on the head: the pool's machines, ready or unreachable
-boxpool stop box      # stop a sandbox
-boxpool start box     # start it again, with its disk
-boxpool pause box     # pause a sandbox, keeping its memory
-boxpool resume box    # resume it where it left off
-boxpool snapshot box --name withjq   # save a copy of a sandbox's disk
-boxpool sh --from withjq             # start a new sandbox from it
-boxpool rm box        # delete a sandbox
-boxpool expose box 8000              # on the head: an HTTPS URL for port 8000
-boxpool expose ls     # exposed ports; expose rm box 8000 closes one
-boxpool doctor        # check whether this machine can host sandboxes
+# Linux head
+sudo /usr/local/bin/boxpool ls --nodes
+# Mac head: boxpool ls --nodes
 ```
 
-Working today, on one Linux machine: `boxpool doctor`, `boxpool daemon`,
-`boxpool up`, `boxpool down`, `boxpool sh`, `boxpool exec`, `boxpool cp`,
-`boxpool ls`, `boxpool start`, `boxpool stop`, `boxpool pause`, `boxpool resume`,
-`boxpool rm`, `boxpool snapshot` and `boxpool version`. In a pool, `sh`,
-`exec`, `cp` and sandbox lifecycle commands on the head run on the node
-that owns the sandbox.
+Expect **two ready nodes**. The second may have role `replica`; it still
+runs sandboxes. If the head is unreachable or a token expires, see
+[join troubleshooting](docs/troubleshooting.md#join-or-a-node-is-unreachable).
 
-Nodes report their capacity, labels and sandboxes to the head every five
-seconds over mutual TLS. After 30 seconds without a heartbeat, the head
-lists the node and its sandboxes as `unreachable`, keeping their records.
-The next heartbeat restores the node's actual sandbox states. Joining,
-heartbeats and request tunnels use outbound connections to the head.
-Nodes selected as replicas also accept pool connections from their peers.
+**Different networks:** first connect both machines to the same Tailscale
+or Headscale tailnet with the system Tailscale client. On the head, replace
+the token command with `boxpool token create --join --transport tailscale`
+(with sudo on Linux). Join as above. Allow TCP 7443 between pool peers in
+tailnet policy and host firewalls. No router port forwarding is needed.
+Userspace-only Tailscale networking is unsupported.
 
-For machines on different networks, connect each to the same Tailscale or
-Headscale tailnet using the system Tailscale client, then create the join
-token on the head with `boxpool token create --join --transport tailscale`.
-Use the printed token with the usual `boxpool join <token>`; `sh`, `exec`
-and the other commands stay the same. Tailnet policy and host firewalls
-must allow TCP port 7443 between pool machines, including replicas; no
-router port forwarding is needed. The head continues listening on its LAN
-and tailnet interfaces with pool authentication on both.
+### 4. Run a sandbox on the worker
 
-To use a pool from a machine outside it, such as a laptop, create an
-access token on the head with `boxpool token create --scope cli` and run
-`boxpool login <head> <token>` there; `sh`, `exec`, `cp`, `ls` and the
-lifecycle commands then go to the head over TLS on port 7443, which the
-token pins, until `boxpool logout`. `--sandbox name` limits a token to one
-sandbox and `--ttl` makes it expire. Restoring a snapshot with `--from`
-requires a token without `--sandbox`. `expose` tokens only open the URLs
-`boxpool expose` makes and cannot run commands. Tokens are stored
-hashed on the head and are not replicated: after a failover, create new
-ones on the new head.
-
-Run `boxpool audit` on the head to see successful sandbox creates, removals,
-exec sessions, exposures, exposed-URL accesses, token creation/revocation and
-logins, newest first. Each entry has a UTC time, the caller's token ID (or
-`local` for the local socket, `public` for a public URL), an action and a
-target. `boxpool audit --json` prints records for scripts; `--limit 1000`
-shows more than the default 100, and `--before <event ID>` reads older pages.
-It always uses the local daemon, even after `login`; remote scoped tokens
-cannot read the log. Events stay in the head's SQLite database for 90 days
-and survive sandbox deletion and token revocation. They are not replicated.
-Command text, token secrets, app paths and URL queries are not recorded.
-See [audit guarantees and limits](docs/security.md#audit-log).
-
-To preview a web app from a phone, run `boxpool expose <sandbox> <port>` on
-the head. It needs Tailscale on the head, with MagicDNS and HTTPS
-certificates enabled for the tailnet: the head runs `tailscale serve` and
-prints `https://<head>.<tailnet>.ts.net:<port>/?boxpool_token=...`, which
-any device on the tailnet, such as a phone with the Tailscale app on mobile
-data, opens. The sandbox may be on any node. Opening the link once sets a
-cookie; without the token or the cookie the URL answers 401, unless
-`--public`. WebSockets, such as a dev server's hot reload, work through it.
-`boxpool expose rm` closes the URL and revokes its token; exposes, like
-tokens, are not replicated. Sandboxes need an image whose agent lists the
-`tcp` feature. Run `boxpool expose check` on the head to check its Tailscale
-connection, MagicDNS and HTTPS settings; see [head and guest image setup](docs/expose.md).
-App session cookies are encrypted and isolated per expose. Apps that read
-or write cookies through JavaScript need changes; server-side cookie logins
-work normally.
-
-`direct` remains the default transport. `--addr host:port` overrides
-automatic address discovery with either transport. Tailscale discovery
-times out after five seconds (plus up to one second closing inherited
-output pipes). Both transports use system sockets, with join pinning and
-mutual TLS layered above them. The system client must provide OS routing;
-userspace-only tailscaled networking is unsupported. See the
-[transport checks](docs/development.md#pool-transport) for automated and
-phone-hotspot verification steps.
-
-Set labels with `boxpool up --label gpu,always-on` or replace them later
-with `boxpool node label gpu,always-on`; `boxpool node label ""` clears
-them. On the head, `boxpool sh --os macos`, `--arch arm64` and `--node gpu`
-filter where a new sandbox can run. Among matching nodes with enough CPU
-and memory after existing reservations and the host reserve (one CPU and
-the larger of 1 GiB or 10% of memory), the head picks the most free memory,
-then the fewest sandboxes. Existing sandbox names always return to their
-owning node. Snapshots stay on their original machine; list, remove and
-restore them using that machine's local CLI.
-
-`sudo boxpool up` installs the node on a Linux machine with systemd: it
-runs doctor's checks and refuses if they fail, copies the running binary
-to `/usr/local/bin/boxpool`, writes `/etc/systemd/system/boxpool.service`
-(`boxpool daemon` as root, restarted on failure), enables and starts it
-and waits until the daemon answers on `/var/lib/boxpool/boxpool.sock`. The
-first start downloads Firecracker and the guest image, about 60 MB.
-Running it again changes nothing unless the binary or the unit changed, in
-which case it restarts the service. `sudo boxpool down` stops and disables
-the service and keeps `/var/lib/boxpool`. Stopping or restarting the
-service stops only the daemon (`KillMode=process`): running Firecracker
-VMs and Docker sandboxes keep running, and the daemon adopts them when it
-starts again, including after a crash.
-
-On macOS, run `boxpool up` as yourself, not with sudo: the daemon runs as
-your user. Build and sign it first (see
-[macOS on Apple silicon](docs/development.md#macos-on-apple-silicon)); `up`
-refuses a binary without the virtualization entitlement. It runs doctor's
-checks, copies the binary to `bin/boxpool` in the state directory, writes
-the launch agent `~/Library/LaunchAgents/run.boxpool.daemon.plist`
-(restarted if it fails, logging to `~/Library/Logs/boxpool/daemon.log`),
-starts it in your login session and waits until the daemon answers. A
-`BOXPOOL_HOME` set when you run `up` is written into the agent. launchd
-starts the agent again at every login. Running `up` again changes nothing
-unless the binary or the plist changed, in which case it restarts the
-daemon. `boxpool down` stops the agent, which stops its VMs, and removes
-the plist; the state directory and the installed binary are kept.
-
-While a Mac has running sandboxes, the daemon holds a `boxpool` IOKit
-`PreventUserIdleSystemSleep` assertion, including during boot and guest
-initialization; failed starts release it if no VM remains running.
-Stopping or pausing the last one releases it. VM exits outside the API
-are detected within a second.
-Use `boxpool up --allow-sleep` (saved in the launch agent) or
-`boxpool daemon --allow-sleep` to opt out. A later `boxpool up` without
-that flag restores sleep prevention. `doctor` and `ls --nodes` warn when a
-Mac is on battery; the head sees a node's power source at its next heartbeat.
-This prevents **idle sleep only**, not explicit sleep or lid-close sleep.
-Keep laptops plugged in and their lids open; closed-lid operation requires
-an external display and macOS's other clamshell requirements.
-
-`boxpool daemon` runs the node daemon in the foreground. It creates the state
-directory (below), takes `daemon.lock` there so only one daemon runs per state
-directory, and serves a local HTTP API on `boxpool.sock` (mode 0660) until
-SIGINT or SIGTERM. It refuses a state directory that group or others can
-write to:
+On the **head**, open an interactive terminal and run:
 
 ```sh
-BOXPOOL_HOME=$(mktemp -d) ./bin/boxpool daemon &
-curl --unix-socket "$BOXPOOL_HOME/boxpool.sock" http://x/v1/health   # {"ok":true}
-curl --unix-socket "$BOXPOOL_HOME/boxpool.sock" http://x/v1/info
+# Linux head
+sudo /usr/local/bin/boxpool sh --node worker --name hello --cpu 1 --mem 512m
+# Mac head: boxpool sh --node worker --name hello --cpu 1 --mem 512m
 ```
 
-On Linux the daemon opens the backend doctor picks: Firecracker, after
-downloading its pinned artifacts into `artifacts/` in the state directory
-(about 60 MB the first time), or Docker with a warning. Firecracker
-sandboxes get a network only when the daemon runs as root. Docker requires a
-root daemon with `ip` and `nft` to isolate guests from host services. With no backend,
-the sandbox endpoints answer 503. On macOS 26 and later, sandboxes get
-outbound NAT, each on a network of its own; on older macOS they have no
-network. [docs/security.md](docs/security.md) covers how each backend
-isolates them.
-
-When it starts, the daemon reconciles its records with the backend. It
-adopts sandboxes that are still running (on macOS none are: VMs run in the
-daemon's process). A sandbox it finds stopped though it was running when
-the last daemon ended, as after a host reboot, is recorded `stopped`, or
-booted again if it was created with the `always` restart policy. It logs
-sandboxes the backend has but its records do not, and leaves them alone.
-
-Before reporting healthy, the VM backends prepare a private, paused base
-snapshot for new sandboxes with the default 2 CPUs, 2 GiB RAM and 10 GiB
-disk. Each restore gets a private disk, hostname, machine ID and network
-address; the guest RNG is reseeded. The cache is rebuilt on image upgrades.
-Custom sizes, `--from` snapshots and unsupported hosts keep cold-booting;
-cache preparation failures log a warning rather than prevent startup.
-See [warm-boot testing](docs/benchmarks/m3-warm-boot.md).
-
-`boxpool sh [--name N] [--cpu N] [--mem 2g] [--disk 10g] [--restart always] [--timing]`
-asks the daemon for a sandbox (a new one with a generated name, or the one
-called `N`), starts it if needed and opens `bash -l` in it on your terminal.
-`--restart always` (`"restart": "always"` in the API) boots a new sandbox
-again when the daemon starts after a host reboot.
-`boxpool sh <name>` attaches to an existing sandbox. Leaving the shell
-(`exit`, Ctrl-D) leaves the sandbox running; `--timing` prints the time to
-the first prompt. The daemon's API for this is `POST /v1/sandboxes`
-(idempotent on `name`), `GET /v1/sandboxes/{name}` and the WebSocket
-`GET /v1/sandboxes/{name}/exec`, which relays the agent's exec protocol
-unchanged.
-
-`boxpool version` also prints the daemon's version when one is running.
-
-`boxpool exec [-i] [-t] <sandbox> [--] <command...>` runs a command in a
-running sandbox and exits with its exit code. Without `-t` its stdout and
-stderr stay separate and its stdin is empty, unless `-i` forwards yours;
-`-t` runs it on your terminal in raw mode, as `sh` does. As with
-`docker exec`, it exits 125 when `boxpool exec` itself fails (bad
-arguments, no daemon, sandbox missing or stopped, connection lost before
-the command exited), else with the command's code, or 128+n if signal n
-killed it; a command that exits 125 itself looks the same.
-
-`boxpool cp SRC DST` copies a file or directory between this machine and a
-sandbox; exactly one side is `<sandbox>:<absolute path>`. Like `docker cp`,
-the copy keeps modes, modification times and symlinks (not owners): into
-the sandbox it lands inside the existing directory DST; out of it, inside
-DST if that is a directory, else as DST. Copies out of a sandbox are
-treated as hostile: every entry must be inside the copy you asked for (no
-absolute paths, `..`, or writes through symlinks), hard links and devices
-are refused, and set-user-ID and set-group-ID bits are dropped. The API is
-`GET` and `PUT /v1/sandboxes/{name}/files?path=`, which relay the agent's
-tar endpoints unchanged.
-
-`boxpool ls [--json]` lists local sandboxes followed by the head's nodes'
-sandboxes, with name, backend, host OS, state, CPUs, memory and age, plus a
-node column when remote sandboxes exist. Local state is live (`missing` if
-the backend no longer has the sandbox); remote state comes from heartbeats.
-An unreachable node's last-known sandboxes stay listed as `unreachable`.
-`boxpool ls --nodes [--json]` shows node health, labels and free CPU/memory
-capacity bars. Bars show free admission capacity against totals after the
-host reserve, not instantaneous CPU utilization; stopped sandboxes keep
-their reservations. Unreachable rows are last-known values; `?` means an
-older node did not report totals.
-
-`boxpool logs [-f] <sandbox>` reads the current sandbox console log, routed
-to its node. `boxpool logs [-f] --daemon` reads this node's daemon log.
-`-f` follows output until Ctrl-C or daemon shutdown. Followers do not delay
-a clean daemon shutdown. Flags precede the sandbox name. VM logs
-are serial-console output, not shell/exec session output; send an entry
-with `boxpool exec <sandbox> -- sh -c 'echo hello > /dev/console'`.
-Docker logs are the container's main process stdout/stderr, likewise not
-exec output. VM console and daemon files rotate at about 1 MiB, retaining
-one previous file; `logs` reads only the current file. Following handles
-renames and observed truncations, but copy-truncate rotation may lose
-output between polls; this is not a durable log delivery service.
-Daemon logs are also saved as `daemon.log` in the state directory, including
-foreground runs. The API is `GET /v1/sandboxes/{name}/logs` or `GET /v1/logs`,
-with `?follow=true` to stream.
-
-`boxpool stop <name>` shuts a sandbox down and keeps its disk and its
-resource reservation. `boxpool start <name>` boots a stopped sandbox from
-that disk, including after a daemon or host restart; on Docker only `/root`
-is kept. `boxpool rm [--force] <name>` deletes a stopped
-sandbox with its process, disk, network and reservation; `--force` stops a
-running one first. If a guest does not shut down cleanly, both print a
-warning and still succeed. The API is `GET /v1/sandboxes`,
-`POST /v1/sandboxes/{name}/start`, `POST /v1/sandboxes/{name}/stop` and `DELETE /v1/sandboxes/{name}?force=1`.
-
-`boxpool pause <name>` saves a running sandbox's memory and stops its VM,
-so it uses no CPU or memory; `boxpool ls` shows it `paused`, and
-`boxpool resume <name>` restores it where it left off. Docker cannot save
-a container's memory, so there pause stops the sandbox, prints that its
-memory is lost, and resume boots it from its disk; so does a macOS VM
-configuration the Virtualization framework cannot save. The API is
-`POST /v1/sandboxes/{name}/pause` and `POST /v1/sandboxes/{name}/resume`.
-
-`boxpool snapshot <name> --name <snapshot>` saves a copy of a sandbox's
-disk, and `boxpool sh --from <snapshot>` starts new sandboxes from it on
-the same machine, each with its own copy. A running sandbox is stopped for
-the copy, so the disk is consistent, then started again; its processes
-restart. A paused one is refused. On Firecracker and macOS the whole disk
-is copied, installed packages too, as a reflink or APFS clone where the
-file system can; on Docker only `/root` persists, so only `/root` is saved.
-`boxpool snapshot ls` lists snapshots and `boxpool snapshot rm <snapshot>`
-deletes one; sandboxes started from it keep their disks. `boxpool sh ... --
-<command>` runs a command instead of the shell. The API is
-`POST /v1/sandboxes/{name}/snapshot` (`{"name": "..."}`), `GET /v1/snapshots`,
-`DELETE /v1/snapshots/{name}`, and `"from"` in `POST /v1/sandboxes`.
-
-`boxpool-agent` is the process inside every sandbox that runs commands for
-the host, on vsock port 1024 by default or on a unix socket with
-`--listen unix:<path>`. Its API is in the
-[guest agent protocol](docs/agent-protocol.md). Build it as a static Linux
-binary with `CGO_ENABLED=0 GOOS=linux go build -o bin/boxpool-agent ./cmd/boxpool-agent`.
-
-## Supported hosts (v1)
-
-- Linux 5.10 or newer, x86_64 or aarch64, with `/dev/kvm` for microVMs (Docker fallback without it)
-- macOS 14 or later on Apple silicon
-
-`boxpool doctor` requires at least 20 GB of free disk space in the state
-directory: `BOXPOOL_HOME` when set, otherwise `/var/lib/boxpool` on Linux or
-`~/Library/Application Support/boxpool` on macOS. If it does not exist yet,
-doctor measures the nearest existing parent and reports that path. A disk or
-kernel failure exits non-zero even if a backend is available. On Linux, `!`
-marks a VM warning: nested virtualization may be unavailable or slow, but
-the warning does not affect the backend or exit status.
-
-## Development
-
-See the [Linux and KVM development setup](docs/development.md) for a Linux
-machine or VM, including how to build on a Mac and run there.
+At the sandbox's `root@...` prompt, run:
 
 ```sh
-go build -o bin/boxpool ./cmd/boxpool
-go vet ./...
-go test ./...
-./bin/boxpool doctor
+uname -s
+printf 'hello from a sandbox\n' > /root/hello.txt
+cat /root/hello.txt
+exit
 ```
 
-## License
+Expect `Linux` and `hello from a sandbox`. Back on the head:
+
+```sh
+# Linux head
+sudo /usr/local/bin/boxpool exec hello -- cat /root/hello.txt
+sudo /usr/local/bin/boxpool ls
+# Mac head: boxpool exec hello -- cat /root/hello.txt
+#           boxpool ls
+```
+
+Expect the same text and `hello` in state `running`, owned by the worker.
+Exiting a shell leaves the sandbox running. Reconnect with `boxpool sh hello`
+(with sudo on Linux). You now have a two-node pool.
+
+### 5. Open an app or desktop (optional)
+
+App previews and desktops need Tailscale on the head and viewing device,
+MagicDNS and HTTPS certificates enabled, and a guest image with the new
+agent. **The default pinned `v0.0.1-alpha.1` image predates these features.**
+Updating the CLI does not update existing sandbox images.
+
+Follow [app preview and image setup](docs/expose.md), then start a server
+inside a sandbox and run `boxpool expose <sandbox> 8000` on the head.
+Open its secret HTTPS link on a tailnet-connected phone or laptop.
+`boxpool expose check` checks the head's Tailscale prerequisites.
+
+For a graphical browser, first follow [desktop image installation](docs/desktop.md),
+then run on the head:
+
+```sh
+boxpool sh --image desktop --name browser
+# Exit the shell, then:
+boxpool desktop --no-open browser
+```
+
+Use sudo and `/usr/local/bin/boxpool` on Linux. Open the printed link;
+the viewer starts read-only. **Take over** enables keyboard/mouse and
+**Release control** returns to watching. Keep links private; their holders
+can access the app or take over the desktop.
+
+### 6. Clean up the example
+
+On the **head**, remove only the example sandbox when finished:
+
+```sh
+# Linux head
+sudo /usr/local/bin/boxpool stop hello
+sudo /usr/local/bin/boxpool rm hello
+# Mac head: boxpool stop hello
+#           boxpool rm hello
+```
+
+`rm` deletes its disk. To keep work, stop it and start it later instead.
+To stop a node's daemon, run `sudo /usr/local/bin/boxpool down` on Linux
+or `boxpool down` on macOS. Linux VMs/containers keep running after `down`;
+Mac VMs stop. Stop sandboxes explicitly first if you want them all stopped.
+State is kept, and `up` starts the service again.
+
+## Documentation
+
+- [User guide](docs/guide.md): files, resources, snapshots, remote login,
+  scheduling, failover, state and upgrades.
+- [Command reference](docs/commands.md): generated from CLI help.
+- [Troubleshooting](docs/troubleshooting.md): doctor, startup, join, images
+  and logs.
+- [App previews](docs/expose.md) and [desktop takeover](docs/desktop.md).
+- [Security and trust model](docs/security.md).
+- [Development](docs/development.md), [guest images](image/README.md),
+  [agent protocol](docs/agent-protocol.md), and [distribution maintenance](docs/distribution.md).
+
+Contributors: `go build -o bin/boxpool ./cmd/boxpool`, `go vet ./...`,
+`go test ./...`. See [AGENTS.md](AGENTS.md) for contribution rules and the
+[onboarding walkthrough](docs/onboarding-check.md) for the timed user test.
 
 Apache 2.0. See [LICENSE](LICENSE).
-
-See [desktop image and browser takeover](docs/desktop.md) for image installation,
-head setup, phone access and the control handoff.

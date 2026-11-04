@@ -38,3 +38,7 @@ jobs:
         run: go test ./internal/agent -run='^$' -fuzz='^FuzzFileUploadPaths$' -fuzztime=15s -parallel=2
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
       - run: go build ./...
+      - name: Check generated command reference
+        run: |
+          go build -o bin/boxpool ./cmd/boxpool
+          python3 scripts/generate-command-reference.py --binary bin/boxpool --check
