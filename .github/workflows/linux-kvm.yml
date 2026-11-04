@@ -47,6 +47,13 @@ jobs:
       BOXPOOL_TEST_HOME: /tmp/boxpool-it
     steps:
       - uses: actions/checkout@v4
+      - name: Free disk space for KVM integration tests
+        run: |
+          df -h /
+          # Warm clones reserve 10 GiB each, in addition to VM snapshots.
+          # These SDKs are unused on this disposable GitHub-hosted runner.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -65,10 +72,13 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # Expand RUNNER_TEMP in sg's child shell, with the new group access.
+          # shellcheck disable=SC2016
           (cd internal/backend/firecracker && sg kvm -c '"$RUNNER_TEMP/fc.test" -test.v -test.count=1 -test.timeout 15m -test.run "^TestIntegration(Pause|Warm)?$"') 2>&1 | tee "$RUNNER_TEMP/fc.log"
           grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/fc.log"
           grep -q '^--- PASS: TestIntegrationPause ' "$RUNNER_TEMP/fc.log"
           grep -q '^--- PASS: TestIntegrationWarm ' "$RUNNER_TEMP/fc.log"
+          # shellcheck disable=SC2016
           (cd internal/daemon && sg kvm -c '"$RUNNER_TEMP/daemon.test" -test.v -test.count=1 -test.timeout 10m -test.run "^TestIntegrationSh$/^firecracker$"') 2>&1 | tee "$RUNNER_TEMP/daemon.log"
           grep -q -- '--- PASS: TestIntegrationSh/firecracker ' "$RUNNER_TEMP/daemon.log"
           ! grep -q -- '--- SKIP' "$RUNNER_TEMP/fc.log" "$RUNNER_TEMP/daemon.log"
@@ -99,3 +109,8 @@ jobs:
         with:
           name: firecracker-integration-logs-${{ github.run_attempt }}
           path: ${{ runner.temp }}/logs
+      - name: Report disk usage
+        if: always()
+        run: |
+          df -h
+          df -i
