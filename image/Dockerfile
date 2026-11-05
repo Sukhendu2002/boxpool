@@ -21,8 +21,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -buildvcs=fal
 FROM --platform=$BUILDPLATFORM ${DEBIAN} AS tools
 COPY --from=golang /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY image/debian.sources /etc/apt/sources.list.d/debian.sources
-RUN apt-get -o APT::Update::Error-Mode=any update \
-    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+COPY image/apt.conf /etc/apt/apt.conf.d/80boxpool-downloads
+COPY --chmod=0755 image/apt-retry.sh /usr/local/sbin/boxpool-apt
+RUN timeout --kill-after=5s 5m boxpool-apt update \
+    && timeout --kill-after=5s 10m boxpool-apt install ca-certificates curl xz-utils \
        build-essential flex bison libssl-dev libelf-dev bc e2fsprogs zstd \
        gcc-x86-64-linux-gnu gcc-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
@@ -42,8 +44,10 @@ RUN . /versions.txt \
 FROM ${DEBIAN} AS userland
 COPY --from=golang /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY image/debian.sources /etc/apt/sources.list.d/debian.sources
-RUN apt-get -o APT::Update::Error-Mode=any update \
-    && apt-get install -y --no-install-recommends tini ca-certificates mount procps \
+COPY image/apt.conf /etc/apt/apt.conf.d/80boxpool-downloads
+COPY --chmod=0755 image/apt-retry.sh /usr/local/sbin/boxpool-apt
+RUN timeout --kill-after=5s 5m boxpool-apt update \
+    && timeout --kill-after=5s 10m boxpool-apt install tini ca-certificates mount procps \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /dev/pts /dev/shm /proc /sys /run/boxpool /tmp /var/tmp /root \
     && chmod 1777 /tmp /var/tmp
@@ -76,8 +80,8 @@ CMD ["/usr/local/bin/boxpool-agent", "--listen", "unix:/run/boxpool/agent.sock"]
 FROM userland AS base
 
 FROM userland AS desktop
-RUN apt-get -o APT::Update::Error-Mode=any update \
-    && apt-get install -y --no-install-recommends tigervnc-standalone-server tigervnc-tools \
+RUN timeout --kill-after=5s 5m boxpool-apt update \
+    && timeout --kill-after=5s 10m boxpool-apt install tigervnc-standalone-server tigervnc-tools \
        openbox chromium fonts-dejavu-core x11-utils x11-apps xdotool \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /sbin/init

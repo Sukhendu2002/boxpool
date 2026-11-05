@@ -151,6 +151,17 @@ building these changes does not replace released images or their digest.
   `arm64.config`: `35cce8e8b754a84523ca20dc068fc3f8f03a15523be36a8623bad54e11972e2a`.
   The upstream license is alongside the configs.
 
+Snapshot downloads use three file retries, 30-second HTTP/HTTPS connection
+and idle-transfer timeouts, and independent requests without pipelining.
+Updates and archive downloads retry up to three times, waiting 10 then 20
+seconds and reusing downloaded archives. Package installation runs once,
+with further downloads disabled, only after all archives verify.
+Build-time APT updates have a five-minute command deadline; installs have
+ten minutes, with five seconds to terminate before a forced kill. Any
+remaining failure stops that build and prevents publication. TLS, Release
+signature and package hash checks stay enabled. See Debian's
+[HTTP transport options](https://manpages.debian.org/bookworm/apt/apt-transport-http.1.en.html).
+
 `build-kernel.sh` adapts those configs to the pinned upstream kernel with
 `olddefconfig`, disables loadable modules and i8042 probing, removes debug
 information, and requires built-in ext4, devtmpfs (including
