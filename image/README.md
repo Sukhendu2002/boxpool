@@ -151,11 +151,14 @@ building these changes does not replace released images or their digest.
   `arm64.config`: `35cce8e8b754a84523ca20dc068fc3f8f03a15523be36a8623bad54e11972e2a`.
   The upstream license is alongside the configs.
 
-Snapshot downloads use three file retries, 30-second HTTP/HTTPS connection
-and idle-transfer timeouts, and independent requests without pipelining.
-Updates and archive downloads retry up to three times, waiting 10 then 20
-seconds and reusing downloaded archives. Package installation runs once,
-with further downloads disabled, only after all archives verify.
+Snapshot downloads use 30-second HTTP/HTTPS connection and idle-transfer
+timeouts and independent requests without pipelining. APT's internal file
+retries are disabled to avoid its [delayed retry queue bug](https://bugs.debian.org/1117797).
+The build helper retries acquisition up to three times, waiting 10 then 20
+seconds and retaining verified archives. Each update attempt gets 60 seconds;
+each archive-download attempt gets 150 seconds, followed by a five-second
+kill grace period. Package installation runs once, with further downloads
+disabled, only after all archives verify.
 Build-time APT updates have a five-minute command deadline; installs have
 ten minutes, with five seconds to terminate before a forced kill. Any
 remaining failure stops that build and prevents publication. TLS, Release

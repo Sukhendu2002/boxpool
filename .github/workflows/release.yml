@@ -240,7 +240,7 @@ jobs:
           set -euo pipefail
           tag=latest
           [[ $VERSION == *-* ]] && tag=next
-          npm publish distribution/*.tgz --access public --provenance --tag "$tag" --ignore-scripts
+          npm publish "$PWD"/distribution/*.tgz --access public --provenance --tag "$tag" --ignore-scripts
 
   homebrew:
     # This token only needs Contents: write on Sukhendu2002/homebrew-tap.
