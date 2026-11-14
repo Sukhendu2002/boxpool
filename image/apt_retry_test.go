@@ -11,9 +11,25 @@ import (
 )
 
 func TestAPTOperationRetry(t *testing.T) {
-	for _, mode := range []string{"update", "download", "unavailable", "install-failure"} {
+	for _, mode := range []string{"update", "download", "timeout", "unavailable", "install-failure"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
+			writeTestFile(t, filepath.Join(dir, "timeout"), `#!/bin/sh
+set -eu
+test "$1" = --kill-after=5s
+printf '%s\n' "$2" >> "$STATE/timeouts"
+shift 2
+if [ "$MODE" = timeout ] && [ ! -f "$STATE/timedout" ]; then
+    test "$1" = apt-get
+    shift
+    printf '%s\n' "$*" >> "$STATE/calls"
+    echo verified > "$STATE/archive"
+    echo 1 > "$STATE/attempts"
+    touch "$STATE/timedout"
+    exit 124
+fi
+exec "$@"
+`, 0755)
 			writeTestFile(t, filepath.Join(dir, "sleep"), "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$STATE/delays\"\n", 0755)
 			writeTestFile(t, filepath.Join(dir, "apt-get"), `#!/bin/sh
 set -eu
@@ -84,6 +100,17 @@ esac
 			}
 			if wantInstalls == 1 && lines[len(lines)-1] != "install --no-download -y --no-install-recommends example-package" {
 				t.Fatalf("install must run last, once, without downloads: %s", calls)
+			}
+			timeouts, err := os.ReadFile(filepath.Join(dir, "timeouts"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			limit := "150s\n"
+			if mode == "update" {
+				limit = "60s\n"
+			}
+			if string(timeouts) != strings.Repeat(limit, wantDownloads) {
+				t.Fatalf("attempt limits %q, want %d of %q", timeouts, wantDownloads, limit)
 			}
 			delays, _ := os.ReadFile(filepath.Join(dir, "delays"))
 			wantDelays := "10"
