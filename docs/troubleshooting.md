@@ -32,9 +32,24 @@ rerun doctor in the same account, then rerun `up`.
 | `Apple silicon`: `Intel Macs are not supported` | Use an Apple silicon Mac or a supported Linux machine. Check `uname -m`; run a native arm64 release rather than an Intel binary under Rosetta. |
 | `macOS 14 or later` | Upgrade to macOS 14+. For sandbox internet use macOS 26+ and a release built with its SDK. |
 | `power source` | On a Mac laptop, plug in power for reliable hosting. The battery warning is informational. |
-| `free disk`: `need 20 GB` | Free space on the filesystem at the printed path. When the state directory does not yet exist, doctor measures its nearest existing parent. Do not delete sandbox disks or resource manifests to make space. Linux service state is `/var/lib/boxpool`; Mac state is `~/Library/Application Support/boxpool`. |
+| `free disk`: `need 20 GB` | Capacity on the filesystem at the printed path. On macOS, available capacity includes space the OS expects to reclaim; doctor also reports immediately free space when they differ. Linux counts immediately free blocks. When the state directory does not yet exist, doctor measures its nearest existing parent. Do not delete sandbox disks or resource manifests to make space. Linux service state is `/var/lib/boxpool`; Mac state is `~/Library/Application Support/boxpool`. |
 | `free disk`: `could not check` / `is not a directory` | Check the state path and its parent permissions. On Linux retry with sudo. An accidental `BOXPOOL_HOME` can point at a file or the wrong filesystem; Linux `up` always uses `/var/lib/boxpool`. |
 | `supported OS` / `Backend: none` | No usable backend was selected. Fix the failed checks above; Windows and Intel Mac hosting are unsupported. |
+
+### Finder shows more space than doctor
+
+Finder can include reclaimable storage, such as cached data and local Time
+Machine snapshots. On macOS, Boxpool uses Apple's
+[important-usage capacity API](https://developer.apple.com/documentation/foundation/checking-volume-storage-capacity)
+for both startup and VM disk admission. For example, 53 GB available with
+16 GB immediately free passes the 20 GB startup check. macOS manages
+reclamation; Boxpool does not delete caches or snapshots. If the native
+estimate is unavailable, or the binary was built without cgo, Boxpool falls
+back to immediately free blocks.
+
+This capacity is an estimate, not a guarantee that a write will succeed.
+Existing VM disks still reserve their full requested size, and filesystem
+allocation errors are still reported. Keep backups of important sandbox data.
 
 ## Install or startup fails
 

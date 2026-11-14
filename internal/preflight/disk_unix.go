@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
+
+	"boxpool.run/boxpool/internal/diskspace"
 )
 
-const minDiskBytes uint64 = 20_000_000_000
+const minDiskBytes int64 = 20_000_000_000
 
 func diskCheck() Check {
 	path, err := StateDir()
@@ -41,19 +42,24 @@ func diskCheckAt(path string) Check {
 		}
 		path = filepath.Dir(path)
 	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
+	space, err := diskspace.Probe(path)
+	if err != nil {
 		c.Detail = "could not check free disk at " + path + ": " + err.Error()
 		return c
 	}
-	return diskSpaceCheck(uint64(stat.Bavail)*uint64(stat.Bsize), path)
+	return diskSpaceCheck(space, path)
 }
 
-func diskSpaceCheck(freeBytes uint64, path string) Check {
+func diskSpaceCheck(space diskspace.Info, path string) Check {
+	detail := fmt.Sprintf("%d GB free at %s (need 20 GB)", space.FreeBytes/1_000_000_000, path)
+	if space.AvailableBytes > space.FreeBytes {
+		detail = fmt.Sprintf("%d GB available at %s (%d GB immediately free; includes reclaimable space; need 20 GB)",
+			space.AvailableBytes/1_000_000_000, path, space.FreeBytes/1_000_000_000)
+	}
 	return Check{
 		Name:     "free disk",
-		OK:       freeBytes >= minDiskBytes,
+		OK:       space.AvailableBytes >= minDiskBytes,
 		Required: true,
-		Detail:   fmt.Sprintf("%d GB free at %s (need 20 GB)", freeBytes/1_000_000_000, path),
+		Detail:   detail,
 	}
 }
