@@ -91,7 +91,7 @@ func TestLaunchAgent(t *testing.T) {
 	// sandbox creates the sandbox, or starts it again, so a VM is running.
 	sandbox := func() {
 		t.Helper()
-		if _, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "launchd", CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+		if _, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "launchd", CPUs: 1, MemoryMB: 512, DiskGB: 3}); err != nil {
 			t.Fatal(err)
 		}
 		if n := vmHelpers(t); n <= helpers {

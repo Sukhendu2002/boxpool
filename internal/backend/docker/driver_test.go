@@ -22,6 +22,34 @@ import (
 
 var spec = backend.Spec{Name: "web", CPUs: 1, MemoryMB: 256}
 
+func TestDesktopImageSelection(t *testing.T) {
+	for _, override := range []string{"", "local-desktop:dev"} {
+		t.Run(override, func(t *testing.T) {
+			t.Setenv("BOXPOOL_DESKTOP_IMAGE", override)
+			ctx := context.Background()
+			f := newFakeEngine(t)
+			want := override
+			if want == "" {
+				want = DefaultDesktopImage
+			}
+			repo, tag, err := splitImage(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.pullable[repo+" "+tag] = true
+			d := f.driver(ctx, f.serve())
+			s := spec
+			s.Image = "desktop"
+			if _, err := d.Create(ctx, "desktop", s); err != nil {
+				t.Fatal(err)
+			}
+			if got := f.containers[d.name("desktop")].cfg.Image; got != want {
+				t.Fatalf("desktop image %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestLifecycle(t *testing.T) {
 	ctx := context.Background()
 	f := newFakeEngine(t)

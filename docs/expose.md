@@ -43,18 +43,16 @@ features do not require Tailscale Serve.
 
 The image's agent must advertise `tcp` in `GET /v1/version`. Updating the
 head binary alone does not update agents already stored inside sandbox
-disks or containers. The currently pinned `v0.0.1-alpha.1` image predates
-that endpoint; it must be replaced before previews work with defaults.
-An old agent makes the preview answer 502 with an image-update message.
+disks or containers. Fresh sandboxes use the pinned `v0.1.2-image.3` image,
+which includes `tcp`, orderly VM shutdown and the coding agents. Older
+sandboxes, including those created with `v0.0.1-alpha.1`, retain their old
+agent. Back up their work and recreate them after updating the CLI and
+running `boxpool up` to update the daemon. An old agent makes the preview
+answer 502 with an image-update message. Stop/start and old snapshots do
+not install a new agent.
 
-For a user trying previews before the base pin is updated, follow the
-[desktop image installation](desktop.md#install-the-image-on-each-desktop-capable-node),
-then create a fresh sandbox with `boxpool sh --image desktop --name web`.
-That source-built image includes the current agent and Node.js; it can
-serve an app without starting its graphical desktop. In the check below,
-substitute `web` for `box`. This is optional image preparation, separate
-from the two-node quickstart. Do not modify default image checksums or
-reuse a disk from an old sandbox to enable the feature.
+Desktop sandboxes select the matching published image automatically; see
+[desktop image selection](desktop.md#install-the-image-on-each-desktop-capable-node).
 
 For maintainers, the release and rollout checklist is:
 
@@ -71,7 +69,10 @@ For maintainers, the release and rollout checklist is:
    `internal/artifacts/artifacts.go`, and `DefaultImage`'s verified index
    digest in `internal/backend/docker/config.go`, from those published
    artifacts. Never invent or pre-fill a digest for an unpublished image.
+   Pin the desktop VM rootfs and OCI index from the same release too.
    Build and release the consumer binary with these pins.
+   Each image release uses its own cache directory, so an unpacked disk
+   from a previous release cannot override the new pin.
 4. Back up work from existing sandboxes, then recreate the ones that need
    previews using the updated base image. Stopping and starting an old
    sandbox, or restoring its old disk snapshot, retains its old agent.

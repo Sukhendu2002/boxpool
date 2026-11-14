@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestForPlatform(t *testing.T) {
@@ -46,6 +49,10 @@ func TestForPlatform(t *testing.T) {
 		}
 		if !slices.Equal(names, tt.want) {
 			t.Errorf("%s/%s: got %v, want %v", tt.goos, tt.goarch, names, tt.want)
+		}
+		desktop := pinned[tt.goos+"/"+tt.goarch].desktop
+		if desktop.name != "rootfs-desktop-"+tt.goarch+".ext4.zst" || desktop.url != imageURL+desktop.name || !hexSum.MatchString(desktop.sha256) || desktop.size <= 0 {
+			t.Errorf("%s/%s: bad desktop pin %+v", tt.goos, tt.goarch, desktop)
 		}
 	}
 	for _, p := range [][2]string{{"darwin", "amd64"}, {"windows", "amd64"}, {"linux", "riscv64"}} {
@@ -281,6 +288,7 @@ func TestFetchReal(t *testing.T) {
 	t.Logf("fetched %+v", paths)
 
 	list, _ := forPlatform(runtime.GOOS, runtime.GOARCH)
+	dir = filepath.Dir(paths.Rootfs)
 	got, err := fetch(ctx, dir, http.DefaultClient, list)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("second run downloaded %v, %v", got, err)
@@ -295,4 +303,78 @@ func TestFetchReal(t *testing.T) {
 		t.Fatalf("after truncating %s downloaded %v, %v", paths.Kernel, got, err)
 	}
 	t.Logf("truncated %s was downloaded again", filepath.Base(paths.Kernel))
+}
+
+func TestImageUpgradeCache(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	// The old release unpacked into the top-level artifacts directory.
+	legacy := filepath.Join(dir, "rootfs-arm64.ext4")
+	if err := os.WriteFile(legacy, []byte("old agent"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer enc.Close()
+	base, desktop := enc.EncodeAll([]byte("new base agent"), nil), enc.EncodeAll([]byte("new desktop agent"), nil)
+	srv, hits := server(t, map[string][]byte{"kernel": []byte("kernel"), "rootfs-arm64.ext4.zst": base, "rootfs-desktop-arm64.ext4.zst": desktop}, nil)
+	a := func(name string, b []byte) artifact {
+		return artifact{name, srv.URL + "/" + name, sum(b), int64(len(b))}
+	}
+	p := platform{kernel: a("kernel", []byte("kernel")), rootfs: a("rootfs-arm64.ext4.zst", base), desktop: a("rootfs-desktop-arm64.ext4.zst", desktop)}
+	paths, err := fetchPlatform(ctx, dir, srv.Client(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(paths.Rootfs) != filepath.Join(dir, imageVersion) || hits[p.desktop.name].Load() != 0 {
+		t.Fatalf("base fetch: %+v; desktop downloads %d", paths, hits[p.desktop.name].Load())
+	}
+	root, err := Rootfs(ctx, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(root); string(b) != "new base agent" {
+		t.Fatalf("upgrade reused old rootfs: %q", b)
+	}
+	if b, _ := os.ReadFile(legacy); string(b) != "old agent" {
+		t.Fatalf("legacy rootfs modified: %q", b)
+	}
+	for range 2 {
+		path, err := desktopRootfs(ctx, filepath.Dir(root), srv.Client(), p.desktop)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(path); string(b) != "new desktop agent" {
+			t.Fatalf("desktop image: %q", b)
+		}
+	}
+	if hits[p.desktop.name].Load() != 1 {
+		t.Fatalf("desktop downloaded %d times", hits[p.desktop.name].Load())
+	}
+	// A bad download must never be unpacked, even on the lazy desktop path.
+	p.desktop.sha256 = sum([]byte("wrong checksum"))
+	if _, err := desktopRootfs(ctx, t.TempDir(), srv.Client(), p.desktop); err == nil {
+		t.Fatal("corrupt desktop accepted")
+	}
+}
+
+func TestDesktopDownloadCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		cancel()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	a := artifact{"rootfs-desktop.ext4.zst", srv.URL, sum([]byte("unused")), 6}
+	if _, err := desktopRootfs(ctx, dir, srv.Client(), a); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled desktop download: %v", err)
+	}
+	if names := entries(t, dir); len(names) != 0 {
+		t.Fatalf("canceled download left files: %v", names)
+	}
 }

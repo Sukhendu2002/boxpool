@@ -21,7 +21,7 @@ func openDriver(ctx context.Context, dir string, info *Info, st *store.Store) (D
 	if info.Arch != "arm64" {
 		return nil, fmt.Errorf("the Virtualization framework backend requires Apple silicon")
 	}
-	slog.Info("fetching the guest image; the first time downloads about 45 MB")
+	slog.Info("fetching the guest image; the first time downloads about 350 MB")
 	start := time.Now()
 	paths, err := artifacts.Fetch(ctx, filepath.Join(dir, artifacts.DirName))
 	if err != nil {

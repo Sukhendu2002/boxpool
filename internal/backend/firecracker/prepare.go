@@ -3,6 +3,7 @@ package firecracker
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -15,19 +16,19 @@ import (
 
 // prepare unpacks the fetched artifacts next to them, once: the firecracker
 // binary from its release tarball and the base rootfs from its zstd file.
-func prepare(p artifacts.Paths) (firecracker, rootfs string, err error) {
+func prepare(ctx context.Context, p artifacts.Paths) (firecracker, rootfs string, err error) {
 	if !strings.HasSuffix(p.Firecracker, ".tgz") {
 		return "", "", fmt.Errorf("unexpected artifact name %s", p.Firecracker)
 	}
 	// The release tarball holds release-<v>-<arch>/firecracker-<v>-<arch>.
 	firecracker = strings.TrimSuffix(p.Firecracker, ".tgz")
-	err = artifacts.UnpackOnce(firecracker, 0755, func(w *os.File) error {
+	err = artifacts.UnpackOnce(ctx, firecracker, 0755, func(w *os.File) error {
 		return extract(p.Firecracker, filepath.Base(firecracker), w)
 	})
 	if err != nil {
 		return "", "", err
 	}
-	rootfs, err = artifacts.Rootfs(p)
+	rootfs, err = artifacts.Rootfs(ctx, p)
 	return firecracker, rootfs, err
 }
 

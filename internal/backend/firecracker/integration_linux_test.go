@@ -40,7 +40,7 @@ func stateDir(t *testing.T) string {
 func TestIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	d, id, l, run := newSandbox(t, ctx, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1})
+	d, id, l, run := newSandbox(t, ctx, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 3})
 	shutdown := false // whether the guest agent serves POST /v1/shutdown
 	stop := func() {
 		t.Helper()
@@ -81,14 +81,18 @@ func TestIntegration(t *testing.T) {
 				t.Fatal(err)
 			}
 			shutdown = slices.Contains(v.Features, agent.FeatureShutdown)
+			if !shutdown || !slices.Contains(v.Features, agent.FeatureTCP) {
+				t.Fatalf("pinned agent lacks preview/shutdown: %+v", v)
+			}
+			t.Logf("coding agents:\n%s", run("claude --version && codex --version && gemini --version"))
 			t.Logf("agent %s, shutdown endpoint: %v", v.Agent, shutdown)
 			// nproc follows the virtual CPU count. Linux reserves some of
 			// the configured 512 MiB for its kernel, so MemTotal is lower.
-			out := run(`test "$(nproc)" -eq 1 && awk '/^MemTotal:/ { print; if ($2 < 419430 || $2 > 524288) exit 1 }' /proc/meminfo && test "$(blockdev --getsize64 /dev/vda)" -eq 1073741824 && df -k /`)
-			t.Logf("requested 1 CPU, 512 MiB, 1 GiB disk:\n%s", out)
+			out := run(`test "$(nproc)" -eq 1 && awk '/^MemTotal:/ { print; if ($2 < 419430 || $2 > 524288) exit 1 }' /proc/meminfo && test "$(blockdev --getsize64 /dev/vda)" -eq 3221225472 && df -k /`)
+			t.Logf("requested 1 CPU, 512 MiB, 3 GiB disk:\n%s", out)
 			// The filesystem, as well as its block device, must have grown.
-			run(`df -k --output=size / | tail -n 1 | { read size; test "$size" -gt 900000; }`)
-			if _, err := d.Create(ctx, "too-much-memory", backend.Spec{CPUs: 1, MemoryMB: 1 << 30, DiskGB: 1}); err == nil || !strings.Contains(err.Error(), "insufficient memory") {
+			run(`df -k --output=size / | tail -n 1 | { read size; test "$size" -gt 2800000; }`)
+			if _, err := d.Create(ctx, "too-much-memory", backend.Spec{CPUs: 1, MemoryMB: 1 << 30, DiskGB: 3}); err == nil || !strings.Contains(err.Error(), "insufficient memory") {
 				t.Fatalf("capacity refusal: %v", err)
 			}
 			if _, err := os.Stat(sandboxLayout(d.root, "too-much-memory").dir); !os.IsNotExist(err) {
@@ -165,7 +169,7 @@ func TestIntegration(t *testing.T) {
 func TestIntegrationPause(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	d, id, l, run := newSandbox(t, ctx, backend.Spec{CPUs: 1, MemoryMB: 2048, DiskGB: 1})
+	d, id, l, run := newSandbox(t, ctx, backend.Spec{CPUs: 1, MemoryMB: 2048, DiskGB: 3})
 	if err := d.Start(ctx, id); err != nil {
 		t.Fatal(err)
 	}

@@ -50,7 +50,7 @@ rerun doctor in the same account, then rerun `up`.
   a container. For development, [foreground daemon setup](development.md)
   is available, with different privilege/networking constraints.
 - **Download, checksum or startup timeout:** first start fetches roughly
-  60 MB on Linux VMs or 45 MB on Macs. Check internet access to GitHub
+  360 MB on Linux VMs or 350 MB on Macs. Check internet access to GitHub
   releases, disk space, and the daemon log below. Rerun `up` after fixing
   connectivity. Do not bypass a checksum failure; verify the release
   source and retry a fresh download.
@@ -140,11 +140,12 @@ actual daemon account. Creating a URL also checks Serve permissions.
 Remote `login` does not redirect `expose` or `desktop` to the head.
 
 A 502 mentioning the agent's `tcp` feature means the guest image is too
-old. The default pinned `v0.0.1-alpha.1` image lacks it. A CLI update,
-stop/start, or an old snapshot does not update that guest. See
-[image rollout](expose.md#guest-images). A missing desktop rootfs/image
-needs [explicit desktop setup](desktop.md#install-the-image-on-each-desktop-capable-node)
-on the selected node. Install it before `sh --image desktop`.
+old. Fresh sandboxes use `v0.1.2-image.3`, which includes it. Back up and recreate
+older sandboxes after updating the CLI and daemon; stop/start or an old
+snapshot does not update that guest. See [image rollout](expose.md#guest-images).
+Desktop images download on first use (about 600 MB). If that fails, check
+network access and free disk space on the selected node. If a desktop image
+override is set, check its path/tag in the daemon environment.
 
 For a URL that will not open, connect the viewing device to the same
 tailnet and allow the allocated HTTPS port (not just 443). A 401 without

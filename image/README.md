@@ -128,9 +128,10 @@ file vmlinux-amd64 bzImage-amd64 /tmp/boxpool-rootfs-amd64.ext4
 New images include `procps` for `free -m`. The actual VM smoke boots with
 1 vCPU and 512 MiB, checks `nproc`, and checks that `free -m` reports usable
 guest RAM within the configured limit (the kernel reserves some RAM).
-The currently pinned `v0.0.1-alpha.1` artifacts predate `procps`; read
-`/proc/meminfo` there. Publishing a new image release is a separate step;
-building these changes does not replace released images or their digest.
+The default pins select release `v0.1.2-image.3` for both base and desktop images,
+including `procps`, coding CLIs and the preview-capable agent. Publishing a
+new image release is a separate step; building changes does not replace
+released images or their digest. VM caches are separated by image release.
 
 - Debian `bookworm-slim` multi-architecture index
   `sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8`.

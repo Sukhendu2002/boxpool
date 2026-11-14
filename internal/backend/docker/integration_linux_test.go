@@ -90,8 +90,13 @@ type sandbox struct {
 }
 
 func newSandbox(ctx context.Context, t *testing.T, d *Driver) *sandbox {
+	return newSandboxSpec(ctx, t, d, backend.Spec{CPUs: 1, MemoryMB: 512})
+}
+
+func newSandboxSpec(ctx context.Context, t *testing.T, d *Driver, spec backend.Spec) *sandbox {
 	id := randomID()
-	if _, err := d.Create(ctx, id, backend.Spec{Name: "it-" + id, CPUs: 1, MemoryMB: 512}); err != nil {
+	spec.Name = "it-" + id
+	if _, err := d.Create(ctx, id, spec); err != nil {
 		t.Fatal(err)
 	}
 	c := agent.NewClient(func(ctx context.Context) (net.Conn, error) { return d.Dial(ctx, id) })
@@ -102,6 +107,35 @@ func newSandbox(ctx context.Context, t *testing.T, d *Driver) *sandbox {
 		}
 	})
 	return &sandbox{t, id, c}
+}
+
+func TestIntegrationDesktop(t *testing.T) {
+	t.Setenv("BOXPOOL_DESKTOP_IMAGE", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+	d := newTestDriver(ctx, t)
+	s := newSandboxSpec(ctx, t, d, backend.Spec{Image: "desktop", CPUs: 2, MemoryMB: 2048})
+	if err := d.Start(ctx, s.id); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.c.Version(ctx)
+	if err != nil || !slices.Contains(v.Features, agent.FeatureDesktop) || !slices.Contains(v.Features, agent.FeatureTCP) {
+		t.Fatalf("pinned desktop features: %+v, %v", v, err)
+	}
+	view, err := s.c.StartDesktop(ctx)
+	if err != nil || view.Display != ":0" || view.HumanControl {
+		t.Fatalf("start desktop: %+v, %v", view, err)
+	}
+	t.Logf("desktop %+v, %s", view, s.run(ctx, `set -eu
+i=0
+until DISPLAY=:0 xdotool search --onlyvisible --class chromium 2>/dev/null; do
+    i=$((i+1)); test "$i" -lt 100; sleep 0.1
+done
+DISPLAY=:0 xwd -root -silent > /tmp/screen.xwd
+test -s /tmp/screen.xwd
+test "$(tigervncconfig -display :0 -get AcceptKeyEvents)" = 0
+test "$(tigervncconfig -display :0 -get AcceptPointerEvents)" = 0
+chromium --version`))
 }
 
 // try runs a shell script in the sandbox and returns its exit code and
@@ -221,6 +255,11 @@ fi
 awk '/^MemTotal:/ {print "host memory view:", $0}' /proc/meminfo`)
 		t.Logf("requested 1 CPU and 512 MiB; cgroup limits:\n%s", out)
 	}
+	v, err := a.c.Version(ctx)
+	if err != nil || !slices.Contains(v.Features, agent.FeatureTCP) {
+		t.Fatalf("pinned base agent lacks previews: %+v, %v", v, err)
+	}
+	t.Logf("coding agents:\n%s", a.run(ctx, "claude --version && codex --version && gemini --version"))
 
 	// The agent socket: made by the container's root, reachable by the
 	// daemon's user (this test) through a directory only it can enter.

@@ -60,8 +60,9 @@ jobs:
         run: |
           set -o pipefail
           go test -c -tags integration -o "$RUNNER_TEMP/docker.test" ./internal/backend/docker/
-          sudo --preserve-env=BOXPOOL_TEST_REQUIRE_DOCKER "$RUNNER_TEMP/docker.test" -test.count=1 -test.v -test.timeout 12m -test.run '^TestIntegration$' | tee "$RUNNER_TEMP/integration.log"
+          sudo --preserve-env=BOXPOOL_TEST_REQUIRE_DOCKER "$RUNNER_TEMP/docker.test" -test.count=1 -test.v -test.timeout 12m -test.run '^TestIntegration(Desktop)?$' | tee "$RUNNER_TEMP/integration.log"
           grep -q '^--- PASS: TestIntegration ' "$RUNNER_TEMP/integration.log"
+          grep -q '^--- PASS: TestIntegrationDesktop ' "$RUNNER_TEMP/integration.log"
           ! grep -q -- '--- SKIP' "$RUNNER_TEMP/integration.log"
       - name: Run boxpool sh's daemon integration test on Docker
         shell: bash

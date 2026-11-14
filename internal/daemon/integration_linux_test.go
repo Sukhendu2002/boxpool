@@ -69,7 +69,7 @@ func integrationSh(t *testing.T, dir, backend string) {
 	defer cancel()
 	stop := start(t, dir, daemon.Info{Backend: backend})
 	c := client.New(dir)
-	sb, err := c.CreateSandbox(ctx, daemon.CreateRequest{CPUs: 1, MemoryMB: 512, DiskGB: 1})
+	sb, err := c.CreateSandbox(ctx, daemon.CreateRequest{CPUs: 1, MemoryMB: 512, DiskGB: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func integrationSh(t *testing.T, dir, backend string) {
 	if sb.Backend != backend {
 		t.Errorf("backend %q, want %q", sb.Backend, backend)
 	}
-	if sb.CPUs != 1 || sb.MemoryMB != 512 || sb.DiskGB != 1 {
+	if sb.CPUs != 1 || sb.MemoryMB != 512 || sb.DiskGB != 3 {
 		t.Fatalf("requested limits were not stored: %+v", sb)
 	}
 	run := func(script string) string {
@@ -100,7 +100,7 @@ func integrationSh(t *testing.T, dir, backend string) {
 	if backend == "firecracker" {
 		t.Logf("guest resources:\n%s", run(`set -eu
 awk '/^MemTotal:/ {print; found=1; if ($2 < 419430 || $2 > 524288) exit 1} END {if (!found) exit 1}' /proc/meminfo
-test "$(blockdev --getsize64 /dev/vda)" -eq 1073741824
+test "$(blockdev --getsize64 /dev/vda)" -eq 3221225472
 df -k /`))
 	} else {
 		t.Logf("memory cgroup limit:\n%s", run(`set -eu
@@ -114,8 +114,8 @@ printf '%s\n' "$limit"`))
 		req      daemon.CreateRequest
 		resource string
 	}{
-		{"too-many-cpus", daemon.CreateRequest{CPUs: 1 << 20, MemoryMB: 512, DiskGB: 1}, "CPU"},
-		{"too-much-memory", daemon.CreateRequest{CPUs: 1, MemoryMB: 1 << 30, DiskGB: 1}, "memory"},
+		{"too-many-cpus", daemon.CreateRequest{CPUs: 1 << 20, MemoryMB: 512, DiskGB: 3}, "CPU"},
+		{"too-much-memory", daemon.CreateRequest{CPUs: 1, MemoryMB: 1 << 30, DiskGB: 3}, "memory"},
 	} {
 		req := oversized.req
 		req.Name = oversized.name
@@ -149,7 +149,7 @@ printf '%s\n' "$limit"`))
 	snapshotRoundTrip(t, ctx, c, sb.Name, backend)
 
 	// ls, stop and rm, across a daemon restart.
-	other, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "other", CPUs: 1, MemoryMB: 512, DiskGB: 1})
+	other, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: "other", CPUs: 1, MemoryMB: 512, DiskGB: 3})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func snapshotRoundTrip(t *testing.T, ctx context.Context, c *client.Client, name
 	}
 	run(name, "echo source > /root/installed")
 	for _, n := range []string{"from-a", "from-b"} {
-		if _, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: n, From: "it-snap", CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+		if _, err := c.CreateSandbox(ctx, daemon.CreateRequest{Name: n, From: "it-snap", CPUs: 1, MemoryMB: 512, DiskGB: 3}); err != nil {
 			t.Fatal(err)
 		}
 	}

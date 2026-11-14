@@ -6,80 +6,36 @@ existing packages. Audio and GPU acceleration are not included.
 
 ## Install the image on each desktop-capable node
 
-Desktop artifacts are built and published separately from the pinned base
-release. Until a desktop release is pinned by the binary, install the tested
-artifact explicitly; selecting desktop never silently falls back to base.
-Build from a [source checkout](guide.md#installation-options) on a machine
-with Docker Engine and buildx (Docker Desktop on macOS also works).
-Use `amd64` on x86 Linux and `arm64` on Apple silicon or arm64 Linux;
-commands below show arm64:
+Base and desktop images are pinned to release `v0.1.2-image.3`. On Firecracker
+and Virtualization.framework, the first `boxpool sh --image desktop`
+downloads and verifies the matching desktop rootfs (about 600 MB), then
+unpacks it into the release-specific artifact cache. Subsequent creates
+reuse that disk. Docker pulls the pinned multi-architecture desktop index.
+No source build or manual image installation is required.
+
+The base rootfs is 2 GiB and the desktop rootfs is 4 GiB; the default
+10 GiB sandbox disk fits either. Desktop sandboxes cold-boot and never
+restore the base image's warm memory. Existing sandboxes and snapshots
+retain their original image; create a new desktop sandbox after upgrading.
+The desktop uses the same pinned kernel as the base image.
+
+For image development, build with Docker Engine and buildx:
 
 ```sh
 IMAGE_VARIANT=desktop IMAGE_VERSION=desktop-dev image/build.sh arm64
 image/test-desktop.sh boxpool-desktop:desktop-dev-arm64
 ```
 
-For Firecracker or Virtualization.framework, decompress the matching
+Use `amd64` on x86 Linux and `arm64` on Apple silicon or arm64 Linux.
+For VMs, decompress the matching
 `dist/image/desktop/<arch>/current/rootfs-desktop-<arch>.ext4.zst` into a
-host-owned, immutable base disk. Set `BOXPOOL_DESKTOP_ROOTFS` to its absolute
-path in the **daemon's environment** and restart the daemon. The default
-lookup is `rootfs-desktop.ext4` next to the unpacked base rootfs in the
-artifacts directory. The desktop uses the existing base image's kernel.
-Do not change or replace a disk while a sandbox is being created.
-
-For the standard service, you can use that default lookup without editing
-its environment. On the target node, install `zstd` (`brew install zstd`
-on a Mac, `sudo apt-get install zstd` on Debian/Ubuntu), and run `up` once
-so the base artifacts directory exists. Transfer the compressed desktop
-disk to that node if built elsewhere. From the checkout where it was built,
-for **Linux arm64 with Firecracker**:
-
-```sh
-sudo /usr/local/bin/boxpool down
-zstd -d dist/image/desktop/arm64/current/rootfs-desktop-arm64.ext4.zst -o /tmp/boxpool-desktop.ext4
-sudo install -m 0600 /tmp/boxpool-desktop.ext4 /var/lib/boxpool/artifacts/rootfs-desktop.ext4
-sudo /usr/local/bin/boxpool up
-```
-
-Substitute `amd64` in both the output directory and filename for x86 Linux.
-For a **Mac**, use a temporary file on the state filesystem, then rename
-it into the default location while the daemon is stopped:
-
-```sh
-boxpool down
-zstd -d dist/image/desktop/arm64/current/rootfs-desktop-arm64.ext4.zst \
-  -o "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4.new"
-chmod 0600 "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4.new"
-mv "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4.new" \
-  "$HOME/Library/Application Support/boxpool/artifacts/rootfs-desktop.ext4"
-boxpool up
-```
-
-These paths assume default state directories; adapt them if you configured
-`BOXPOOL_HOME` on macOS. Use unused temporary output names; `zstd` refuses
-to overwrite an existing file. Keep the installed base disk unchanged
-while the daemon runs. Mac `down` stops VMs, so save work first.
-
-For Docker fallback, load the matching OCI image into the daemon's Docker
-engine and set `BOXPOOL_DESKTOP_IMAGE=boxpool-desktop:desktop-dev-arm64`
-in the daemon's environment. For the standard Linux service, run
-`sudo systemctl edit boxpool` and add:
-
-```ini
-[Service]
-Environment="BOXPOOL_DESKTOP_IMAGE=boxpool-desktop:desktop-dev-arm64"
-```
-
-Then run `sudo systemctl restart boxpool`. Use the matching architecture
-tag from your build. This override survives `boxpool up`; remove it when
-switching images. Exporting the variable in your interactive shell does
-not configure systemd. A tag or digest is required. Both variants
-also publish versioned multi-architecture images and checksummed ext4
-artifacts in the guest-image release workflow.
-
-A source build embeds the new agent. Existing base images do not gain the
-desktop API until rebuilt. A desktop sandbox cold-boots; it never restores
-the base image's warm memory.
+host-owned disk and set `BOXPOOL_DESKTOP_ROOTFS` to its absolute path in
+the **daemon's environment**. For Docker, set `BOXPOOL_DESKTOP_IMAGE` to
+the built tag or an immutable registry digest. Restart the daemon with
+these overrides; `up` does not automatically copy arbitrary environment
+variables into systemd or launchd. The VM override must be a regular file;
+a missing override fails rather than downloading another disk. Keep the
+override immutable while sandboxes are being created.
 
 ## Open and control a desktop
 
@@ -151,7 +107,7 @@ exclusion, proxy authentication and local/remote node routing.
 
 Manual acceptance checks on real Linux and macOS nodes:
 
-1. Install the matching desktop disk/image above; run
+1. With image overrides unset, run
    `boxpool sh --image desktop --name browser`. In another terminal run
    `boxpool desktop browser`; Chromium should be visible.
 2. Open the printed link on a tailnet-connected phone, then close that
