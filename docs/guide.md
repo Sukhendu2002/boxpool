@@ -100,8 +100,9 @@ starts and finds it stopped, including after a host reboot. The default
 `--restart no` leaves it stopped. Docker's memory and CPU limits are
 host-enforced, but `free` inside a container shows host RAM. Docker disk
 size is advisory: there is no portable per-volume quota; monitor the
-Engine's disk. VMs reserve their full requested disk budget against free
-space. See [resource details](development.md#sandbox-resources).
+Engine's disk. VMs reserve their full requested disk budget against available
+capacity. On macOS this includes space the OS expects to reclaim, matching
+the capacity used by `doctor`. See [resource details](development.md#sandbox-resources).
 
 ## Snapshots
 

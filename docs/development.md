@@ -657,7 +657,9 @@ Firecracker sets the vCPU count and memory in its machine config, then
 boots a private ext4 rootfs grown to the requested GiB with host
 `resize2fs` (`e2fsprogs`). It refuses shrinking below the base image size.
 Disk admission conservatively charges **the entire disk budget of every
-VM against current free space**, including already allocated blocks. This
+VM against current available capacity**, including already allocated blocks. On
+macOS, preflight and admission use the same important-usage capacity estimate,
+which includes OS-reclaimable space; Linux uses immediately free blocks. This
 protects future sparse growth and reflink copies at the cost of sometimes
 rejecting early. The cached image stays unchanged. `nproc` matches the CPU
 request; `/proc/meminfo` and `free -m` show usable guest RAM, slightly below

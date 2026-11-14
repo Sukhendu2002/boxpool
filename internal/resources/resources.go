@@ -19,7 +19,8 @@ import (
 
 // Capacity is a snapshot of the node. CPUs lists the allowed logical CPU
 // IDs, MemoryMB is total physical memory, AvailableMB excludes memory in
-// active use, and DiskBytes is currently available space on the state FS.
+// active use, and DiskBytes is available space on the state FS. On macOS
+// this includes capacity the OS expects to reclaim for important usage.
 type Capacity struct {
 	CPUs                             []int
 	MemoryMB, AvailableMB, DiskBytes int64
@@ -200,7 +201,7 @@ func (m *Manager) allocations() ([]Allocation, error) {
 // reduces MemAvailable, and protects the future use of stopped/idle ones.
 // All created sandboxes, including stopped ones, retain their commitments.
 // Disk admission conservatively reserves each VM's entire size against
-// current free space, including sparse holes and possible reflink CoW.
+// current available capacity, including sparse holes and possible reflink CoW.
 func Admit(c Capacity, existing []Allocation, spec backend.Spec, diskBytes int64) (Allocation, error) {
 	var err error
 	spec, err = spec.WithDefaults()

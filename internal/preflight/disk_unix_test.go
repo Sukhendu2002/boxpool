@@ -9,11 +9,13 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"boxpool.run/boxpool/internal/diskspace"
 )
 
 func TestDiskSpaceCheck(t *testing.T) {
 	cases := []struct {
-		free uint64
+		free int64
 		want bool
 	}{
 		{0, false},
@@ -23,7 +25,7 @@ func TestDiskSpaceCheck(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(fmt.Sprint(c.free), func(t *testing.T) {
-			got := diskSpaceCheck(c.free, "/state")
+			got := diskSpaceCheck(diskspace.Info{FreeBytes: c.free, AvailableBytes: c.free}, "/state")
 			if got.OK != c.want || !got.Required || got.Warn {
 				t.Errorf("diskSpaceCheck(%d) = %+v", c.free, got)
 			}
@@ -35,11 +37,32 @@ func TestDiskSpaceCheck(t *testing.T) {
 	}
 }
 
+func TestDiskSpaceCheckReclaimable(t *testing.T) {
+	for _, tc := range []struct {
+		available int64
+		want      bool
+	}{
+		{19_999_999_999, false},
+		{20_000_000_000, true},
+		{53_000_000_000, true},
+	} {
+		got := diskSpaceCheck(diskspace.Info{FreeBytes: 16_000_000_000, AvailableBytes: tc.available}, "/state")
+		want := fmt.Sprintf("%d GB available at /state (16 GB immediately free; includes reclaimable space; need 20 GB)", tc.available/1_000_000_000)
+		if got.OK != tc.want || !got.Required || got.Warn || got.Detail != want {
+			t.Errorf("available %d: %+v", tc.available, got)
+		}
+	}
+}
+
+func diskDetailAt(c Check, path string) bool {
+	return strings.Contains(c.Detail, " at "+path+" (") && strings.Contains(c.Detail, "need 20 GB)")
+}
+
 func TestDiskCheckAt(t *testing.T) {
 	dir := t.TempDir()
 	for _, path := range []string{dir, filepath.Join(dir, "missing", "state")} {
 		c := diskCheckAt(path)
-		if !strings.Contains(c.Detail, " GB free at "+dir+" (need 20 GB)") || !c.Required {
+		if !diskDetailAt(c, dir) || !c.Required {
 			t.Errorf("diskCheckAt(%q) = %+v", path, c)
 		}
 	}
@@ -60,7 +83,7 @@ func TestDiskCheckStateDirectory(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("BOXPOOL_HOME", filepath.Join(dir, "state"))
 	c := diskCheck()
-	if !strings.Contains(c.Detail, " GB free at "+dir+" (need 20 GB)") {
+	if !diskDetailAt(c, dir) {
 		t.Errorf("BOXPOOL_HOME ignored: %+v", c)
 	}
 
@@ -72,7 +95,7 @@ func TestDiskCheckStateDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 		c = diskCheck()
-		if !strings.Contains(c.Detail, " GB free at "+path+" (need 20 GB)") {
+		if !diskDetailAt(c, path) {
 			t.Errorf("macOS default state directory ignored: %+v", c)
 		}
 	} else {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"runtime"
 
+	"boxpool.run/boxpool/internal/diskspace"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -27,13 +29,10 @@ func hostCapacity(path string) (Capacity, error) {
 	}
 	c.MemoryMB = int64(total >> 20)
 	c.AvailableMB = c.MemoryMB * int64(level) / 100
-	var stat unix.Statfs_t
-	if err := unix.Statfs(path, &stat); err != nil {
+	space, err := diskspace.Probe(path)
+	if err != nil {
 		return c, err
 	}
-	if stat.Bsize == 0 || stat.Bavail > uint64((1<<63-1)/int64(stat.Bsize)) {
-		return c, fmt.Errorf("invalid free disk size")
-	}
-	c.DiskBytes = int64(stat.Bavail) * int64(stat.Bsize)
+	c.DiskBytes = space.AvailableBytes
 	return c, nil
 }

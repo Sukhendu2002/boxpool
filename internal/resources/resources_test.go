@@ -64,6 +64,8 @@ func TestAdmit(t *testing.T) {
 		{name: "existing plus reserve exact", change: func(c *Capacity) { c.AvailableMB = 3584 }, existing: []Allocation{{Spec: backend.Spec{CPUs: 1, MemoryMB: 2048}}}, request: spec},
 		{name: "disk", request: spec, disk: 41 << 30, want: "insufficient disk"},
 		{name: "existing disk", existing: []Allocation{{Spec: backend.Spec{CPUs: 1, MemoryMB: 512}, DiskBytes: 40 << 30}}, request: spec, disk: 1 << 30, want: "insufficient disk"},
+		{name: "reclaimable capacity still reserves full disks", change: func(c *Capacity) { c.DiskBytes = 53_000_000_000 }, existing: []Allocation{{Spec: backend.Spec{CPUs: 1, MemoryMB: 512}, DiskBytes: 40_000_000_000}}, request: spec, disk: 13_000_000_001, want: "insufficient disk"},
+		{name: "reclaimable capacity exact reservation boundary", change: func(c *Capacity) { c.DiskBytes = 53_000_000_000 }, existing: []Allocation{{Spec: backend.Spec{CPUs: 1, MemoryMB: 512}, DiskBytes: 40_000_000_000}}, request: spec, disk: 13_000_000_000},
 		{name: "docker disk limitation", change: func(c *Capacity) { c.DiskBytes = 0 }, request: spec},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

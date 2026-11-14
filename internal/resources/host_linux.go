@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"boxpool.run/boxpool/internal/diskspace"
+
 	"golang.org/x/sys/unix"
 )
 
@@ -30,14 +32,11 @@ func hostCapacity(path string) (Capacity, error) {
 	if err != nil {
 		return c, err
 	}
-	var stat unix.Statfs_t
-	if err := unix.Statfs(path, &stat); err != nil {
+	space, err := diskspace.Probe(path)
+	if err != nil {
 		return c, err
 	}
-	if stat.Bsize <= 0 || stat.Bavail > uint64((1<<63-1)/stat.Bsize) {
-		return c, fmt.Errorf("invalid free disk size")
-	}
-	c.DiskBytes = int64(stat.Bavail) * stat.Bsize
+	c.DiskBytes = space.AvailableBytes
 	return c, nil
 }
 

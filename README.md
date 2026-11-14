@@ -17,8 +17,10 @@ You need a terminal on each (SSH is fine) and internet for the first
 image download. Allow about ten minutes once host prerequisites and
 network access are ready; first downloads may take longer.
 
-Both hosts need at least **20 GB free** in the state filesystem, plus CPU
-and memory for sandboxes. Defaults per sandbox are 2 CPUs, 2 GiB RAM and
+Both hosts need at least **20 GB available** in the state filesystem, plus CPU
+and memory for sandboxes. On macOS, this includes OS-reclaimable capacity;
+`doctor` reports immediately free space separately when it differs.
+Defaults per sandbox are 2 CPUs, 2 GiB RAM and
 10 GiB disk; Boxpool also reserves one CPU and at least 1 GiB RAM for the
 host. The smaller examples below request 1 CPU and 512 MiB RAM.
 
