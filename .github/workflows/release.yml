@@ -9,6 +9,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/release.yml'
+      - 'internal/artifacts/**'
+      - 'internal/backend/docker/config.go'
       - 'scripts/vz.entitlements'
       - 'scripts/prepare-distribution.py'
       - 'scripts/install.sh'

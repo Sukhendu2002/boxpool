@@ -68,8 +68,8 @@ func TestContainerConfig(t *testing.T) {
 
 func TestSplitImage(t *testing.T) {
 	for _, c := range []struct{ ref, repo, tag string }{
-		{DefaultImage, "ghcr.io/sukhendu2002/boxpool-image", "sha256:1df25000a2acd62f2c2aca7a7e49933958f1e51c3b1f674fdf98364d06902647"},
-		{DefaultDesktopImage, "ghcr.io/sukhendu2002/boxpool-desktop", "sha256:bf323ea90d1d9692b064dd2e82352766820a0352a86978452e9f7daa66a57a2b"},
+		{DefaultImage, "ghcr.io/sukhendu2002/boxpool-image", "sha256:5fe9553b95799a5af4427279ea45cf9666dcb3e7db0ebbd66aa2088bde454734"},
+		{DefaultDesktopImage, "ghcr.io/sukhendu2002/boxpool-desktop", "sha256:25256b5eec5c09adea93d145be01b393a7b73359084346deedd14e441bea9aba"},
 		{"ghcr.io/sukhendu2002/boxpool-image:v0.0.1-alpha.1", "ghcr.io/sukhendu2002/boxpool-image", "v0.0.1-alpha.1"},
 		{"boxpool-image:v1@sha256:abc", "boxpool-image", "sha256:abc"},
 		{"localhost:5000/img:v1", "localhost:5000/img", "v1"},

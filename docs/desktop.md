@@ -6,7 +6,7 @@ existing packages. Audio and GPU acceleration are not included.
 
 ## Install the image on each desktop-capable node
 
-Base and desktop images are pinned to release `v0.1.1`. On Firecracker
+Base and desktop images are pinned to release `v0.1.2-image.3`. On Firecracker
 and Virtualization.framework, the first `boxpool sh --image desktop`
 downloads and verifies the matching desktop rootfs (about 600 MB), then
 unpacks it into the release-specific artifact cache. Subsequent creates

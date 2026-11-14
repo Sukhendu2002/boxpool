@@ -255,6 +255,11 @@ fi
 awk '/^MemTotal:/ {print "host memory view:", $0}' /proc/meminfo`)
 		t.Logf("requested 1 CPU and 512 MiB; cgroup limits:\n%s", out)
 	}
+	v, err := a.c.Version(ctx)
+	if err != nil || !slices.Contains(v.Features, agent.FeatureTCP) {
+		t.Fatalf("pinned base agent lacks previews: %+v, %v", v, err)
+	}
+	t.Logf("coding agents:\n%s", a.run(ctx, "claude --version && codex --version && gemini --version"))
 
 	// The agent socket: made by the container's root, reachable by the
 	// daemon's user (this test) through a directory only it can enter.

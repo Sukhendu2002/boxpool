@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,6 +49,10 @@ func TestForPlatform(t *testing.T) {
 		}
 		if !slices.Equal(names, tt.want) {
 			t.Errorf("%s/%s: got %v, want %v", tt.goos, tt.goarch, names, tt.want)
+		}
+		desktop := pinned[tt.goos+"/"+tt.goarch].desktop
+		if desktop.name != "rootfs-desktop-"+tt.goarch+".ext4.zst" || desktop.url != imageURL+desktop.name || !hexSum.MatchString(desktop.sha256) || desktop.size <= 0 {
+			t.Errorf("%s/%s: bad desktop pin %+v", tt.goos, tt.goarch, desktop)
 		}
 	}
 	for _, p := range [][2]string{{"darwin", "amd64"}, {"windows", "amd64"}, {"linux", "riscv64"}} {
@@ -352,5 +357,24 @@ func TestImageUpgradeCache(t *testing.T) {
 	p.desktop.sha256 = sum([]byte("wrong checksum"))
 	if _, err := desktopRootfs(ctx, t.TempDir(), srv.Client(), p.desktop); err == nil {
 		t.Fatal("corrupt desktop accepted")
+	}
+}
+
+func TestDesktopDownloadCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.(http.Flusher).Flush()
+		cancel()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	a := artifact{"rootfs-desktop.ext4.zst", srv.URL, sum([]byte("unused")), 6}
+	if _, err := desktopRootfs(ctx, dir, srv.Client(), a); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled desktop download: %v", err)
+	}
+	if names := entries(t, dir); len(names) != 0 {
+		t.Fatalf("canceled download left files: %v", names)
 	}
 }

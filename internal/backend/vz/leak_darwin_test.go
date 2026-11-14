@@ -22,7 +22,7 @@ func TestIntegrationNoGoroutineLeak(t *testing.T) {
 	d, _ := integrationSandbox(t)
 	ctx := context.Background()
 	cycle := func(id string) error {
-		if _, err := d.Create(ctx, id, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 1}); err != nil {
+		if _, err := d.Create(ctx, id, backend.Spec{CPUs: 1, MemoryMB: 512, DiskGB: 3}); err != nil {
 			t.Fatal(err)
 		}
 		defer func() {

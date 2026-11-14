@@ -43,7 +43,7 @@ features do not require Tailscale Serve.
 
 The image's agent must advertise `tcp` in `GET /v1/version`. Updating the
 head binary alone does not update agents already stored inside sandbox
-disks or containers. Fresh sandboxes use the pinned `v0.1.1` image,
+disks or containers. Fresh sandboxes use the pinned `v0.1.2-image.3` image,
 which includes `tcp`, orderly VM shutdown and the coding agents. Older
 sandboxes, including those created with `v0.0.1-alpha.1`, retain their old
 agent. Back up their work and recreate them after updating the CLI and

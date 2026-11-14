@@ -140,7 +140,7 @@ actual daemon account. Creating a URL also checks Serve permissions.
 Remote `login` does not redirect `expose` or `desktop` to the head.
 
 A 502 mentioning the agent's `tcp` feature means the guest image is too
-old. Fresh sandboxes use `v0.1.1`, which includes it. Back up and recreate
+old. Fresh sandboxes use `v0.1.2-image.3`, which includes it. Back up and recreate
 older sandboxes after updating the CLI and daemon; stop/start or an old
 snapshot does not update that guest. See [image rollout](expose.md#guest-images).
 Desktop images download on first use (about 600 MB). If that fails, check

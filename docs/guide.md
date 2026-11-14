@@ -73,7 +73,7 @@ not ownership. Copies to a Linux host through sudo are root-owned.
 Copies out reject traversal, hard links, devices and writes through
 symlinks; see the [security notes](security.md).
 
-Fresh sandboxes use the `v0.1.1` image with Claude Code, Codex and Gemini CLI
+Fresh sandboxes use the `v0.1.2-image.3` image with Claude Code, Codex and Gemini CLI
 preinstalled. Existing sandboxes keep the image they were created from. See [image versions and agent setup](../image/README.md#coding-agents).
 Authenticate agents inside the sandbox using the agent's own instructions;
 Boxpool does not copy your host credentials automatically.

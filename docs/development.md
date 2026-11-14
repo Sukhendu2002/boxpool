@@ -12,7 +12,7 @@ go build -o bin/boxpool ./cmd/boxpool
 scripts/dev-sign.sh bin/boxpool
 bin/boxpool up                    # as yourself, not with sudo
 launchctl print gui/$(id -u)/run.boxpool.daemon | grep -E '^\s(state|pid) ='
-bin/boxpool sh --timing --cpu 1 --mem 512m --disk 1g
+bin/boxpool sh --timing --cpu 1 --mem 512m --disk 3g
 uname -m                          # aarch64
 echo kept > /root/stop-test
 exit
@@ -155,7 +155,7 @@ Use a signed binary and a scratch `BOXPOOL_HOME`, so these checks do not
 restart your installed daemon. Start `bin/boxpool daemon` in one terminal;
 use the same `BOXPOOL_HOME` in another:
 
-1. Create two VMs with `bin/boxpool sh --name power-a --cpu 1 --mem 512m --disk 1g`
+1. Create two VMs with `bin/boxpool sh --name power-a --cpu 1 --mem 512m --disk 3g`
    and `power-b` with the same flags; exit each shell without stopping it.
 2. `pmset -g assertions | grep 'boxpool: running sandboxes'` must show one
    `PreventUserIdleSystemSleep` assertion belonging to the daemon PID.
@@ -515,7 +515,7 @@ a `rootfs-<arch>.ext4.zst` in a directory of its own, for example one from
 
 ```sh
 CGO_ENABLED=0 go build -o /tmp/boxpool-agent ./cmd/boxpool-agent
-mkdir /tmp/img && cp --sparse=always ~/.cache/boxpool-test/artifacts/v0.1.1/rootfs-amd64.ext4 /tmp/img/
+mkdir /tmp/img && cp --sparse=always ~/.cache/boxpool-test/artifacts/v0.1.2-image.3/rootfs-amd64.ext4 /tmp/img/
 debugfs -w -f - /tmp/img/rootfs-amd64.ext4 <<'EOF'
 cd /usr/local/bin
 rm boxpool-agent
@@ -627,7 +627,7 @@ on Linux runs it.
 Both drivers and the store default an unspecified Spec to **2 CPUs,
 2048 MiB memory and 10 GiB disk**. Zero selects a default; negative values
 and byte-conversion overflow are rejected. `boxpool sh --cpu 1 --mem 512m
---disk 1g` passes those requests through the daemon to the selected driver.
+--disk 3g` passes those requests through the daemon to the selected driver.
 
 Admission leaves **one logical CPU and max(1024 MiB, 10% of host RAM)** for
 the host. CPU admission uses the daemon's allowed CPU affinity. Memory must
@@ -662,7 +662,7 @@ protects future sparse growth and reflink copies at the cost of sometimes
 rejecting early. The cached image stays unchanged. `nproc` matches the CPU
 request; `/proc/meminfo` and `free -m` show usable guest RAM, slightly below
 the configured amount because of the guest kernel's reservations.
-The pinned `v0.1.1` image includes `procps` for `free`.
+The pinned `v0.1.2-image.3` image includes `procps` for `free`.
 
 Docker sets CPU quota, CPU affinity, memory limit and equal memory-plus-swap
 limit (no swap). `nproc` matches new containers' CPU requests. Its memory

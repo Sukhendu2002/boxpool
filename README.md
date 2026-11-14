@@ -177,7 +177,7 @@ Exiting a shell leaves the sandbox running. Reconnect with `boxpool sh hello`
 
 App previews and desktops need Tailscale on the head and viewing device,
 MagicDNS and HTTPS certificates enabled. Fresh sandboxes use the pinned
-`v0.1.1` guest image with preview support. Existing sandbox disks keep their
+`v0.1.2-image.3` guest image with preview support. Existing sandbox disks keep their
 old agent; back up their work and recreate them if an image update is needed.
 
 Follow [app preview and image setup](docs/expose.md), then start a server

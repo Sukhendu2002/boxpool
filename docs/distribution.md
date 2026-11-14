@@ -66,6 +66,16 @@ replaced by a verified download before it can run.
    publication of an existing version is not supported by npm; inspect
    partial releases and rerun only the failed jobs.
 
+If npm recognizes the release tarball but returns `E404` for
+`PUT https://registry.npmjs.org/boxpool`, confirm the package exists and
+check its trusted publisher in the maintainer's npm account. Match the
+case-sensitive user, repository and workflow fields above, leave the
+environment empty, and allow direct publishing. An unvalidated publisher
+expires after two days; replace an expired configuration and validate it
+with a successful publish. See [npm's troubleshooting and expiry guidance](https://docs.npmjs.com/trusted-publishers/).
+Fix registry authorization before retrying only the failed npm job;
+successful binary and guest-image publication need not be repeated.
+
 `BOXPOOL_CACHE_DIR` overrides the launcher's default
 `$XDG_CACHE_HOME/boxpool` or `~/.cache/boxpool`. Cache entries are separated
 by version, OS and architecture. Installation itself works with npm's

@@ -24,7 +24,7 @@ const DirName = "artifacts"
 // Bumping either version means updating the matching checksums and sizes
 // below.
 const (
-	imageVersion = "v0.1.1"
+	imageVersion = "v0.1.2-image.3"
 	imageURL     = "https://github.com/Sukhendu2002/boxpool/releases/download/" + imageVersion + "/"
 	// Same release and checksums as scripts/bench-boot.sh.
 	firecrackerVersion = "v1.17.0"
@@ -57,19 +57,19 @@ var pinned = map[string]platform{
 	"linux/amd64": {
 		firecracker: firecracker("x86_64", "06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558", 7464385),
 		kernel:      image("vmlinux-amd64", "6515997fbf84e4f7875065e96dc2066cf535d2d825f0c255706147344ae0d13a", 24451352),
-		rootfs:      image("rootfs-amd64.ext4.zst", "0635b600c4e6f7c0b95fe8f04ded322b5886baa398b8898954f21c63ea259adf", 335588678),
-		desktop:     image("rootfs-desktop-amd64.ext4.zst", "23a7964afa03ee8fcefa24b0cd3716221b7a3c6c5185652b80b9cf859520886c", 608324341),
+		rootfs:      image("rootfs-amd64.ext4.zst", "eb766a094bd14d5c11a6f6f0f50e2087df7d37e4fa8b5075601ae689e3d50bbe", 335598253),
+		desktop:     image("rootfs-desktop-amd64.ext4.zst", "79bcf2641ef42648a7b0ce0e34a108fd72108d34b53cc0824e3dcc861fbbd35a", 608326539),
 	},
 	"linux/arm64": {
 		firecracker: firecracker("aarch64", "e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256", 7294031),
 		kernel:      image("vmlinux-arm64", "3bf6f78dd6690fdf58ea7fed4fa5be71233defe9d21b0b1efb77238a2c6c06e1", 18883072),
-		rootfs:      image("rootfs-arm64.ext4.zst", "f7338be4c35f19d02f46180da9e7c8debae4d31e5f9f2f2d92c2c946229da025", 329107922),
-		desktop:     image("rootfs-desktop-arm64.ext4.zst", "c7952858f2136409f6aeb5a07019aa7779478a3adb07904269573aac56842fd3", 600793647),
+		rootfs:      image("rootfs-arm64.ext4.zst", "56919e308fd9ec69a59c9824e14647905d21e0a3f8d90aa42782be0967c7befe", 329115331),
+		desktop:     image("rootfs-desktop-arm64.ext4.zst", "dfcf86595f0e67668678ccf61982a310862c331573c0e5fd50ad37c602a1f04a", 600813449),
 	},
 	"darwin/arm64": {
 		kernel:  image("vmlinux-arm64", "3bf6f78dd6690fdf58ea7fed4fa5be71233defe9d21b0b1efb77238a2c6c06e1", 18883072),
-		rootfs:  image("rootfs-arm64.ext4.zst", "f7338be4c35f19d02f46180da9e7c8debae4d31e5f9f2f2d92c2c946229da025", 329107922),
-		desktop: image("rootfs-desktop-arm64.ext4.zst", "c7952858f2136409f6aeb5a07019aa7779478a3adb07904269573aac56842fd3", 600793647),
+		rootfs:  image("rootfs-arm64.ext4.zst", "56919e308fd9ec69a59c9824e14647905d21e0a3f8d90aa42782be0967c7befe", 329115331),
+		desktop: image("rootfs-desktop-arm64.ext4.zst", "dfcf86595f0e67668678ccf61982a310862c331573c0e5fd50ad37c602a1f04a", 600813449),
 	},
 }
 
