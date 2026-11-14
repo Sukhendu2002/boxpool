@@ -30,8 +30,21 @@ legacy cache isolation, lazy desktop downloads, cancellation/corruption,
 and explicit image overrides. Linux CI requires both default images and
 desktop startup through the actual Firecracker and Docker drivers.
 
-Real Mac base, desktop and legacy-disk upgrade tests are pending. Run a
-signed integration binary with a private artifact cache:
+Real Mac checks passed on macOS 27.2.1, Apple silicon arm64, APFS:
+
+- Default desktop: automatic base/desktop downloads, Chromium
+  `155.0.8059.79`, a visible browser window, a nonempty screenshot, and
+  read-only keyboard/pointer policy. Passed in 200.48 s including downloads.
+- Legacy disk upgrade: an alpha.1 sandbox kept its file and original
+  `v0.0.1-alpha.1` agent after reopening with the new driver defaults; a
+  fresh sandbox selected `v0.1.2-image.3`. Passed in 3.26 s.
+- Base VM: three boots, stop/start persistence, CPU/memory/disk limits,
+  clean filesystem check and the unclean-stop fallback. Passed in 10.77 s.
+  Guest tools reported Claude Code `2.1.310`, Codex `0.164.0` and Gemini
+  `0.65.0`; the agent advertised TCP forwarding and shutdown support.
+
+To reproduce, download the verified legacy fixture described below and run
+a signed integration binary with a private artifact cache:
 
 ```sh
 go test -c -tags integration -o /tmp/boxpool-135-vz.test ./internal/backend/vz
