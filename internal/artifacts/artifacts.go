@@ -136,7 +136,7 @@ func desktopRootfs(ctx context.Context, dir string, client *http.Client, a artif
 	if _, err := fetch(ctx, dir, client, []artifact{a}); err != nil {
 		return "", err
 	}
-	return Rootfs(Paths{Rootfs: filepath.Join(dir, a.name)})
+	return Rootfs(ctx, Paths{Rootfs: filepath.Join(dir, a.name)})
 }
 
 // Retry tuning; tests shorten retryDelay.

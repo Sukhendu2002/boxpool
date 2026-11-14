@@ -67,7 +67,7 @@ func New(ctx context.Context, stateDir string, paths artifacts.Paths, st *store.
 			return nil, err
 		}
 	}
-	fc, rootfs, err := prepare(paths)
+	fc, rootfs, err := prepare(ctx, paths)
 	if err != nil {
 		return nil, err
 	}

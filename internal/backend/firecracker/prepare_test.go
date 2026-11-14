@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,7 +53,7 @@ func TestPrepare(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fc, rootfs, err := prepare(p)
+	fc, rootfs, err := prepare(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func TestPrepare(t *testing.T) {
 
 	// Present outputs are kept, not unpacked again.
 	os.WriteFile(fc, []byte("kept"), 0755)
-	if _, _, err := prepare(p); err != nil {
+	if _, _, err := prepare(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(fc); string(b) != "kept" {
@@ -81,7 +82,7 @@ func TestPrepare(t *testing.T) {
 	// A tarball without the binary is an error and leaves nothing behind.
 	os.Remove(fc)
 	writeTgz(t, p.Firecracker, map[string]string{"release-v1.17.0-x86_64/jailer-v1.17.0-x86_64": "jailer"})
-	if _, _, err := prepare(p); err == nil {
+	if _, _, err := prepare(context.Background(), p); err == nil {
 		t.Fatal("prepare succeeded without a firecracker binary")
 	}
 	if entries, _ := filepath.Glob(filepath.Join(dir, "*firecracker-v1.17.0-x86_64*")); len(entries) != 1 {

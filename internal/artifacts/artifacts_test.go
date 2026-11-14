@@ -331,7 +331,7 @@ func TestImageUpgradeCache(t *testing.T) {
 	if filepath.Dir(paths.Rootfs) != filepath.Join(dir, imageVersion) || hits[p.desktop.name].Load() != 0 {
 		t.Fatalf("base fetch: %+v; desktop downloads %d", paths, hits[p.desktop.name].Load())
 	}
-	root, err := Rootfs(paths)
+	root, err := Rootfs(ctx, paths)
 	if err != nil {
 		t.Fatal(err)
 	}
