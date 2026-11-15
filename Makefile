@@ -27,7 +27,8 @@ build:
 check: check-format vet test test-scripts test-npm docs-check
 
 check-format:
-	@test -z "$$(gofmt -l .)" || { gofmt -l .; echo 'Run make fmt to format Go source.' >&2; exit 1; }
+	@files=$$(gofmt -l .) || exit $$?; \
+	  test -z "$$files" || { printf '%s\n' "$$files"; echo 'Run make fmt to format Go source.' >&2; exit 1; }
 
 fmt:
 	gofmt -w .
