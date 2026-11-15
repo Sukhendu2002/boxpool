@@ -4,7 +4,7 @@ GO ?= go
 PYTHON ?= python3
 NODE ?= node
 
-.PHONY: help build check check-format fmt vet test test-scripts test-npm docs docs-check
+.PHONY: help build check check-format fmt vet test test-scripts test-npm docs docs-check site test-site
 
 help:
 	@printf '%s\n' \
@@ -18,6 +18,8 @@ help:
 	  '  make test-npm      Run npm launcher tests' \
 	  '  make docs          Regenerate docs/commands.md from CLI help' \
 	  '  make docs-check    Check that generated CLI documentation is current' \
+	  '  make site          Build landing page and docs (npm ci --prefix site first)' \
+	  '  make test-site     Check site rendering, routes and distribution endpoints' \
 	  'See CONTRIBUTING.md for setup and platform integration tests.'
 
 build:
@@ -50,3 +52,9 @@ docs: build
 
 docs-check: build
 	$(PYTHON) scripts/generate-command-reference.py --binary bin/boxpool --check
+
+site:
+	$(NODE) site/build.mjs
+
+test-site:
+	$(NODE) --test site/test/*.test.mjs

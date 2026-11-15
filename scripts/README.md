@@ -14,6 +14,9 @@ install. Release artifacts belong in ignored `bin/` or `dist/`, not in source.
 | [prepare-distribution.py](prepare-distribution.py) | Release workflow stages a pinned npm package and Homebrew formula from verified binary/checksum assets. |
 | [tests/](tests/) | Unit tests for the installer, distribution generator, command reference and benchmark harnesses. Run `make test-scripts`. |
 
+The landing/docs site has a separate [build and test guide](../site/README.md);
+use `npm ci --prefix site`, `make site` and `make test-site`.
+
 Image-building tools stay with their inputs in [image/](../image/README.md).
 Security probes stay in [test/security/](../test/security/README.md).
 

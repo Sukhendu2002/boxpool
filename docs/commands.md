@@ -76,11 +76,11 @@ This command has no flags; its description comes from root help.
 
 ## up
 
-Installer help depends on the host OS. Run `boxpool up --help` on that host. See [service setup and cleanup](../README.md#2-start-the-head) and [state and upgrades](guide.md#state-logs-and-upgrades).
+Installer help depends on the host OS. Run `boxpool up --help` on that host. See [service setup and cleanup](first-workspace.md#start-the-service) and [state and upgrades](guide.md#state-logs-and-upgrades).
 
 ## down
 
-Installer help depends on the host OS. Run `boxpool down --help` on that host. See [service setup and cleanup](../README.md#2-start-the-head) and [state and upgrades](guide.md#state-logs-and-upgrades).
+Installer help depends on the host OS. Run `boxpool down --help` on that host. See [service setup and cleanup](first-workspace.md#start-the-service) and [state and upgrades](guide.md#state-logs-and-upgrades).
 
 ## join
 

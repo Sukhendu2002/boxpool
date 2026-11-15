@@ -14,7 +14,7 @@ need to be adapted. MCP and native tool adapters are outside this first version.
 ## Install the skill on your agent's machine
 
 `boxpool skills install` is new in this checkout; v0.1.4 does not include the
-installer. Until a release contains it, follow the [source build instructions](guide.md#installation-options)
+installer. Until a release contains it, follow the [source build instructions](installation.md#build-from-source)
 and use `./bin/boxpool skills install` from the checkout. The skill's workspace
 commands also work with an already installed v0.1.4 CLI and daemon.
 
@@ -56,15 +56,16 @@ pi --skill /absolute/path/to/boxpool/internal/skills/boxpool-workspace/SKILL.md
 ## Prepare a workspace
 
 Use an existing running sandbox, or create one deliberately from an interactive
-terminal on the head. For example, if a worker has the label `linux-beta`:
+terminal on your host. One machine is enough:
 
 ```sh
 boxpool ls --nodes
-boxpool sh --node linux-beta --name agent-work --cpu 2 --mem 2g --disk 6g
+boxpool sh --name agent-work --cpu 2 --mem 2g --disk 6g
 ```
 
-Inside the guest, prepare a project and its development tools using your usual
-Linux setup, then `exit` back to the host. Guests include Node.js, but tools such
+To choose another machine later, [add a worker](pool.md) and use its label
+with `--node`. **Inside the workspace**, prepare a project and its development
+tools using your usual Linux setup, then `exit` back to the host. Guests include Node.js, but tools such
 as Git, ripgrep and compilers may need installing. For a public repository on a
 standard Debian guest, for example:
 

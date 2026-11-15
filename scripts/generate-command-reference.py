@@ -57,7 +57,7 @@ def render(binary):
         if command in {"up", "down"}:
             parts.append(
                 f"Installer help depends on the host OS. Run `boxpool {command} --help` "
-                "on that host. See [service setup and cleanup](../README.md#2-start-the-head) "
+                "on that host. See [service setup and cleanup](first-workspace.md#start-the-service) "
                 "and [state and upgrades](guide.md#state-logs-and-upgrades)."
             )
         elif command in ROOT_ONLY:
