@@ -194,12 +194,31 @@ func TestExposeOnNode(t *testing.T) {
 	t.Cleanup(headServer.closeExposes)
 	pool := poolServer(t, headServer, nil)
 	node, nodeServer, nodeDriver := poolMachine(t, "darwin")
+	// Replica startup needs a pool listener. Do not share a real daemon's port.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeServer.poolAddr = listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if code, body := send(t, node, "POST", "/v1/pool/join", `{"token":"`+issueToken(t, head, pool)+`"}`); code != http.StatusOK {
 		t.Fatalf("join = %d %s", code, body)
 	}
 	stop := serveNode(nodeServer)
 	defer stop()
 	waitFor(t, "the node's first heartbeat", func() bool { return nodeState(t, head) == "ready" })
+	// Reporting ready precedes asynchronous replica startup and leader discovery.
+	// The head-only API checks below require the node to know its elected head.
+	waitFor(t, "the node to learn the elected head", func() bool {
+		rep := nodeServer.raft.Load()
+		if rep == nil {
+			return false
+		}
+		addr, _ := rep.LeaderWithID()
+		return string(addr) == pool.Listener.Addr().String()
+	})
 	if code, _, body := post(t, head, `{"name":"mac","os":"macos"}`); code != http.StatusCreated || len(nodeDriver.spec) != 1 || len(headDriver.spec) != 0 {
 		t.Fatalf("create on the node = %d %s", code, body)
 	}
