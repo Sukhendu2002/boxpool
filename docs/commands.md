@@ -36,6 +36,7 @@ Commands:
             node --os, --arch and --node pick
   exec      run a command in a sandbox
   cp        copy files between this machine and a sandbox
+  skills    install instructions for local agents using sandbox workspaces
   ls        list pool sandboxes; --nodes shows node health and capacity
   logs      show sandbox console or --daemon logs; -f follows output
   audit     on the head: show the last 90 days of actions and token IDs
@@ -273,6 +274,42 @@ Modes, modification times and symlinks are kept, owners are not.
                                   must be an existing directory
   boxpool cp box:/tmp/dir ./out   copies it to ./out/dir if ./out is a
                                   directory, else to ./out
+```
+
+## skills
+
+```text
+Usage: boxpool skills install [--dir <skills-directory>] [--force]
+
+Installs the bundled boxpool-workspace skill for an agent running on this
+machine and working in a sandbox. No daemon or model login is needed.
+The default skills directory is ~/.agents/skills (Pi and Codex). For
+Claude Code, use --dir ~/.claude/skills. Restart or reload your harness
+after installation and explicitly select the Boxpool workspace skill.
+
+Existing identical content is kept. Different content is preserved unless
+--force is given. Only boxpool-workspace/SKILL.md is written.
+```
+
+### skills install
+
+```text
+Usage: boxpool skills install [--dir <skills-directory>] [--force]
+
+Installs the bundled boxpool-workspace skill for an agent running on this
+machine and working in a sandbox. No daemon or model login is needed.
+The default skills directory is ~/.agents/skills (Pi and Codex). For
+Claude Code, use --dir ~/.claude/skills. Restart or reload your harness
+after installation and explicitly select the Boxpool workspace skill.
+
+Existing identical content is kept. Different content is preserved unless
+--force is given. Only boxpool-workspace/SKILL.md is written.
+
+Flags:
+  -dir string
+        skills directory (default ~/.agents/skills)
+  -force
+        replace different existing Boxpool skill instructions
 ```
 
 ## ls

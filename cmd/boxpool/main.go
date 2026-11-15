@@ -42,6 +42,7 @@ Commands:
             node --os, --arch and --node pick
   exec      run a command in a sandbox
   cp        copy files between this machine and a sandbox
+  skills    install instructions for local agents using sandbox workspaces
   ls        list pool sandboxes; --nodes shows node health and capacity
   logs      show sandbox console or --daemon logs; -f follows output
   audit     on the head: show the last 90 days of actions and token IDs
@@ -76,6 +77,8 @@ func main() {
 		os.Exit(execCmd(os.Args[2:]))
 	case "cp":
 		os.Exit(cp(os.Args[2:]))
+	case "skills":
+		os.Exit(skillsCmd(os.Args[2:]))
 	case "ls":
 		os.Exit(ls(os.Args[2:]))
 	case "logs":

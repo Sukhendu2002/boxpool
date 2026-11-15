@@ -12,13 +12,13 @@ import sys
 # checked for side effects before the generator is allowed to execute it.
 HELP_COMMANDS = (
     "daemon", "join", "token", "login", "logout", "node", "promote", "sh",
-    "exec", "cp", "ls", "logs", "audit", "start", "stop", "pause", "resume",
+    "exec", "cp", "skills", "ls", "logs", "audit", "start", "stop", "pause", "resume",
     "rm", "snapshot", "desktop", "expose",
 )
 # Service help varies by OS. The portable reference uses their root-help
 # descriptions and points readers to their own binary for installer details.
 ROOT_ONLY = {"doctor", "version", "up", "down"}
-SUBCOMMANDS = {"token": ("create",), "snapshot": ("ls",)}
+SUBCOMMANDS = {"token": ("create",), "snapshot": ("ls",), "skills": ("install",)}
 
 
 def help_text(binary, args):

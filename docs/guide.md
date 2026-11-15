@@ -78,6 +78,11 @@ preinstalled. Existing sandboxes keep the image they were created from. See [ima
 Authenticate agents inside the sandbox using the agent's own instructions;
 Boxpool does not copy your host credentials automatically.
 
+To keep the harness, model login and personal skills on your laptop while
+project file operations and commands run in a sandbox, use the
+[local-agent workspace skill](local-agents.md). This mode also works with Pi;
+the agent does not need to be installed or signed in inside the guest.
+
 ## Resources and persistence
 
 Defaults are 2 CPUs, 2048 MiB RAM and 10 GiB disk. Override them only when
