@@ -200,7 +200,7 @@ class ReleaseTests(unittest.TestCase):
         package = {"dist": {"integrity": release.npm_integrity(archive)}}
         with patch.object(release, "registry", side_effect=[None, {"dist-tags": {"latest": "1.2.2"}}, package, {"dist-tags": {"latest": "1.2.3"}}]), patch.object(release.time, "sleep") as sleep:
             release.verify_npm(info, archive)
-            sleep.assert_called_once_with(2)
+            sleep.assert_called_once_with(release.NPM_VERIFY_DELAY)
 
     def test_finalize_checks_each_destination_and_never_promotes_a_beta_to_latest(self):
         for value in ("1.2.3", "1.2.3-beta.1"):
@@ -309,3 +309,26 @@ class ReleaseTests(unittest.TestCase):
         self.assertNotIn("create", actions)
         self.assertEqual(actions.count("upload"), 7)
         self.assertEqual(actions[-1], "edit")
+
+    def test_npm_verification_allows_minutes_of_publish_processing(self):
+        directory = self.bundle()
+        archive = directory / "boxpool-1.2.3.tgz"
+        package = {"dist": {"integrity": release.npm_integrity(archive)}}
+        reads = [value for _ in range(24) for value in (None, {"dist-tags": {"latest": "1.2.2"}})]
+        reads += [package, {"dist-tags": {"latest": "1.2.3"}}]
+        with patch.object(release, "registry", side_effect=reads), patch.object(release.time, "sleep") as sleep:
+            release.verify_npm(release.version("1.2.3"), archive)
+        self.assertEqual(sleep.call_count, 24)
+        self.assertEqual(release.NPM_VERIFY_DELAY * (release.NPM_VERIFY_ATTEMPTS - 1), 300)
+
+    def test_npm_processing_wait_is_bounded_and_conflicts_fail_immediately(self):
+        directory = self.bundle()
+        archive = directory / "boxpool-1.2.3.tgz"
+        with patch.object(release, "registry", return_value=None), patch.object(release, "NPM_VERIFY_ATTEMPTS", 3), patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "not visible"):
+                release.verify_npm(release.version("1.2.3"), archive)
+            self.assertEqual(sleep.call_count, 2)
+        with patch.object(release, "registry", return_value={"dist": {"integrity": "mismatch"}}), patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "integrity"):
+                release.verify_npm(release.version("1.2.3"), archive)
+            sleep.assert_not_called()

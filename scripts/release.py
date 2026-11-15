@@ -20,6 +20,9 @@ TAP = "Sukhendu2002/homebrew-tap"
 ROOT = Path(__file__).resolve().parent.parent
 BINARIES = ("boxpool-linux-amd64", "boxpool-linux-arm64", "boxpool-darwin-arm64")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(alpha|beta|rc)\.(0|[1-9][0-9]*))?")
+# npm can accept a publish and continue processing it for several minutes.
+NPM_VERIFY_ATTEMPTS = 61
+NPM_VERIFY_DELAY = 5
 
 
 def version(value):
@@ -250,7 +253,7 @@ def npm_release(value, sha, directory):
 def verify_npm(info, archive):
     # Allow propagation after our own write, but never retry conflicting bytes
     # or a channel that has already advanced beyond this version.
-    for attempt in range(6):
+    for attempt in range(NPM_VERIFY_ATTEMPTS):
         published = registry(info["version"][1:])
         if published and published.get("dist", {}).get("integrity") != npm_integrity(archive):
             raise ValueError("npm did not return the expected package integrity")
@@ -258,8 +261,8 @@ def verify_npm(info, archive):
         advancing(info["version"], current)
         if published and current == info["version"][1:]:
             return
-        if attempt < 5:
-            time.sleep(2)
+        if attempt + 1 < NPM_VERIFY_ATTEMPTS:
+            time.sleep(NPM_VERIFY_DELAY)
     raise ValueError("npm package/channel is not visible at the selected version yet; retry failed jobs")
 
 
