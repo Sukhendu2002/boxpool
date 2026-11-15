@@ -20,6 +20,9 @@ TAP = "Sukhendu2002/homebrew-tap"
 ROOT = Path(__file__).resolve().parent.parent
 BINARIES = ("boxpool-linux-amd64", "boxpool-linux-arm64", "boxpool-darwin-arm64")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(alpha|beta|rc)\.(0|[1-9][0-9]*))?")
+# Draft creation can succeed before the release is visible to subsequent reads.
+GITHUB_RELEASE_ATTEMPTS = 13
+GITHUB_RELEASE_DELAY = 5
 # npm can accept a publish and continue processing it for several minutes.
 NPM_VERIFY_ATTEMPTS = 61
 NPM_VERIFY_DELAY = 5
@@ -194,7 +197,13 @@ def github_release(value, sha, directory):
         if info["channel"] == "next":
             args.append("--prerelease")
         run(*args)
-        release = release_by_tag(info["version"])
+        for attempt in range(GITHUB_RELEASE_ATTEMPTS):
+            release = release_by_tag(info["version"], missing=True)
+            if release is not None:
+                break
+            if attempt == GITHUB_RELEASE_ATTEMPTS - 1:
+                raise ValueError(f"created release not visible: {info['version']}; rerun failed jobs to resume")
+            time.sleep(GITHUB_RELEASE_DELAY)
     if bool(release["prerelease"]) != (info["channel"] == "next"):
         raise ValueError("existing release has the wrong stable/beta classification")
     expected = ["release-manifest.json", *bundle_files(info)]

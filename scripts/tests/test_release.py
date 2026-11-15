@@ -167,7 +167,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_new_release_uploads_every_asset_before_publishing_the_draft(self):
         directory = self.bundle()
-        state = {"exists": False}
+        state = {"exists": False, "draft_reads": 0}
         def api(endpoint, **kwargs):
             if endpoint.endswith("/git/refs"):
                 self.assertEqual(kwargs["sha"], SHA)
@@ -179,19 +179,43 @@ class ReleaseTests(unittest.TestCase):
                     raise RuntimeError("published tag endpoint returns HTTP 404 for drafts")
                 return None
             if "/releases?per_page=" in endpoint:
-                return [{"id": 1, "tag_name": "v1.2.3", "draft": True, "prerelease": False}] if state["exists"] else []
+                if state["exists"]:
+                    state["draft_reads"] += 1
+                    if state["draft_reads"] >= 3:
+                        return [{"id": 1, "tag_name": "v1.2.3", "draft": True, "prerelease": False}]
+                return []
             raise AssertionError(endpoint)
         def runner(*args):
             if args[:3] == ("gh", "release", "create"):
                 state["exists"] = True
             return ""
-        with patch.object(release, "check_channels"), patch.object(release, "source_matches", side_effect=[None, SHA]), patch.object(release, "api", side_effect=api), patch.object(release, "run", side_effect=runner) as commands:
+        with patch.object(release, "check_channels"), patch.object(release, "source_matches", side_effect=[None, SHA]), patch.object(release, "api", side_effect=api), patch.object(release, "run", side_effect=runner) as commands, patch.object(release.time, "sleep") as sleep:
             release.github_release("1.2.3", SHA, directory)
         actions = [c.args[2] for c in commands.call_args_list]
         self.assertEqual(actions[0], "create")
+        self.assertEqual(actions.count("create"), 1)
         self.assertEqual(actions[-1], "edit")
         self.assertEqual(actions.count("upload"), len(release.bundle_files(release.version("1.2.3"))) + 1)
         self.assertIn("--latest=false", commands.call_args_list[-1].args)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_created_release_visibility_wait_is_bounded_before_uploads(self):
+        directory = self.bundle()
+        with patch.object(release, "check_channels"), patch.object(release, "source_matches", return_value=SHA), patch.object(release, "release_by_tag", return_value=None) as lookup, patch.object(release, "run") as commands, patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(ValueError, "created release not visible"):
+                release.github_release("1.2.3", SHA, directory)
+        self.assertEqual(lookup.call_count, 14)  # Initial lookup plus 13 visibility reads.
+        self.assertEqual(sleep.call_count, 12)
+        self.assertTrue(all(call.args == (5,) for call in sleep.call_args_list))
+        self.assertEqual([call.args[2] for call in commands.call_args_list], ["create"])
+
+    def test_created_release_permission_error_fails_without_waiting_or_uploading(self):
+        directory = self.bundle()
+        with patch.object(release, "check_channels"), patch.object(release, "source_matches", return_value=SHA), patch.object(release, "release_by_tag", side_effect=[None, RuntimeError("HTTP 403")]), patch.object(release, "run") as commands, patch.object(release.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+                release.github_release("1.2.3", SHA, directory)
+        sleep.assert_not_called()
+        self.assertEqual([call.args[2] for call in commands.call_args_list], ["create"])
 
     def test_npm_publication_propagation_retries_without_republishing(self):
         directory = self.bundle()
