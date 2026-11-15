@@ -33,11 +33,22 @@ class DistributionTests(unittest.TestCase):
         self.assertEqual(package["version"], "1.2.3-beta.1")
         self.assertEqual(metadata["version"], "v1.2.3-beta.1")
         self.assertNotIn("postinstall", package["scripts"])
-        formula = (output / "boxpool.rb").read_text()
+        formula = (output / "boxpool-beta.rb").read_text()
+        self.assertIn("class BoxpoolBeta < Formula", formula)
+        self.assertIn('keg_only "it is a prerelease of boxpool"', formula)
+        self.assertFalse((output / "boxpool.rb").exists())
         for name, digest in metadata["checksums"].items():
             self.assertIn(f"/download/v1.2.3-beta.1/{name}", formula)
             self.assertIn(f'sha256 "{digest}"', formula)
         self.assertTrue((output / "npm/LICENSE").exists())
+
+    def test_stable_keeps_the_default_formula(self):
+        artifacts, output = self.fixture()
+        distribution.prepare("v1.2.3", artifacts, output)
+        formula = (output / "boxpool.rb").read_text()
+        self.assertIn("class Boxpool < Formula", formula)
+        self.assertNotIn("keg_only", formula)
+        self.assertFalse((output / "boxpool-beta.rb").exists())
 
     def test_rejects_missing_duplicate_or_mismatched_digests_before_staging(self):
         for failure in ("missing", "duplicate", "tamper"):
