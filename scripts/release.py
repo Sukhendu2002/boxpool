@@ -56,6 +56,25 @@ def api(endpoint, *, missing=False, method="GET", **fields):
     return json.loads(result.stdout) if result.stdout.strip() else None
 
 
+def release_by_tag(tag, *, missing=False):
+    # The tag endpoint returns published releases only. Authenticated listing
+    # also includes drafts, which must be reused before and after staging.
+    published = api(f"repos/{REPO}/releases/tags/{tag}", missing=True)
+    if published is not None:
+        return published
+    page = 1
+    while True:
+        entries = api(f"repos/{REPO}/releases?per_page=100&page={page}")
+        for entry in entries:
+            if entry["tag_name"] == tag:
+                return entry
+        if len(entries) < 100:
+            if missing:
+                return None
+            raise ValueError(f"release not found: {tag}")
+        page += 1
+
+
 def registry(package_version=None):
     suffix = "/" + urllib.parse.quote(package_version, safe="") if package_version else ""
     request = urllib.request.Request("https://registry.npmjs.org/boxpool" + suffix,
@@ -162,7 +181,7 @@ def github_release(value, sha, directory):
     if not source_matches(info["version"], sha):
         api(f"repos/{REPO}/git/refs", method="POST", ref="refs/tags/" + info["version"], sha=sha)
     source_matches(info["version"], sha)
-    release = api(f"repos/{REPO}/releases/tags/{info['version']}", missing=True)
+    release = release_by_tag(info["version"], missing=True)
     if release is None:
         notes = (f"Source: `{sha}`. Guest images remain pinned; see release-manifest.json.\n\n"
                  "The macOS binary is ad-hoc signed, not notarized. "
@@ -172,7 +191,7 @@ def github_release(value, sha, directory):
         if info["channel"] == "next":
             args.append("--prerelease")
         run(*args)
-        release = api(f"repos/{REPO}/releases/tags/{info['version']}")
+        release = release_by_tag(info["version"])
     if bool(release["prerelease"]) != (info["channel"] == "next"):
         raise ValueError("existing release has the wrong stable/beta classification")
     expected = ["release-manifest.json", *bundle_files(info)]
@@ -274,7 +293,7 @@ def finalize(value, sha, directory):
     if not source_matches(info["version"], sha):
         raise ValueError("release tag is missing")
     verify_npm(info, directory / f"boxpool-{info['version'][1:]}.tgz")
-    published = api(f"repos/{REPO}/releases/tags/{info['version']}")
+    published = release_by_tag(info["version"])
     if published["draft"] or bool(published["prerelease"]) != (info["channel"] == "next"):
         raise ValueError("GitHub release is not published in the selected channel")
     formula = api(f"repos/{TAP}/contents/Formula/{info['formula']}.rb")

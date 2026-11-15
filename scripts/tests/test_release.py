@@ -174,7 +174,13 @@ class ReleaseTests(unittest.TestCase):
                 return None
             if "/assets?" in endpoint:
                 return []
-            return {"id": 1, "draft": True, "prerelease": False} if state["exists"] else None
+            if "/releases/tags/" in endpoint:
+                if not kwargs.get("missing"):
+                    raise RuntimeError("published tag endpoint returns HTTP 404 for drafts")
+                return None
+            if "/releases?per_page=" in endpoint:
+                return [{"id": 1, "tag_name": "v1.2.3", "draft": True, "prerelease": False}] if state["exists"] else []
+            raise AssertionError(endpoint)
         def runner(*args):
             if args[:3] == ("gh", "release", "create"):
                 state["exists"] = True
@@ -261,3 +267,45 @@ class ReleaseTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "backwards"):
                         release.npm_release(value, SHA, directory)
                     commands.assert_not_called()
+
+    def test_release_lookup_paginates_drafts_after_published_tag_404(self):
+        draft = {"id": 77, "tag_name": "v1.2.3", "draft": True, "prerelease": False}
+        first = [{"tag_name": f"other-{n}"} for n in range(100)]
+        with patch.object(release, "api", side_effect=[None, first, [draft]]) as service:
+            self.assertEqual(release.release_by_tag("v1.2.3"), draft)
+        self.assertEqual(service.call_args_list[-1].args[0], f"repos/{release.REPO}/releases?per_page=100&page=2")
+
+    def test_release_lookup_keeps_published_fast_path_and_propagates_auth_failure(self):
+        published = {"id": 1, "tag_name": "v1.2.3", "draft": False}
+        with patch.object(release, "api", return_value=published) as service:
+            self.assertEqual(release.release_by_tag("v1.2.3"), published)
+            service.assert_called_once()
+        with patch.object(release, "api", side_effect=RuntimeError("HTTP 403")) as service:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 403"):
+                release.release_by_tag("v1.2.3", missing=True)
+            service.assert_called_once()
+
+    def test_release_lookup_missing_is_optional_only_when_requested(self):
+        with patch.object(release, "api", side_effect=[None, []]):
+            self.assertIsNone(release.release_by_tag("v1.2.3", missing=True))
+        with patch.object(release, "api", side_effect=[None, []]):
+            with self.assertRaisesRegex(ValueError, "release not found"):
+                release.release_by_tag("v1.2.3")
+
+    def test_github_retry_reuses_a_draft_hidden_from_the_tag_endpoint(self):
+        directory = self.bundle()
+        draft = {"id": 7, "tag_name": "v1.2.3", "draft": True, "prerelease": False}
+        def api(endpoint, **kwargs):
+            if "/releases/tags/" in endpoint:
+                return None
+            if "/releases?" in endpoint:
+                return [draft]
+            if "/assets?" in endpoint:
+                return []
+            raise AssertionError(endpoint)
+        with patch.object(release, "check_channels"), patch.object(release, "source_matches", return_value=SHA), patch.object(release, "api", side_effect=api), patch.object(release, "run") as commands:
+            release.github_release("1.2.3", SHA, directory)
+        actions = [c.args[2] for c in commands.call_args_list]
+        self.assertNotIn("create", actions)
+        self.assertEqual(actions.count("upload"), 7)
+        self.assertEqual(actions[-1], "edit")
