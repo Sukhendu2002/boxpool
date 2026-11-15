@@ -64,7 +64,10 @@ Existing GitHub assets must match byte-for-byte. Existing npm packages must
 match the archive's SHA-512 integrity. An identical tap formula is a no-op.
 Mismatched content or source commits fail closed; the workflow never overwrites
 release assets or republishes an npm version. Restore a missing npm channel tag
-with the configured OIDC dist-tag permission when necessary.
+with the configured OIDC dist-tag permission when necessary. npm can accept a
+publish before its package and channel are visible; verification allows a
+five-minute polling budget for processing. Conflicting bytes or a newer
+channel fail immediately.
 
 Avoid **Re-run all jobs** after any publication: rebuilding with newer runner
 inputs can produce different bytes, which the immutable-content checks reject.

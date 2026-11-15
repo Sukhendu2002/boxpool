@@ -20,6 +20,9 @@ TAP = "Sukhendu2002/homebrew-tap"
 ROOT = Path(__file__).resolve().parent.parent
 BINARIES = ("boxpool-linux-amd64", "boxpool-linux-arm64", "boxpool-darwin-arm64")
 VERSION = re.compile(r"v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(alpha|beta|rc)\.(0|[1-9][0-9]*))?")
+# npm can accept a publish and continue processing it for several minutes.
+NPM_VERIFY_ATTEMPTS = 61
+NPM_VERIFY_DELAY = 5
 
 
 def version(value):
@@ -54,6 +57,25 @@ def api(endpoint, *, missing=False, method="GET", **fields):
             return None
         raise RuntimeError(f"GitHub API {endpoint}: {result.stderr.strip()}")
     return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def release_by_tag(tag, *, missing=False):
+    # The tag endpoint returns published releases only. Authenticated listing
+    # also includes drafts, which must be reused before and after staging.
+    published = api(f"repos/{REPO}/releases/tags/{tag}", missing=True)
+    if published is not None:
+        return published
+    page = 1
+    while True:
+        entries = api(f"repos/{REPO}/releases?per_page=100&page={page}")
+        for entry in entries:
+            if entry["tag_name"] == tag:
+                return entry
+        if len(entries) < 100:
+            if missing:
+                return None
+            raise ValueError(f"release not found: {tag}")
+        page += 1
 
 
 def registry(package_version=None):
@@ -162,7 +184,7 @@ def github_release(value, sha, directory):
     if not source_matches(info["version"], sha):
         api(f"repos/{REPO}/git/refs", method="POST", ref="refs/tags/" + info["version"], sha=sha)
     source_matches(info["version"], sha)
-    release = api(f"repos/{REPO}/releases/tags/{info['version']}", missing=True)
+    release = release_by_tag(info["version"], missing=True)
     if release is None:
         notes = (f"Source: `{sha}`. Guest images remain pinned; see release-manifest.json.\n\n"
                  "The macOS binary is ad-hoc signed, not notarized. "
@@ -172,7 +194,7 @@ def github_release(value, sha, directory):
         if info["channel"] == "next":
             args.append("--prerelease")
         run(*args)
-        release = api(f"repos/{REPO}/releases/tags/{info['version']}")
+        release = release_by_tag(info["version"])
     if bool(release["prerelease"]) != (info["channel"] == "next"):
         raise ValueError("existing release has the wrong stable/beta classification")
     expected = ["release-manifest.json", *bundle_files(info)]
@@ -231,7 +253,7 @@ def npm_release(value, sha, directory):
 def verify_npm(info, archive):
     # Allow propagation after our own write, but never retry conflicting bytes
     # or a channel that has already advanced beyond this version.
-    for attempt in range(6):
+    for attempt in range(NPM_VERIFY_ATTEMPTS):
         published = registry(info["version"][1:])
         if published and published.get("dist", {}).get("integrity") != npm_integrity(archive):
             raise ValueError("npm did not return the expected package integrity")
@@ -239,8 +261,8 @@ def verify_npm(info, archive):
         advancing(info["version"], current)
         if published and current == info["version"][1:]:
             return
-        if attempt < 5:
-            time.sleep(2)
+        if attempt + 1 < NPM_VERIFY_ATTEMPTS:
+            time.sleep(NPM_VERIFY_DELAY)
     raise ValueError("npm package/channel is not visible at the selected version yet; retry failed jobs")
 
 
@@ -274,7 +296,7 @@ def finalize(value, sha, directory):
     if not source_matches(info["version"], sha):
         raise ValueError("release tag is missing")
     verify_npm(info, directory / f"boxpool-{info['version'][1:]}.tgz")
-    published = api(f"repos/{REPO}/releases/tags/{info['version']}")
+    published = release_by_tag(info["version"])
     if published["draft"] or bool(published["prerelease"]) != (info["channel"] == "next"):
         raise ValueError("GitHub release is not published in the selected channel")
     formula = api(f"repos/{TAP}/contents/Formula/{info['formula']}.rb")
