@@ -300,11 +300,12 @@ IP autoconfiguration cannot initialize loopback in that case. Docker agents
 listen on Unix sockets and leave interface setup to the Engine, retaining
 their existing capability restrictions.
 
-Publishing happens only for a **published GitHub release** whose tag
-matches `v<major>.<minor>.<patch>[-suffix]` and points into `main`'s history.
-The binary release workflow also calls this workflow explicitly after
-creating a release with `GITHUB_TOKEN`; that token does not trigger release
-events. A UI/CLI-created release uses the release event directly instead.
+Publish guest images by pushing an **`image-vX.Y.Z` tag** on a commit in
+`main`'s history. The workflow creates a prerelease for the tested image
+assets; it never changes GitHub Latest or publishes CLI/npm/Homebrew packages.
+A published legacy `vX.Y.Z-image.N` release also remains supported for image
+maintenance. Ordinary CLI releases are ignored. Existing image URLs and pins
+are not renamed or deleted. CLI releases no longer call this workflow.
 Both architectures are built/tested at that release commit and version in
 the same run. Only the dependent publish job receives `contents:write` and
 `packages:write`; no `pull_request_target`, PR-code credentials or package

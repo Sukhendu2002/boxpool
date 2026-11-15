@@ -1,16 +1,98 @@
 # Distribution
 
-The [release workflow](../.github/workflows/release.yml) builds the Linux
-amd64/arm64 and ad-hoc signed macOS arm64 binaries. It generates a pinned
-Homebrew formula and a dependency-free npm launcher from those exact
-artifacts and their SHA-256 manifest. PRs build the same packages without
-publishing. Packages and the formula are also attached to tag releases,
-so registry setup does not block binary publication.
+## Release a version
 
-The public installer, npm package and Homebrew tap are available; see the
-[user quickstart](../README.md). This page is the maintainer's setup and
-release runbook. The bootstrap steps below describe provisioning for a
-new registry/domain or replacement infrastructure, not user prerequisites.
+Open **Actions → Release → Run workflow**, select **main**, enter a version
+such as `0.2.0` or `0.2.0-beta.1`, and run it. That is the only human action
+for an ordinary release. There is no additional approval or separate npm or
+Homebrew command. The equivalent from a maintainer terminal is:
+
+```sh
+gh workflow run release.yml --repo Sukhendu2002/boxpool --ref main -f version=0.2.0
+```
+
+The version examples are illustrative, not a request to publish them.
+An optional `v` prefix is accepted. Prereleases use `alpha.N`, `beta.N` or
+`rc.N`; image versions and arbitrary suffixes are rejected. Release must be
+run from `main`. Its starting commit is fixed for the entire run, even if
+another PR merges while builds are running. Merges, CLI tag pushes and image
+releases do **not** publish a CLI version.
+
+The workflow automatically:
+
+1. Validates the version, existing tag/source binding, current channels and
+   configured npm/Homebrew destinations.
+2. Runs `make check` on Linux and macOS, plus the existing KVM and Docker
+   integration workflows. Builds static Linux amd64/arm64 binaries and an
+   ad-hoc signed Apple silicon binary with the macOS 26 SDK.
+3. Stages a pinned npm archive, a Homebrew formula and `release-manifest.json`
+   containing the source commit, guest-image version and SHA-256 of each
+   distribution asset. Tests the packaged launcher and lints the formula.
+4. Creates the version tag and a draft GitHub release. Uploads the exact tested
+   assets, publishes the complete release, then publishes npm and updates the
+   appropriate Homebrew formula using the existing credentials.
+5. Installs the public version with the shell installer and npm on Linux
+   amd64/arm64 and macOS arm64. On Mac, installs/tests the public Homebrew
+   formula and verifies the installed signature/virtualization entitlement.
+6. Marks a stable GitHub release as Latest only after those installation
+   checks pass, and reports all destinations in the workflow summary.
+
+| Selection | GitHub | npm | Homebrew |
+| --- | --- | --- | --- |
+| `0.2.0` | Release, then Latest after verification | `boxpool@latest` | `sukhendu2002/tap/boxpool` |
+| `0.2.0-beta.1` | Prerelease, never Latest | `boxpool@next` | `sukhendu2002/tap/boxpool-beta` |
+
+The beta formula is keg-only: it can coexist with the default install without
+replacing the `boxpool` on PATH. Use
+`"$(brew --prefix sukhendu2002/tap/boxpool-beta)/bin/boxpool" version` to run it.
+A pinned beta shell install is also possible with `BOXPOOL_VERSION` as described
+in [installation](installation.md#shell-installer). These channels are available
+after their first corresponding release through this workflow.
+
+Publishing is serialized. Channel version checks also prevent an older queued
+or retried release from replacing a newer one. The GitHub release, npm package
+and Homebrew updates are separate service writes, so publication is not atomic;
+a failed run can have completed only some of them.
+
+## Resume a failed release
+
+Use **Re-run failed jobs** on the original Actions run. Build/package artifacts
+are retained for 30 days. The retry uses the same source commit and retained
+bundle, rather than rebuilding or asking for credentials interactively.
+
+Existing GitHub assets must match byte-for-byte. Existing npm packages must
+match the archive's SHA-512 integrity. An identical tap formula is a no-op.
+Mismatched content or source commits fail closed; the workflow never overwrites
+release assets or republishes an npm version. Restore a missing npm channel tag
+with the configured OIDC dist-tag permission when necessary.
+
+Avoid **Re-run all jobs** after any publication: rebuilding with newer runner
+inputs can produce different bytes, which the immutable-content checks reject.
+After artifact retention expires or a conflicting version was published, choose
+a new version. Do not move an existing release tag to newer code.
+
+A beta and a stable version are distinct packages/binaries. If `main` has not
+moved since a tested beta, selecting the stable version builds/tests that same
+source with the stable version embedded. Otherwise the run tests the newer
+starting commit on `main`. Changing the
+version label on a beta binary is not a stable release.
+
+## Validation boundaries
+
+Release checks run without interactive human gates. Hosted Macs can verify
+builds, signatures and installs, but cannot boot VZ guests on their hardware.
+Real-Mac VM tests and unfamiliar-user onboarding remain separate validation;
+a green release pipeline does not establish those milestone gates. The workflow
+does not upgrade a running daemon, restart workspaces or migrate user state.
+Mac binaries remain ad-hoc signed, not notarized.
+
+Guest images publish independently using `image-vX.Y.Z` tags. CLI releases
+reuse their compiled image/digest pins and never rebuild guest images. Follow
+the [image release guide](../image/README.md#ci-and-release) and update pins in a
+normal PR after a new image is tested. Existing image URLs remain valid.
+
+The sections below describe one-time infrastructure setup and additional
+clean-host validation; these are not steps to repeat for every release.
 
 ## Domain and Go imports
 
@@ -60,13 +142,14 @@ replaced by a verified download before it can run.
    ownership. The workflow never requests or stores an npm token.
 2. In the npm package's settings, configure a trusted GitHub publisher:
    user `Sukhendu2002`, repository `boxpool`, workflow `release.yml`, no
-   environment. Allow direct `npm publish`. See
+   environment. Allow direct `npm publish`, and allow `npm dist-tag` for
+   recovery of a missing channel pointer. See
    [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
-   The workflow uses Node 24 with npm 11.5.1+ and OIDC provenance.
-3. Set repository Actions variable `NPM_PUBLISH=true`. Future tag builds
-   publish stable versions to `latest`, prereleases to `next`. Re-running
-   publication of an existing version is not supported by npm; inspect
-   partial releases and rerun only the failed jobs.
+   The publishing job uses Node 24, pinned npm 11.21.0 and OIDC provenance.
+3. Set repository Actions variable `NPM_PUBLISH=true`. The manual Release
+   workflow requires this and the Homebrew configuration before proceeding.
+   It publishes stable versions to `latest` and prereleases to `next`; retries
+   verify already-published package integrity instead of publishing twice.
 
 If npm recognizes the release tarball but returns `E404` for
 `PUT https://registry.npmjs.org/boxpool`, confirm the package exists and
@@ -75,8 +158,8 @@ case-sensitive user, repository and workflow fields above, leave the
 environment empty, and allow direct publishing. An unvalidated publisher
 expires after two days; replace an expired configuration and validate it
 with a successful publish. See [npm's troubleshooting and expiry guidance](https://docs.npmjs.com/trusted-publishers/).
-Fix registry authorization before retrying only the failed npm job;
-successful binary and guest-image publication need not be repeated.
+Fix registry authorization, then re-run failed jobs on the original Release
+run. Existing matching GitHub assets are verified instead of overwritten.
 
 `BOXPOOL_CACHE_DIR` overrides the launcher's default
 `$XDG_CACHE_HOME/boxpool` or `~/.cache/boxpool`. Cache entries are separated
@@ -93,9 +176,10 @@ commands, use its installed `/usr/local/bin/boxpool`. Do not use
 2. Create `HOMEBREW_TAP_TOKEN` as an Actions secret in `boxpool`, using a
    fine-grained token limited to **Contents: read/write** on that tap only.
    `GITHUB_TOKEN` cannot push to a different repository.
-3. Set Actions variable `HOMEBREW_PUBLISH=true`. The next stable tag copies
+3. Set Actions variable `HOMEBREW_PUBLISH=true`. A stable Release run copies
    the generated `boxpool.rb` into `Formula/boxpool.rb` and commits it.
-   Prereleases never update the stable tap. To bootstrap from an existing
+   A prerelease updates `Formula/boxpool-beta.rb` without changing the stable
+   formula. To bootstrap from an existing
    stable release, copy that release's `boxpool.rb` into the tap manually.
 
 The formula downloads raw release binaries with platform-specific SHA-256

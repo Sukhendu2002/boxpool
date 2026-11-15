@@ -1,19 +1,27 @@
 name: Release
 
-# A v* tag builds and publishes the binaries without Apple signing secrets.
-# macOS builds are ad-hoc signed, not notarized. Pull requests run the same
-# build and signing checks without publishing a release.
+# One intentional action: choose a version on main. Merges and tag pushes
+# cannot publish. Keep this filename: npm trusts release.yml for OIDC.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.2.0 or 0.2.0-beta.1)'
+        required: true
+        type: string
   pull_request:
     paths:
       - '.github/workflows/release.yml'
+      - '.github/workflows/linux-kvm.yml'
+      - '.github/workflows/docker.yml'
       - 'internal/artifacts/**'
       - 'internal/diskspace/**'
       - 'internal/backend/docker/config.go'
       - 'scripts/vz.entitlements'
+      - 'scripts/release.py'
       - 'scripts/prepare-distribution.py'
+      - 'scripts/tests/test_release.py'
+      - 'scripts/tests/test_distribution.py'
       - 'scripts/install.sh'
       - 'packaging/**'
       - 'npm/**'
@@ -21,36 +29,71 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
+# Never cancel a publisher halfway through external writes. Version checks
+# also reject an older queued/retried run after a newer channel is published.
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && 'publish' || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   version:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      value: ${{ steps.version.outputs.value }}
+      value: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.version.outputs.channel }}
+      formula: ${{ steps.version.outputs.formula }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Select version and validate release source
+      - name: Validate selection and configured destinations
         id: version
         env:
-          TAG: ${{ github.ref_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          NPM_ENABLED: ${{ vars.NPM_PUBLISH }}
+          BREW_ENABLED: ${{ vars.HOMEBREW_PUBLISH }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         shell: bash
         run: |
-          if [[ $GITHUB_EVENT_NAME == push ]]; then
-            [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9_.-]+)?$ ]]
-            git merge-base --is-ancestor HEAD origin/main
-            version=$TAG
+          set -euo pipefail
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch ]]; then
+            [[ $GITHUB_REF == refs/heads/main ]] || { echo 'Run Release from main.' >&2; exit 1; }
+            [[ $NPM_ENABLED == true && $BREW_ENABLED == true && -n $TAP_TOKEN ]] || {
+              echo 'Configure npm and Homebrew publication before starting a release.' >&2; exit 1;
+            }
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+            python3 scripts/release.py plan "$REQUESTED_VERSION" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
-            version=v0.0.0-dev.${GITHUB_SHA:0:12}
+            {
+              echo "version=v0.0.0-alpha.${GITHUB_RUN_ID}"
+              echo 'channel=next'
+              echo 'formula=boxpool-beta'
+            } >> "$GITHUB_OUTPUT"
           fi
-          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+  kvm:
+    if: github.event_name == 'workflow_dispatch'
+    needs: version
+    uses: ./.github/workflows/linux-kvm.yml
+
+  docker:
+    if: github.event_name == 'workflow_dispatch'
+    needs: version
+    uses: ./.github/workflows/docker.yml
 
   linux:
     needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
     env:
       VERSION: ${{ needs.version.outputs.value }}
     steps:
@@ -60,6 +103,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run contributor checks
+        run: make check
       - name: Lint this workflow
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/release.yml
       - name: Build static binaries
@@ -69,9 +117,13 @@ jobs:
             file "dist/boxpool-linux-$arch" | grep "statically linked"
           done
           dist/boxpool-linux-amd64 version | grep -Fx "boxpool $VERSION"
+      - name: Name retained build
+        id: artifact
+        run: echo "name=release-linux-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux
+          name: ${{ steps.artifact.outputs.name }}
+          retention-days: 30
           path: dist/*
           if-no-files-found: error
 
@@ -81,7 +133,9 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 15
     # No VM test here: hosted Macs report "Virtualization is not available on
-    # this hardware", so the vz integration test runs locally before tagging.
+    # this hardware". Real-Mac VM validation remains separate from publication.
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
     env:
       VERSION: ${{ needs.version.outputs.value }}
       BIN: dist/boxpool-darwin-arm64
@@ -92,6 +146,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run contributor checks
+        run: make check
       - name: Build
         run: |
           xcrun --show-sdk-version
@@ -105,9 +164,13 @@ jobs:
           codesign -d --verbose=4 "$BIN" 2>&1 | grep -Fx "Signature=adhoc"
           codesign -d --entitlements - "$BIN" 2>/dev/null | grep com.apple.security.virtualization
           "$BIN" version | grep -Fx "boxpool $VERSION"
+      - name: Name retained build
+        id: artifact
+        run: echo "name=release-macos-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: release-macos
+          name: ${{ steps.artifact.outputs.name }}
+          retention-days: 30
           path: ${{ env.BIN }}
           if-no-files-found: error
 
@@ -115,6 +178,10 @@ jobs:
     needs: [version, linux, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      artifact: ${{ steps.artifact.outputs.name }}
+    env:
+      VERSION: ${{ needs.version.outputs.value }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,164 +191,159 @@ jobs:
           node-version: '24'
       - uses: actions/download-artifact@v4
         with:
-          pattern: release-*
-          path: dist
-          merge-multiple: true
+          name: ${{ needs.linux.outputs.artifact }}
+          path: dist/bundle
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.macos.outputs.artifact }}
+          path: dist/bundle
       - name: Prepare pinned distribution packages
-        env:
-          VERSION: ${{ needs.version.outputs.value }}
         run: |
-          cd dist
+          cd dist/bundle
           sha256sum boxpool-* > checksums.txt
-          cd ..
-          python3 scripts/prepare-distribution.py "$VERSION" dist dist/distribution
+          cd ../..
+          python3 scripts/prepare-distribution.py "$VERSION" dist/bundle dist/distribution
           cd dist/distribution/npm
-          npm pack --ignore-scripts --pack-destination ..
+          npm pack --ignore-scripts --pack-destination ../../bundle
+          cd ../../..
+          cp dist/distribution/*.rb dist/bundle/
+          python3 scripts/release.py manifest "$VERSION" "$GITHUB_SHA" dist/bundle
       - name: Smoke test packaged launcher against the built Linux binary
         env:
-          VERSION: ${{ needs.version.outputs.value }}
           BOXPOOL_CACHE_DIR: ${{ runner.temp }}/boxpool-package-cache
         run: |
           node <<'JS'
           const fs = require('node:fs/promises');
           const { getBinary } = require('./dist/distribution/npm/lib/launcher');
-          getBinary({ fetchImpl: async () => new Response(await fs.readFile('dist/boxpool-linux-amd64')) })
+          getBinary({ fetchImpl: async () => new Response(await fs.readFile('dist/bundle/boxpool-linux-amd64')) })
             .catch(error => { console.error(error); process.exitCode = 1; });
           JS
-          npm exec --yes --offline --ignore-scripts --package "$PWD"/dist/distribution/*.tgz -- boxpool version | grep -Fx "boxpool $VERSION"
+          npm exec --yes --offline --ignore-scripts --package "$PWD"/dist/bundle/*.tgz -- boxpool version | grep -Fx "boxpool $VERSION"
+      - name: Name retained bundle
+        id: artifact
+        run: echo "name=release-bundle-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: distribution
-          path: |
-            dist/distribution/boxpool.rb
-            dist/distribution/*.tgz
+          name: ${{ steps.artifact.outputs.name }}
+          path: dist/bundle/*
+          retention-days: 30
           if-no-files-found: error
 
   formula:
-    needs: distribution
+    needs: [version, distribution]
     runs-on: macos-26
     timeout-minutes: 10
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: distribution
+          name: ${{ needs.distribution.outputs.artifact }}
           path: distribution/Formula
       - name: Lint generated Homebrew formula
         env:
           HOMEBREW_NO_AUTO_UPDATE: '1'
-        run: brew style distribution/Formula/boxpool.rb
+          FORMULA: ${{ needs.version.outputs.formula }}
+        run: brew style "distribution/Formula/$FORMULA.rb"
 
   publish:
-    if: github.event_name == 'push'
-    needs: [version, linux, macos, distribution, formula]
+    if: github.event_name == 'workflow_dispatch'
+    needs: [version, distribution, formula, kvm, docker]
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
-    outputs:
-      created: ${{ steps.release.outputs.created }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: release-*
-          path: dist
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: distribution
-          path: distribution
-      - name: Publish binaries and checksums
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.version.outputs.value }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          files=(boxpool-*)
-          test "${#files[@]}" -eq 3
-          sha256sum boxpool-* > checksums.txt
-          cat checksums.txt
-          # A release made in the UI pushes this tag too and already exists.
-          if ! gh release view "$VERSION" >/dev/null 2>&1; then
-            flags=()
-            [[ $VERSION == *-* ]] && flags+=(--prerelease)
-            notes="The macOS binary is ad-hoc signed and is not notarized. See the [verification and Gatekeeper instructions](https://github.com/$GH_REPO/blob/$VERSION/docs/development.md#releases) before running it."
-            gh release create "$VERSION" --verify-tag --title "$VERSION" --generate-notes --notes "$notes" "${flags[@]}"
-            echo 'created=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'created=false' >> "$GITHUB_OUTPUT"
-          fi
-          gh release upload "$VERSION" boxpool-* checksums.txt
-          gh release upload "$VERSION" ../distribution/boxpool.rb ../distribution/*.tgz
-
-  npm:
-    # Enable after the first manual publish and npm trusted-publisher setup.
-    if: github.event_name == 'push' && vars.NPM_PUBLISH == 'true'
-    needs: [version, publish]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
       id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.value }}
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-      - uses: actions/download-artifact@v4
-        with:
-          name: distribution
-          path: distribution
-      - name: Publish launcher with npm trusted publishing
-        env:
-          VERSION: ${{ needs.version.outputs.value }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag=latest
-          [[ $VERSION == *-* ]] && tag=next
-          npm publish "$PWD"/distribution/*.tgz --access public --provenance --tag "$tag" --ignore-scripts
-
-  homebrew:
-    # This token only needs Contents: write on Sukhendu2002/homebrew-tap.
-    if: github.event_name == 'push' && !contains(needs.version.outputs.value, '-') && vars.HOMEBREW_PUBLISH == 'true'
-    needs: [version, publish]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
       - uses: actions/checkout@v4
         with:
           repository: Sukhendu2002/homebrew-tap
+          ref: main
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
       - uses: actions/download-artifact@v4
         with:
-          name: distribution
-          path: distribution
-      - name: Update tap formula
-        env:
-          VERSION: ${{ needs.version.outputs.value }}
-        run: |
-          mkdir -p tap/Formula
-          cp distribution/boxpool.rb tap/Formula/boxpool.rb
-          cd tap
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Formula/boxpool.rb
-          if ! git diff --cached --quiet; then
-            git commit -m "build(release): update boxpool to $VERSION"
-            git push origin HEAD
-          fi
+          name: ${{ needs.distribution.outputs.artifact }}
+          path: dist/bundle
+      - name: Select npm with OIDC dist-tag recovery support
+        run: npm install --global npm@11.21.0 --ignore-scripts
+      - name: Publish or verify GitHub release assets
+        run: python3 scripts/release.py github "$VERSION" "$GITHUB_SHA" dist/bundle
+      - name: Publish or verify npm with trusted publishing
+        run: python3 scripts/release.py npm "$VERSION" "$GITHUB_SHA" dist/bundle
+      - name: Update or verify the Homebrew channel
+        run: python3 scripts/release.py tap "$VERSION" "$GITHUB_SHA" dist/bundle --tap tap
 
-  guest-image:
-    # GITHUB_TOKEN-created releases do not emit another workflow event.
-    # UI/gh-created releases already trigger image.yml through release.published.
-    if: needs.publish.outputs.created == 'true'
-    needs: publish
-    uses: ./.github/workflows/image.yml
+  verify:
+    needs: [version, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.version.outputs.value }}
+      FORMULA: ${{ needs.version.outputs.formula }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install the public binary with checksum verification
+        env:
+          BOXPOOL_VERSION: ${{ needs.version.outputs.value }}
+          BOXPOOL_INSTALL_DIR: ${{ runner.temp }}/boxpool-install
+        run: |
+          sh scripts/install.sh
+          "$BOXPOOL_INSTALL_DIR/boxpool" version | grep -Fx "boxpool $VERSION"
+      - name: Install npm from the public registry and run twice
+        env:
+          BOXPOOL_CACHE_DIR: ${{ runner.temp }}/boxpool-public-cache
+        shell: bash
+        run: |
+          npm exec --yes --ignore-scripts --package "boxpool@${VERSION#v}" -- boxpool version | grep -Fx "boxpool $VERSION"
+          npm exec --yes --offline --ignore-scripts --package "boxpool@${VERSION#v}" -- boxpool version | grep -Fx "boxpool $VERSION"
+      - name: Install and test the public Homebrew formula
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          brew tap sukhendu2002/tap
+          brew install "sukhendu2002/tap/$FORMULA"
+          brew test "sukhendu2002/tap/$FORMULA"
+          binary="$(brew --prefix "sukhendu2002/tap/$FORMULA")/bin/boxpool"
+          "$binary" version | grep -Fx "boxpool $VERSION"
+          codesign --verify --strict "$binary"
+          codesign -d --entitlements - "$binary" 2>/dev/null | grep com.apple.security.virtualization
+
+  complete:
+    needs: [version, distribution, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: write
-      packages: write
+    env:
+      VERSION: ${{ needs.version.outputs.value }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.distribution.outputs.artifact }}
+          path: dist/bundle
+      - name: Finalize the recommended GitHub release and report destinations
+        run: python3 scripts/release.py finalize "$VERSION" "$GITHUB_SHA" dist/bundle

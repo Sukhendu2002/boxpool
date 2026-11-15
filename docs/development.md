@@ -199,34 +199,23 @@ laptops plugged in with lids open unless macOS clamshell requirements are met.
 
 ## Releases
 
-Pushing a `vX.Y.Z` tag (or `vX.Y.Z-suffix`, published as a pre-release) on a
-`main` commit runs the [release workflow](../.github/workflows/release.yml).
-It builds static `boxpool-linux-amd64` and `boxpool-linux-arm64`, and
-`boxpool-darwin-arm64` with the macOS 26 SDK. The Mac binary is ad-hoc signed
-with the hardened runtime and `scripts/vz.entitlements`. It is **not Developer
-ID signed or notarized**. This release path requires no paid Apple Developer
-membership or Apple repository secrets; Developer ID signing and notarization
-are deferred. Last, the workflow uploads all three binaries and
-`checksums.txt` to the GitHub release using the automatic `GITHUB_TOKEN`.
-PRs that touch the workflow build and verify the same signatures without
-publishing. GitHub's hosted Macs cannot run VMs ("Virtualization is not
-available on this hardware"), so run the integration tests above on your Mac
-before tagging.
+Run **Actions → Release** on `main` and enter a version. The workflow runs
+checks, builds binaries and publishes GitHub, npm and Homebrew without another
+human approval. See the [release runbook](distribution.md#release-a-version)
+for the version/channels, retained artifacts and failed-job recovery.
 
-The same workflow prepares an npm archive with embedded binary checksums
-and a Homebrew formula, attached to each release. Stable tags update the
-tap, and all tags publish npm packages, once their repository variables
-are enabled. See [distribution setup and clean-host validation](distribution.md)
-for domain hosting, registry bootstrap and required credentials.
+The Mac binary is built with the macOS 26 SDK and ad-hoc signed with the
+hardened runtime and `scripts/vz.entitlements`. It is **not Developer ID signed
+or notarized**. This path requires no paid Apple Developer membership or Apple
+repository secrets; Developer ID signing and notarization are deferred.
+PRs that touch the release tooling build/test packages and signatures without
+publishing. GitHub-hosted Macs cannot run VMs ("Virtualization is not available
+on this hardware"); real-Mac VM validation remains a separate check and is not
+an interactive publication gate.
 
-A tag push creates the release with the workflow's token, then explicitly
-calls the [guest image workflow](../.github/workflows/image.yml) to build,
-test and publish matching guest images. GitHub does not emit another release
-event for that token, so the explicit call is required. A release created
-with `gh release create` or the web UI triggers the image workflow directly;
-the tag workflow only uploads binaries into that existing release. Include
-the ad-hoc signing and Gatekeeper notice below in manually created release
-notes too; workflow-created releases include a link to these instructions.
+CLI releases keep their compiled image pins. The
+[guest image workflow](../.github/workflows/image.yml) publishes independently
+from `image-vX.Y.Z` tags and no longer runs on ordinary CLI releases.
 
 Images must advertise and exercise the agent's `tcp` feature before
 publication: both OCI architectures test a real loopback HTTP request over

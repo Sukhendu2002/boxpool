@@ -49,7 +49,11 @@ def prepare(version, artifacts, output):
         base=f"https://github.com/Sukhendu2002/boxpool/releases/download/{version}",
         **{name.removeprefix("boxpool-").replace("-", "_"): checksums[name] for name in ASSETS},
     )
-    (output / "boxpool.rb").write_text(formula)
+    if "-" in version:
+        formula = formula.replace("class Boxpool < Formula", "class BoxpoolBeta < Formula")
+        formula = formula.replace('  license "Apache-2.0"', '  license "Apache-2.0"\n  keg_only "it is a prerelease of boxpool"')
+    name = "boxpool-beta.rb" if "-" in version else "boxpool.rb"
+    (output / name).write_text(formula)
 
 
 if __name__ == "__main__":

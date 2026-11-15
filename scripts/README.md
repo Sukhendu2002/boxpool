@@ -11,6 +11,7 @@ install. Release artifacts belong in ignored `bin/` or `dist/`, not in source.
 | [dev-sign.sh](dev-sign.sh) + [vz.entitlements](vz.entitlements) | Ad-hoc sign a Mac development binary or integration test with the virtualization entitlement. Unit tests need no signing. |
 | [generate-command-reference.py](generate-command-reference.py) | `make docs` / `make docs-check`; reads CLI help without starting a daemon. |
 | [install.sh](install.sh) | Published verbatim at `https://boxpool.run/install` by the Pages workflow; covered by offline installer tests. |
+| [release.py](release.py) | Manual Release workflow: version/channel selection, source/asset manifest, resumable GitHub/npm/tap publication and final verification. Offline tests in `tests/test_release.py`. |
 | [prepare-distribution.py](prepare-distribution.py) | Release workflow stages a pinned npm package and Homebrew formula from verified binary/checksum assets. |
 | [tests/](tests/) | Unit tests for the installer, distribution generator, command reference and benchmark harnesses. Run `make test-scripts`. |
 
