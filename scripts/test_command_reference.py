@@ -32,8 +32,9 @@ class CommandReferenceTests(unittest.TestCase):
         self.assertIn("## doctor", page)
         self.assertIn("### token create", page)
         self.assertIn("### snapshot ls", page)
+        self.assertIn("### skills install", page)
         self.assertIn("boxpool up --help", page)
-        self.assertEqual(help_mock.call_count, 1 + len(reference.HELP_COMMANDS) + 2)
+        self.assertEqual(help_mock.call_count, 1 + len(reference.HELP_COMMANDS) + 3)
 
     def test_unknown_command_requires_safety_review_before_execution(self):
         with patch.object(reference, "help_text", return_value=self.root_help("\n  newcmd    new")) as help_mock:

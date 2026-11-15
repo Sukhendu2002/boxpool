@@ -9,6 +9,11 @@ Docker container fallback with weaker isolation. Macs use Apple's
 Virtualization framework. Read the [trust model](docs/security.md#trust-at-a-glance)
 before running untrusted workloads.
 
+Keep Pi, Codex or Claude Code on your laptop with your existing login and
+skills using the [local-agent workspace workflow](docs/local-agents.md).
+Project file operations, builds and tests run in Boxpool; bundled guest
+agents are also available.
+
 ## Quickstart: a two-machine pool
 
 Choose two machines you control. **Head** is the first machine; it
