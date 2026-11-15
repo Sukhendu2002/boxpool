@@ -218,3 +218,46 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(release, "check_channels"), patch.object(release, "registry", side_effect=[package, older, package, selected]), patch.object(release, "run") as commands:
             release.npm_release("1.2.3", SHA, directory)
             commands.assert_called_once_with("npm", "dist-tag", "add", "boxpool@1.2.3", "latest")
+
+    def test_tap_rejects_conflicting_same_version_or_newer_or_unreadable_formula(self):
+        for value, current in (("1.2.3", "1.2.3"), ("1.2.3", "1.2.4"),
+                               ("1.2.3-beta.1", "1.2.3-beta.1"),
+                               ("1.2.3-beta.1", "1.2.3-beta.2"), ("1.2.3", None)):
+            with self.subTest(value=value, current=current):
+                directory = self.bundle(value)
+                tap = directory / "tap"
+                target = tap / "Formula" / f"{release.version(value)['formula']}.rb"
+                target.parent.mkdir(parents=True)
+                content = f'  version "{current}"\n  sha256 "conflicting digest"\n' if current else 'unreadable formula\n'
+                target.write_text(content)
+                with patch.object(release, "check_channels"), patch.object(release, "run") as commands:
+                    with self.assertRaises(ValueError):
+                        release.tap_release(value, SHA, directory, tap)
+                    commands.assert_not_called()
+                self.assertEqual(target.read_text(), content)
+
+    def test_tap_still_updates_from_an_older_version(self):
+        for value, current in (("1.2.3", "1.2.2"), ("1.2.3-beta.1", "1.2.3-beta.0")):
+            with self.subTest(value=value):
+                directory = self.bundle(value)
+                tap = directory / "tap"
+                name = f"{release.version(value)['formula']}.rb"
+                target = tap / "Formula" / name
+                target.parent.mkdir(parents=True)
+                target.write_text(f'  version "{current}"\n')
+                with patch.object(release, "check_channels"), patch.object(release, "run") as commands:
+                    release.tap_release(value, SHA, directory, tap)
+                    self.assertTrue(any(c.args[-2:] == ("origin", "HEAD:main") for c in commands.call_args_list))
+                self.assertEqual(target.read_bytes(), (directory / name).read_bytes())
+
+    def test_npm_retry_rejects_a_newer_channel_on_the_fresh_read_before_repair(self):
+        for value, newer in (("1.2.3", "1.2.4"), ("1.2.3-beta.1", "1.2.3-beta.2")):
+            with self.subTest(value=value):
+                directory = self.bundle(value)
+                info = release.version(value)
+                package = {"dist": {"integrity": release.npm_integrity(directory / f"boxpool-{value}.tgz")}}
+                tags = {"dist-tags": {info["channel"]: newer}}
+                with patch.object(release, "check_channels"), patch.object(release, "registry", side_effect=lambda version=None: package if version else tags), patch.object(release, "run") as commands:
+                    with self.assertRaisesRegex(ValueError, "backwards"):
+                        release.npm_release(value, SHA, directory)
+                    commands.assert_not_called()

@@ -98,6 +98,13 @@ def source_matches(tag, sha):
     return existing
 
 
+def formula_version(text):
+    found = re.search(r'^  version "([^"]+)"$', text, re.M)
+    if not found:
+        raise ValueError("cannot identify the current tap formula version")
+    return found[1]
+
+
 def check_channels(info):
     metadata = registry()
     current = (metadata or {}).get("dist-tags", {}).get(info["channel"])
@@ -109,10 +116,7 @@ def check_channels(info):
     formula = api(f"repos/{TAP}/contents/Formula/{info['formula']}.rb", missing=True)
     if formula:
         text = base64.b64decode(formula["content"]).decode()
-        found = re.search(r'^  version "([^"]+)"$', text, re.M)
-        if not found:
-            raise ValueError("cannot identify the current tap formula version")
-        advancing(info["version"], found[1])
+        advancing(info["version"], formula_version(text))
 
 
 def plan(value, sha):
@@ -218,6 +222,7 @@ def npm_release(value, sha, directory):
             raise ValueError("published npm package differs; choose a new version")
         # Usually publish already set this tag. This repairs an interrupted/tag-only recovery.
         current = (registry() or {}).get("dist-tags", {}).get(info["channel"])
+        advancing(info["version"], current)
         if current != info["version"][1:]:
             run("npm", "dist-tag", "add", f"boxpool@{info['version'][1:]}", info["channel"])
     verify_npm(info, archive)
@@ -245,8 +250,14 @@ def tap_release(value, sha, directory, tap):
     check_channels(info)
     target = tap / "Formula" / f"{info['formula']}.rb"
     content = (directory / target.name).read_bytes()
-    if target.exists() and target.read_bytes() == content:
-        return
+    if target.exists():
+        existing = target.read_bytes()
+        if existing == content:
+            return
+        current = formula_version(existing.decode())
+        advancing(info["version"], current)
+        if version(current)["order"] == info["order"]:
+            raise ValueError("published tap formula differs for the selected version; choose a new version")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(content)
     run("git", "-C", str(tap), "config", "user.name", "github-actions[bot]")
