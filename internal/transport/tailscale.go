@@ -100,6 +100,11 @@ func tailscale(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, errors.New("the tailscale CLI is not installed: install Tailscale on the head and make tailscale available in the daemon's PATH")
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
+	if runtime.GOOS == "darwin" {
+		// The app otherwise guesses GUI vs CLI mode from shell variables
+		// that launchd does not provide. Override only this child's mode.
+		cmd.Env = append(cmd.Environ(), "TAILSCALE_BE_CLI=1")
+	}
 	// A wrapper can leave a child holding stdout after it is killed.
 	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()

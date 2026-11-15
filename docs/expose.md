@@ -39,6 +39,17 @@ Tailscale is stopped, logged out, MagicDNS is off or HTTPS is unavailable.
 It reports the missing setting and where to change it. Other Boxpool
 features do not require Tailscale Serve.
 
+On macOS, Boxpool sets `TAILSCALE_BE_CLI=1` for its Tailscale commands so the
+bundled executable runs as a CLI even from the launch agent, without shell
+startup variables. When checking the bundled executable manually from a
+script, use:
+
+```sh
+TAILSCALE_BE_CLI=1 /Applications/Tailscale.app/Contents/MacOS/Tailscale status --json
+```
+
+See the [Tailscale CLI guide](https://tailscale.com/docs/reference/tailscale-cli?tab=macos).
+
 ## Guest images
 
 The image's agent must advertise `tcp` in `GET /v1/version`. Updating the

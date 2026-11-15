@@ -6,11 +6,74 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"boxpool.run/boxpool/internal/transport"
 )
+
+func TestTailscaleCLIMode(t *testing.T) {
+	for _, inherited := range []string{"unset", "0", "1"} {
+		t.Run(inherited, func(t *testing.T) {
+			t.Setenv("TAILSCALE_BE_CLI", inherited)
+			if inherited == "unset" {
+				if err := os.Unsetenv("TAILSCALE_BE_CLI"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := inherited
+			if runtime.GOOS == "darwin" {
+				want = "1"
+			}
+			t.Setenv("EXPECTED_CLI_MODE", want)
+			t.Setenv("PRESERVED_ENV", "parent value")
+			bin := t.TempDir()
+			// The macOS app chooses GUI mode without the override in a
+			// launch-agent environment. Fail every command if that happens.
+			script := `#!/bin/sh
+if [ "${TAILSCALE_BE_CLI-unset}" != "$EXPECTED_CLI_MODE" ]; then
+    echo 'Tailscale selected GUI mode' >&2; exit 1
+fi
+if [ "$PRESERVED_ENV" != 'parent value' ]; then
+    echo 'lost inherited environment' >&2; exit 1
+fi
+case "$1" in
+ip) echo '100.64.0.7' ;;
+status) echo '{"BackendState":"Running","Self":{"DNSName":"head.tail1.ts.net."},"CurrentTailnet":{"MagicDNSEnabled":true},"CertDomains":["head.tail1.ts.net"]}' ;;
+serve) exit 0 ;;
+*) exit 1 ;;
+esac
+`
+			if err := os.WriteFile(filepath.Join(bin, "tailscale"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			ctx := context.Background()
+			tr := transport.Tailscale{}
+			if addr, err := tr.Address(ctx, "7443"); err != nil || addr != "100.64.0.7:7443" {
+				t.Errorf("Address = %q, %v", addr, err)
+			}
+			if host, err := tr.CheckServe(ctx); err != nil || host != "head.tail1.ts.net" {
+				t.Errorf("CheckServe = %q, %v", host, err)
+			}
+			if url, err := tr.Serve(ctx, 41000); err != nil || url != "https://head.tail1.ts.net:41000/" {
+				t.Errorf("Serve = %q, %v", url, err)
+			}
+			if err := tr.Unserve(ctx, 41000); err != nil {
+				t.Errorf("Unserve = %v", err)
+			}
+			value, set := os.LookupEnv("TAILSCALE_BE_CLI")
+			if inherited == "unset" {
+				if set {
+					t.Errorf("parent CLI mode was set to %q", value)
+				}
+			} else if !set || value != inherited {
+				t.Errorf("parent CLI mode = %q, %v; want %q", value, set, inherited)
+			}
+		})
+	}
+}
 
 func TestTailscaleServe(t *testing.T) {
 	bin := t.TempDir()
