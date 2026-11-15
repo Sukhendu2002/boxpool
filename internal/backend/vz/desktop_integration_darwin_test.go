@@ -41,12 +41,21 @@ func TestIntegrationDesktop(t *testing.T) {
 	}
 	var out bytes.Buffer
 	s, err := c.Exec(ctx, agent.ExecRequest{Argv: []string{"sh", "-c", `set -eu
+screenshot=$(mktemp "${TMPDIR:-/tmp}/boxpool-desktop.XXXXXX")
+trap 'rm -f "$screenshot"' EXIT
+# Chromium/Openbox can replace windows while xwd reads their attributes.
+# Require window discovery and a nonempty capture in the same bounded retry.
 i=0
-until DISPLAY=:0 xdotool search --onlyvisible --class chromium 2>/dev/null; do
-    i=$((i+1)); test "$i" -lt 100; sleep 0.1
+until DISPLAY=:0 xdotool search --onlyvisible --class chromium >/dev/null 2>&1 \
+    && DISPLAY=:0 xwd -root -silent -out "$screenshot" \
+    && test -s "$screenshot"; do
+    i=$((i+1))
+    if test "$i" -ge 100; then
+        echo "desktop did not produce a Chromium screenshot" >&2
+        exit 1
+    fi
+    sleep 0.1
 done
-DISPLAY=:0 xwd -root -silent > /tmp/screen.xwd
-test -s /tmp/screen.xwd
 test "$(tigervncconfig -display :0 -get AcceptKeyEvents)" = 0
 test "$(tigervncconfig -display :0 -get AcceptPointerEvents)" = 0
 chromium --version`}}, &out, &out)
