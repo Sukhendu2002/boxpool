@@ -2,11 +2,14 @@
 
 Rules for anyone (human or agent) changing this repo. Product scope lives in the
 PRD and technical design; the roadmap lives in the pinned **Roadmap** issue.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the repository map
+and the check commands; this file defines the contribution rules.
 
 ## Project
 
 - Go, one binary: `cmd/boxpool`. Packages live under `internal/`.
 - Build: `go build -o bin/boxpool ./cmd/boxpool`. Test: `go test ./...`. Vet: `go vet ./...`.
+- `make check` also runs formatting, Python/Node tests and generated-doc checks.
 - Code must be `gofmt`-clean. CI runs vet, test and build on Linux and macOS.
 - Prefer the standard library. A new dependency needs one line in the PR saying why.
 - Every behaviour change ships with a unit test, or with manual test steps in the PR when it cannot be unit-tested (hypervisors, signing, real hardware).

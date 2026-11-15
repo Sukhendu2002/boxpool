@@ -226,6 +226,8 @@ State is kept, and `up` starts the service again.
 
 ## Documentation
 
+- [Documentation index](docs/README.md): user guides, development references and
+  recorded validation.
 - [User guide](docs/guide.md): files, resources, snapshots, remote login,
   scheduling, failover, state and upgrades.
 - [Command reference](docs/commands.md): generated from CLI help.
@@ -236,8 +238,11 @@ State is kept, and `up` starts the service again.
 - [Development](docs/development.md), [guest images](image/README.md),
   [agent protocol](docs/agent-protocol.md), and [distribution maintenance](docs/distribution.md).
 
-Contributors: `go build -o bin/boxpool ./cmd/boxpool`, `go vet ./...`,
-`go test ./...`. See [AGENTS.md](AGENTS.md) for contribution rules and the
-[onboarding walkthrough](docs/onboarding-check.md) for the timed user test.
+## Contributing
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, the repository
+map and the issue/PR workflow. Run `make help` to see available commands and
+`make check` for the ordinary checks; no daemon or hypervisor is needed.
+See [AGENTS.md](AGENTS.md) for the shared rules for humans and agents.
 
 Apache 2.0. See [LICENSE](LICENSE).

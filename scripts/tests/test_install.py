@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts" / "install.sh"
 BINARY = b"#!/bin/sh\nprintf 'boxpool fixture\\n'\n"
 

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 
-spec = importlib.util.spec_from_file_location("check_cli", Path(__file__).with_name("check-cli.py"))
+spec = importlib.util.spec_from_file_location("check_cli", Path(__file__).resolve().parents[1] / "check-cli.py")
 gate_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate_module)
 

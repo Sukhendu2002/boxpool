@@ -79,7 +79,9 @@ type shutdownWarnings struct {
 }
 
 func (h shutdownWarnings) Handle(ctx context.Context, r slog.Record) error {
-	if r.Level >= slog.LevelWarn {
+	// A developer's running daemon may produce an unrelated busy-pool-port
+	// warning at startup. Capture only the warning this shutdown test awaits.
+	if r.Level >= slog.LevelWarn && r.Message == "requests still running after shutdown; waiting for cleanup" {
 		select {
 		case h.warnings <- r.Clone():
 		default:

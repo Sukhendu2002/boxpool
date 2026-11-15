@@ -117,6 +117,10 @@ func TestAuditEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.CloseNow()
+	// Hijack can flush the upgrade response before the server's audit write
+	// finishes. Wait for that write while keeping the session open; ordinary
+	// mutation responses above are buffered until their audit commits.
+	waitFor(t, "the exec audit event", func() bool { return len(auditEvents(t, st)) > count })
 	want("sandbox.exec", "web", tok.ID) // visible while the shell is still open
 	c.Close(websocket.StatusNormalClosure, "")
 
@@ -250,6 +254,7 @@ func TestAuditOnNode(t *testing.T) {
 		}
 	}
 	call("POST", "/v1/sandboxes", `{"name":"mac","os":"macos"}`)
+	beforeExec := len(auditEvents(t, hs.st))
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	c, _, err := websocket.Dial(ctx, remote.URL+"/v1/sandboxes/mac/exec", &websocket.DialOptions{HTTPHeader: http.Header{"Authorization": {"Bearer " + tok.Token}}})
@@ -257,6 +262,7 @@ func TestAuditOnNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.CloseNow()
+	waitFor(t, "the forwarded exec audit event", func() bool { return len(auditEvents(t, hs.st)) > beforeExec })
 	list := auditEvents(t, hs.st)
 	if list[0].Action != "sandbox.exec" || list[0].TokenID != tok.ID || list[0].Target != "mac" {
 		t.Fatalf("forwarded exec = %+v", list[0])

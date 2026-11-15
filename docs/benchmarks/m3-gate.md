@@ -173,7 +173,7 @@ Linux, keep the state file out of `/tmp`, which is cleared at boot.
 The script's own checks run in CI with the other harness tests:
 
 ```sh
-python3 -m unittest discover -s scripts -p 'test_*.py'
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
 `test_bench_m3.py` runs `reboot-check` against a stub boxpool. It must fail

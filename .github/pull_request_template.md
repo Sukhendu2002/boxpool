@@ -25,6 +25,6 @@ Closes #
 ## Checklist
 
 - [ ] Title follows the commit format
-- [ ] `go vet ./...` and `go test ./...` pass
+- [ ] `make check` passes (Go, tooling, launcher and generated-doc checks)
 - [ ] Acceptance criteria in the linked issue are met
 - [ ] Docs or README updated if behaviour changed
