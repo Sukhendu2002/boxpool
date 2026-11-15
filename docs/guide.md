@@ -1,6 +1,6 @@
 # User guide
 
-Start with the [two-machine quickstart](../README.md#quickstart-a-two-machine-pool).
+Start with the [first workspace guide](first-workspace.md).
 Examples here use `boxpool`; on Linux with the installed root daemon, use
 `sudo /usr/local/bin/boxpool` instead. Put flags before positional arguments
 unless the command help explicitly shows otherwise. `exec` flags go before
@@ -8,43 +8,9 @@ the sandbox name; flags after `--` belong to the guest command.
 
 ## Installation options
 
-The [installer](https://boxpool.run/install) supports Linux amd64/arm64
-and Apple silicon macOS. It chooses `/usr/local/bin` when writable,
-otherwise `~/.local/bin`, without invoking sudo. To choose a directory or
-pin a release:
-
-```sh
-curl -fsSL https://boxpool.run/install -o /tmp/boxpool-install.sh
-BOXPOOL_INSTALL_DIR="$HOME/.local/bin" BOXPOOL_VERSION=v0.1.1 sh /tmp/boxpool-install.sh
-export PATH="$HOME/.local/bin:$PATH"
-boxpool version
-```
-
-Homebrew: `brew install sukhendu2002/tap/boxpool`.
-Node.js 20+: `npm install -g boxpool`, or `npx boxpool@0.1.1 version` to
-run a pinned version without install hooks. npm downloads on first use;
-its launcher verifies the pinned digest even for cached binaries.
-`BOXPOOL_CACHE_DIR` overrides its download cache. Homebrew pins SHA-256,
-and the shell installer checks the release manifest. These checks detect
-corruption; they are not an independent signature if the release account
-is compromised. macOS releases are ad-hoc signed, not notarized; see
-[verification](development.md#releases).
-
-To build from source, install Git and Go 1.25+, plus the host prerequisites
-in the quickstart. On macOS, install Xcode Command Line Tools first
-(`xcode-select --install`); sandbox networking also needs the macOS 26 SDK.
-
-```sh
-git clone https://github.com/Sukhendu2002/boxpool.git
-cd boxpool
-go build -o bin/boxpool ./cmd/boxpool
-# macOS only: sign with the virtualization entitlement
-scripts/dev-sign.sh bin/boxpool
-```
-
-On Linux, skip the signing step and run `sudo ./bin/boxpool up`.
-On a Mac, run `./bin/boxpool up` as yourself.
-Continue with the [quickstart](../README.md#2-start-the-head).
+See [installation](installation.md) for host prerequisites, the shell installer,
+Homebrew, npm and [source builds](installation.md#build-from-source).
+Then create your [first workspace](first-workspace.md).
 
 ## Shells, commands and files
 

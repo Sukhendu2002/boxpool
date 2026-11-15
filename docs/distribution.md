@@ -22,7 +22,9 @@ new registry/domain or replacement infrastructure, not user prerequisites.
    Enable **Enforce HTTPS** after certificate provisioning.
 3. Run the [Distribution site workflow](../.github/workflows/pages.yml) on
    `main`. It copies `scripts/install.sh` verbatim to `/install`, alongside
-   the static pages in `site/`. No build framework or JavaScript is needed.
+   the landing page and Markdown documentation built by `site/build.mjs`.
+   Node.js is needed at build time; reading guides needs no JavaScript. See
+   the [site contributor guide](../site/README.md) for local builds.
 4. Verify the deployed endpoints:
 
    ```sh

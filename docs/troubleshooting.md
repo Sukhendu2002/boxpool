@@ -14,7 +14,7 @@ while doctor exits 0: Docker Engine is optional if Firecracker works,
 and KVM is optional when using Docker fallback. A required check such as
 kernel version or disk space still blocks startup. Doctor does not check
 all service/networking prerequisites: also install systemd, `ip` and `nft`
-on Linux as in the [quickstart](../README.md#1-install-on-both-machines).
+on Linux as in the [installation guide](installation.md#linux-prerequisites).
 
 Use the **check name printed on your machine** below. After fixing it,
 rerun doctor in the same account, then rerun `up`.

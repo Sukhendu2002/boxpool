@@ -3,9 +3,27 @@ name: Distribution site
 on:
   push:
     branches: [main]
-    paths: ['site/**', 'scripts/install.sh', '.github/workflows/pages.yml']
+    paths:
+      [
+        "site/**",
+        "docs/**",
+        "README.md",
+        "CONTRIBUTING.md",
+        "Makefile",
+        "scripts/install.sh",
+        ".github/workflows/pages.yml",
+      ]
   pull_request:
-    paths: ['site/**', 'scripts/install.sh', '.github/workflows/pages.yml']
+    paths:
+      [
+        "site/**",
+        "docs/**",
+        "README.md",
+        "CONTRIBUTING.md",
+        "Makefile",
+        "scripts/install.sh",
+        ".github/workflows/pages.yml",
+      ]
   workflow_dispatch:
 
 permissions:
@@ -22,12 +40,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Assemble static site
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - name: Install build dependencies
+        run: npm ci --prefix site --ignore-scripts
+      - name: Build and check static site
         run: |
-          mkdir -p dist/site
-          cp -R site/. dist/site/
-          cp scripts/install.sh dist/site/install
-          touch dist/site/.nojekyll
+          make site
+          make test-site
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist/site

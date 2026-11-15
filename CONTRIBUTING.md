@@ -64,13 +64,21 @@ go build -o bin/boxpool ./cmd/boxpool
 | [npm/](npm/) and [packaging/](packaging/) | npm launcher and Homebrew formula template |
 | [scripts/](scripts/README.md) | Maintained tools, benchmarks and tooling tests |
 | [test/security/](test/security/README.md) | Explicit host/backend security probes |
-| [site/](site/) | Distribution site and Go module discovery pages |
+| [site/](site/README.md) | Landing page, Markdown docs site and Go module discovery |
 | [.github/workflows/](.github/workflows/) | Unit, integration, image, release and site pipelines |
 
 Go unit tests live beside the packages they exercise. Python tooling tests live
 in `scripts/tests/`; npm launcher tests live in `npm/test/`. The
 [documentation index](docs/README.md) separates user guides, implementation
 references and dated hardware evidence.
+
+## Work on the website
+
+The website publishes the same Markdown guides that live in `docs/`.
+For landing page or documentation-site changes, use Node.js 20.19+ and run
+`npm ci --prefix site`, `make site` and `make test-site`. See the [site guide](site/README.md) for local
+preview, navigation and deployment details. Website dependencies are build-only
+and separate from the dependency-free npm CLI launcher.
 
 ## Test a real backend when needed
 

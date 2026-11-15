@@ -1,23 +1,262 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="go-import" content="boxpool.run/boxpool git https://github.com/Sukhendu2002/boxpool">
-  <title>Boxpool</title>
-</head>
-<body>
-  <h1>Boxpool</h1>
-  <p>Turn your spare Linux machines and Apple silicon Macs into sandboxes for AI agents.</p>
-  <p>Install an early release on Linux or Apple silicon macOS:</p>
-  <pre>curl -fsSL https://boxpool.run/install | sh
-boxpool doctor</pre>
-  <p>Or use Homebrew: <code>brew install sukhendu2002/tap/boxpool</code>,
-    or Node.js 20+: <code>npx boxpool doctor</code>.</p>
-  <p>After checking host prerequisites, run <code>sudo boxpool up</code> on Linux
-    (client commands also need sudo) or <code>boxpool up</code> as your user on macOS.</p>
-  <p>The macOS binary is ad-hoc signed and is not notarized.
-    See <a href="https://github.com/Sukhendu2002/boxpool/blob/main/docs/development.md#releases">verification and Gatekeeper instructions</a>.</p>
-  <p><a href="https://github.com/Sukhendu2002/boxpool#readme">Quickstart: build a two-machine pool</a></p>
-</body>
-</html>
+<main id="main">
+  <section class="hero section-wrap">
+    <div class="hero-copy">
+      <p class="eyebrow">
+        <span class="status-dot"></span> OPEN SOURCE · EARLY RELEASE
+      </p>
+      <h1>Your machines.<br />One workspace<br /><span>pool.</span></h1>
+      <p class="hero-description">
+        A separate place for your code to run.<br class="desktop-break" />
+        Linux workspaces on the Macs and Linux machines you already own.
+      </p>
+      <div class="hero-actions">
+        <a class="button" href="/docs/getting-started/"
+          >Create your first workspace <span aria-hidden="true">↗</span></a
+        ><a class="text-link" href="https://github.com/Sukhendu2002/boxpool"
+          >Explore the code <span aria-hidden="true">↗</span></a
+        >
+      </div>
+      <p class="hero-note">One machine to start. More when you need them.</p>
+    </div>
+    <div class="hero-visual">
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="terminal-dots" aria-hidden="true"
+            ><i></i><i></i><i></i></span
+          ><span>EXAMPLE SESSION / MAC HOST</span
+          ><span class="terminal-mark" aria-hidden="true">⌘</span>
+        </div>
+        <div class="terminal-body">
+          <p class="terminal-comment"># A workspace of your own</p>
+          <pre><span class="prompt">~ $</span> boxpool sh --name work
+<span class="output">sandbox work (vz)</span>
+
+<span class="guest-prompt">root@work:~#</span> uname -s
+<span class="output">Linux</span>
+<span class="guest-prompt">root@work:~#</span> echo "hello, workspace"
+<span class="output">hello, workspace</span>
+<span class="guest-prompt">root@work:~#</span> exit
+
+<span class="terminal-comment"># Your workspace stays running</span>
+<span class="prompt">~ $</span> boxpool exec work -- pwd
+<span class="output">/root</span><span class="cursor" aria-hidden="true"></span></pre>
+        </div>
+      </div>
+      <div
+        class="pool-map"
+        aria-label="Start with your Mac or Linux host; optionally add other machines"
+      >
+        <span class="map-node"
+          ><span class="node-symbol" aria-hidden="true">▱</span> Your
+          laptop</span
+        ><span class="map-line" aria-hidden="true"></span
+        ><span class="map-core">boxpool</span
+        ><span class="map-line" aria-hidden="true"></span
+        ><span class="map-node"
+          ><span class="node-symbol" aria-hidden="true">▤</span> Spare
+          machines</span
+        >
+      </div>
+      <p class="visual-caption">OWNED HARDWARE. LINUX GUESTS. ONE CLI.</p>
+    </div>
+  </section>
+
+  <section class="install-section" id="install">
+    <div class="section-wrap install-grid">
+      <div>
+        <p class="eyebrow">01 / START SMALL</p>
+        <h2>One install.<br />Your first workspace.</h2>
+        <p>
+          Choose how to install the CLI, check your host, then open a shell. No
+          second machine required.
+        </p>
+        <a class="text-link" href="/docs/installation/"
+          >Requirements & installation guide
+          <span aria-hidden="true">↗</span></a
+        >
+      </div>
+      <div class="install-card">
+        <div class="install-tabs" data-tabs aria-label="Installation method">
+          <button type="button" data-tab="shell">Shell</button
+          ><button type="button" data-tab="brew">Homebrew</button
+          ><button type="button" data-tab="npm">npm</button>
+        </div>
+        <div id="install-shell" data-panel="shell">
+          <h3 class="panel-label">Shell · Mac or Linux host</h3>
+          <div class="code-block">
+            <button
+              class="copy-button"
+              type="button"
+              data-copy
+              hidden
+              aria-label="Copy shell install command"
+            >
+              Copy
+            </button>
+            <pre><code>curl -fsSL https://boxpool.run/install | sh</code></pre>
+          </div>
+        </div>
+        <div id="install-brew" data-panel="brew">
+          <h3 class="panel-label">Homebrew · host terminal</h3>
+          <div class="code-block">
+            <button
+              class="copy-button"
+              type="button"
+              data-copy
+              hidden
+              aria-label="Copy Homebrew install command"
+            >
+              Copy
+            </button>
+            <pre><code>brew install sukhendu2002/tap/boxpool</code></pre>
+          </div>
+        </div>
+        <div id="install-npm" data-panel="npm">
+          <h3 class="panel-label">npm · host with Node.js 20+</h3>
+          <div class="code-block">
+            <button
+              class="copy-button"
+              type="button"
+              data-copy
+              hidden
+              aria-label="Copy npm install command"
+            >
+              Copy
+            </button>
+            <pre><code>npm install -g boxpool</code></pre>
+          </div>
+        </div>
+        <div class="install-next">
+          <span class="step-number">NEXT</span>
+          <div>
+            <strong>Check. Start. Create.</strong>
+            <p>
+              Follow the
+              <a href="/docs/first-workspace/">first workspace guide</a> for the
+              commands on your OS.
+            </p>
+          </div>
+        </div>
+        <p class="install-note">
+          20 GB available disk space per host. Apple silicon macOS 14+ (26+ for
+          guest networking), or Linux with KVM / Docker.
+          <a href="/docs/installation/#host-requirements"
+            >Full requirements →</a
+          >
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section-wrap workflow-section">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">02 / WORK YOUR WAY</p>
+        <h2>Keep your flow.<br />Give the work some room.</h2>
+      </div>
+      <p>
+        Build and test in a separate environment. Keep the setup you like, and
+        choose where the heavy work happens.
+      </p>
+    </div>
+    <div class="workflow-grid">
+      <article>
+        <span class="feature-index">/ 01</span>
+        <h3>Your agent, your setup.</h3>
+        <p>
+          Keep Pi, Codex or Claude Code on your laptop with your model login and
+          personal skills. Use the workspace skill to run project operations
+          through Boxpool.
+        </p>
+        <a href="/docs/local-agents/">Local-agent workflow ↗</a
+        ><small
+          >Skill installer available from source; not yet in v0.1.4. Skill
+          guidance is cooperative.</small
+        >
+      </article>
+      <article>
+        <span class="feature-index">/ 02</span>
+        <h3>A place to come back to.</h3>
+        <p>
+          Exit the terminal and your workspace stays running. Stop it for later,
+          or snapshot its disk to try another direction. Bundled guest agents
+          are ready when you prefer that workflow.
+        </p>
+        <a href="/docs/guide/#resources-and-persistence"
+          >Workspaces & persistence ↗</a
+        >
+      </article>
+      <article>
+        <span class="feature-index">/ 03</span>
+        <h3>More machines. Same CLI.</h3>
+        <p>
+          Add a spare Linux machine or Apple silicon Mac to the pool. Label it,
+          select it, and run workspace commands from the head.
+        </p>
+        <a href="/docs/pool/">Add another machine ↗</a>
+      </article>
+    </div>
+  </section>
+
+  <section class="section-wrap extras-section">
+    <div>
+      <p class="eyebrow">03 / WHEN YOU NEED MORE</p>
+      <h2>From terminal<br />to running app.</h2>
+      <p>
+        Open an app preview or a browser desktop over your tailnet. These are
+        optional next steps, after your first workspace works.
+      </p>
+    </div>
+    <div class="extras-links">
+      <a href="/docs/expose/"
+        ><span
+          ><strong>Preview an app</strong
+          ><small
+            >Reach a workspace server with a private HTTPS link.</small
+          ></span
+        ><span aria-hidden="true">↗</span></a
+      ><a href="/docs/desktop/"
+        ><span
+          ><strong>Open a desktop</strong
+          ><small>Watch, take control, then hand it back.</small></span
+        ><span aria-hidden="true">↗</span></a
+      >
+      <p>
+        Requires Tailscale, MagicDNS and HTTPS certificates. Treat shared links
+        as secrets.
+      </p>
+    </div>
+  </section>
+
+  <section class="section-wrap status-section">
+    <div>
+      <p class="eyebrow">BUILT IN THE OPEN</p>
+      <h2>Early days.<br />Real hardware.</h2>
+      <p>
+        Boxpool is under active development. Mac uses Apple’s Virtualization
+        framework; Linux uses Firecracker, with a Docker fallback that provides
+        weaker isolation. Mac releases are ad-hoc signed, not notarized.
+      </p>
+      <p>
+        Read the trust model before running untrusted workloads. The docs follow
+        main and mark unreleased features.
+      </p>
+      <div class="status-links">
+        <a href="/docs/security/">Security & trust ↗</a
+        ><a href="https://github.com/Sukhendu2002/boxpool/releases"
+          >Release notes ↗</a
+        >
+      </div>
+    </div>
+    <div class="contribute-callout">
+      <span class="feature-index">GO / ONE BINARY / APACHE 2.0</span>
+      <h3>Make it better<br />with us.</h3>
+      <p>
+        Find your way around the codebase, run the checks and pick an issue.
+      </p>
+      <a class="button button-outline" href="/docs/contributing/"
+        >Contributor guide <span aria-hidden="true">↗</span></a
+      >
+    </div>
+  </section>
+</main>

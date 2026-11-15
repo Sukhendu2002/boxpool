@@ -1,9 +1,11 @@
-# Documentation index
+# Boxpool documentation
 
 ## Use Boxpool
 
-- [Two-machine quickstart](../README.md#quickstart-a-two-machine-pool): install,
-  start a head, join a worker and run a sandbox.
+- [Get started](getting-started.md): understand the workflow and choose your path.
+- [Install](installation.md): host requirements, shell, Homebrew, npm and source builds.
+- [First workspace](first-workspace.md): one machine, a shell, files and cleanup.
+- [Add another machine](pool.md): join a worker and choose where work runs.
 - [User guide](guide.md): files, resources, persistence, placement and clients.
 - [Command reference](commands.md): generated from this checkout's CLI help.
 - [Local agents](local-agents.md): keep your harness on the laptop and project
