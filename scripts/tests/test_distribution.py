@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location("distribution", Path(__file__).with_name("prepare-distribution.py"))
+spec = importlib.util.spec_from_file_location("distribution", Path(__file__).resolve().parents[1] / "prepare-distribution.py")
 distribution = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(distribution)
 

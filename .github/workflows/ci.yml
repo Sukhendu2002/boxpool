@@ -30,15 +30,7 @@ jobs:
             fi
           fi
           shellcheck scripts/install.sh
-      - run: node --test npm/test/*.test.js
-      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - run: go vet ./...
-      - run: go test ./...
+      - name: Contributor checks
+        run: make check
       - name: Fuzz agent file-upload paths
         run: go test ./internal/agent -run='^$' -fuzz='^FuzzFileUploadPaths$' -fuzztime=15s -parallel=2
-      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
-      - run: go build ./...
-      - name: Check generated command reference
-        run: |
-          go build -o bin/boxpool ./cmd/boxpool
-          python3 scripts/generate-command-reference.py --binary bin/boxpool --check

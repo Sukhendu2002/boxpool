@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 
-spec = importlib.util.spec_from_file_location("bench_m3", Path(__file__).with_name("bench-m3.py"))
+spec = importlib.util.spec_from_file_location("bench_m3", Path(__file__).resolve().parents[1] / "bench-m3.py")
 bench = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bench)
 

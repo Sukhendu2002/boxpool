@@ -1,5 +1,15 @@
 # Development setup
 
+For a first contribution, start with [CONTRIBUTING.md](../CONTRIBUTING.md):
+setup, the repository map and `make check`. This page is the detailed platform
+and implementation reference. The [documentation index](README.md) lists the
+other guides.
+
+Jump to [Mac setup](#macos-on-apple-silicon), [Linux setup](#build-and-verify-on-linux),
+[Linux tests](#linux-testing-for-each-pr), [pool transport](#pool-transport),
+[manual pool checks](#pool-status-console-logs-and-mac-power-checks), or
+[release/signing details](#releases).
+
 ## macOS on Apple silicon
 
 Use macOS 14+ with Xcode Command Line Tools (`xcode-select --install`) and
@@ -469,25 +479,22 @@ but general nested VMs are [experimental](https://docs.github.com/en/actions/con
 If KVM disappears from a runner, inspect the failed job and use option A, B,
 or C for KVM verification. A green unit-test job alone does not replace it.
 
-For upcoming Linux backend PRs, add repeatable integration tests to CI as
-the features land: actual VM boot/stop, guest commands, networking, and
-cleanup. Today's doctor job only verifies preflight; it does not cover those
-future behaviors, arm64 KVM, or native-hardware boot timings. Use a persistent
-SSH-accessible Linux machine for interactive debugging, multi-node tests,
-and performance measurements. A repaired laptop can serve that role without
-needing its screen once SSH is configured.
+The separate integration job covers real VM lifecycle, guest commands,
+networking and cleanup, as described below. The doctor job only verifies
+preflight. Hosted x86_64 checks do not establish arm64 KVM behavior or
+native-hardware boot timings. Use a persistent SSH-accessible Linux machine
+for interactive debugging, multi-node tests and performance measurements.
 
-Once this workflow is on `main`, it can also be [run manually](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+The workflow can also be [run manually](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
 from **Actions → Linux KVM → Run workflow**, selecting the branch to test.
 
-### Your own Linux machine, before you push
+### Your own Linux machine
 
-`scripts/test-on-linux.sh` copies the working tree (uncommitted changes
-included) to your Linux machine over SSH and runs vet, tests, a build and
-`boxpool doctor` there, requiring `Backend: firecracker`. Set
-`BOXPOOL_LINUX_HOST` to its SSH host, e.g. in your shell profile. The remote
-needs `rsync`, Go on `PATH` or in `~/.local/go`, and read/write access to
-`/dev/kvm` for your user.
+Check out the branch on your development Linux host and run `make check` there.
+Then use the integration command below when the change needs real KVM.
+Ordinary checks do not need an SSH host configured, and no pre-push hook is
+required. CI runs the shared contributor checks and backend integration jobs
+on each PR.
 
 CI runs the Firecracker integration tests on every PR and push to `main`
 in the `integration` job of the [Linux KVM workflow](../.github/workflows/linux-kvm.yml):
@@ -693,16 +700,12 @@ integration test verifies 1 CPU/512 MiB in Engine inspect and from inside
 the memory/CPU cgroups. Both reject an excessive memory request before
 creating resources.
 
-To run it on every `git push`, enable the repo's hooks once:
-
-```sh
-git config core.hooksPath .githooks
-```
-
-The hook skips with a warning when `BOXPOOL_LINUX_HOST` is unset or the machine is unreachable; use
-`git push --no-verify` to skip it on purpose. There is deliberately no
-self-hosted GitHub runner: on a public repo, a PR could run its own code on
-that machine. Only you, over SSH, can.
+The old optional SSH pre-push hook has been removed in favor of `make check`
+and CI. If an older clone has `git config --get core.hooksPath` set to
+`.githooks`, remove that repository-local setting with
+`git config --local --unset core.hooksPath`. Keep any unrelated hook
+configuration you installed yourself. GitHub uses disposable hosted runners;
+your personal Linux machine is only used when you explicitly run checks there.
 
 ## Troubleshooting doctor
 

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 
 spec = importlib.util.spec_from_file_location(
-    "command_reference", Path(__file__).with_name("generate-command-reference.py"))
+    "command_reference", Path(__file__).resolve().parents[1] / "generate-command-reference.py")
 reference = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reference)
 

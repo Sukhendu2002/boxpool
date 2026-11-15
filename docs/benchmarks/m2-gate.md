@@ -193,7 +193,7 @@ in the selected log directory. The measured Mac run used
 The harness regression tests run in the existing Linux/macOS CI matrix:
 
 ```sh
-python3 -m unittest discover -s scripts -p 'test_*.py'
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
 They cover duration/terminal parsing, preservation of unrelated sandboxes,
